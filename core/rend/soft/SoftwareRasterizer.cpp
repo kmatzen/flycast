@@ -70,10 +70,13 @@ float wrapCoordinate(float coordinate, bool clamp, bool flip)
 		float fraction = coordinate - period;
 		const bool periodFitsInteger = period > static_cast<float>(std::numeric_limits<s64>::min())
 				&& period < static_cast<float>(std::numeric_limits<s64>::max());
-		const bool oddPeriod = periodFitsInteger
-				? (static_cast<s64>(period) & 1) != 0
-				: std::fmod(std::abs(period), 2.f) >= 1.f;
-		if (oddPeriod)
+		if (periodFitsInteger)
+		{
+			if ((static_cast<s64>(period) & 1) != 0)
+				fraction = 1.f - fraction;
+			return fraction;
+		}
+		if (std::fmod(std::abs(period), 2.f) >= 1.f)
 			fraction = 1.f - fraction;
 		return fraction;
 	}
