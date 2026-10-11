@@ -1,5 +1,6 @@
 #include "SoftwareRenderer.h"
 
+#include "HybridTileRenderer.h"
 #include "SoftwareRasterizer.h"
 #include "cfg/option.h"
 #include "hw/pvr/Renderer_if.h"
@@ -15,9 +16,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace rend::soft {
 namespace {
@@ -192,6 +197,18 @@ public:
 		{
 			passRegions.push_back(getPassRegions(pass));
 			tileCount = std::max(tileCount, passRegions.back().size());
+		}
+		if (tryRenderHybrid(width, height, passRegions, frameStore))
+		{
+			rawFrameStore = frameStore;
+			presentationBuffer = frameStore;
+			presentationWidth = width;
+			presentationHeight = height;
+			activeCoverageMask = nullptr;
+			frameReady = true;
+			frameAspectRatio = getOutputFramebufferAspectRatio();
+			clearLastFrame = false;
+			return true;
 		}
 		auto renderRegions = [&](size_t passIndex, const std::vector<RegionInfo>& regions)
 		{
@@ -508,6 +525,250 @@ private:
 		bool translucentModifierPresent;
 		bool punchThroughPresent;
 	};
+
+	static s32 hybridFixed(float value)
+	{
+		constexpr double scale = 16.;
+		constexpr double limit = static_cast<double>(1 << 26);
+		return static_cast<s32>(std::clamp(std::floor(value * scale + .5), -limit, limit));
+	}
+
+	static u32 packedColor(Color color)
+	{
+		u32 packed;
+		std::memcpy(&packed, &color, sizeof(packed));
+		return packed;
+	}
+
+	bool appendHybridTriangle(const PolyParam& poly, u32 ia, u32 ib, u32 ic,
+			const PipelineState& state, std::vector<hybrid::Triangle>& commands,
+			std::vector<u32>& textureAtlas,
+			std::unordered_map<const Color *, u32>& textureOffsets)
+	{
+		if (ia >= rendContext->verts.size() || ib >= rendContext->verts.size()
+				|| ic >= rendContext->verts.size())
+			return false;
+		const ::Vertex& sourceA = rendContext->verts[ia];
+		const ::Vertex& sourceB = rendContext->verts[ib];
+		const ::Vertex& sourceC = rendContext->verts[ic];
+		if (culled(poly, { sourceA.x, sourceA.y, sourceA.z },
+				{ sourceB.x, sourceB.y, sourceB.z }, { sourceC.x, sourceC.y, sourceC.z }))
+			return true;
+		Vertex vertices[3] { convertVertex(sourceA), convertVertex(sourceB), convertVertex(sourceC) };
+		const Vertex flatVertex = vertices[2];
+		s32 x[3] { hybridFixed(vertices[0].x), hybridFixed(vertices[1].x), hybridFixed(vertices[2].x) };
+		s32 y[3] { hybridFixed(vertices[0].y), hybridFixed(vertices[1].y), hybridFixed(vertices[2].y) };
+		auto edge = [&](u32 a, u32 b, u32 c) {
+			return (static_cast<s64>(x[b]) - x[a]) * (static_cast<s64>(y[c]) - y[a])
+					- (static_cast<s64>(y[b]) - y[a]) * (static_cast<s64>(x[c]) - x[a]);
+		};
+		const s64 area = edge(0, 1, 2);
+		if (area == 0)
+			return true;
+		if (area < 0)
+		{
+			std::swap(x[1], x[2]);
+			std::swap(y[1], y[2]);
+			std::swap(vertices[1], vertices[2]);
+		}
+		constexpr s32 sampleOffset = 8;
+		s32 minX = std::max(0, static_cast<s32>(std::ceil(
+				(std::min({ x[0], x[1], x[2] }) - sampleOffset) / 16.f)));
+		s32 minY = std::max(0, static_cast<s32>(std::ceil(
+				(std::min({ y[0], y[1], y[2] }) - sampleOffset) / 16.f)));
+		s32 maxX = std::min(static_cast<s32>(rasterizer->width()) - 1,
+				(std::max({ x[0], x[1], x[2] }) - sampleOffset) / 16);
+		s32 maxY = std::min(static_cast<s32>(rasterizer->height()) - 1,
+				(std::max({ y[0], y[1], y[2] }) - sampleOffset) / 16);
+		if (state.scissorEnabled)
+		{
+			minX = std::max(minX, state.scissorX0);
+			minY = std::max(minY, state.scissorY0);
+			maxX = std::min(maxX, state.scissorX1 - 1);
+			maxY = std::min(maxY, state.scissorY1 - 1);
+		}
+		if (minX > maxX || minY > maxY)
+			return true;
+
+		u32 textureOffset = 0;
+		u32 textureWidth = 0;
+		u32 textureHeight = 0;
+		if (state.texture)
+		{
+			textureWidth = state.texture.width;
+			textureHeight = state.texture.height;
+			auto [entry, inserted] = textureOffsets.emplace(state.texture.pixels,
+					static_cast<u32>(textureAtlas.size()));
+			textureOffset = entry->second;
+			if (inserted)
+			{
+				const size_t pixelCount = static_cast<size_t>(textureWidth) * textureHeight;
+				if (pixelCount > std::numeric_limits<u32>::max() - textureAtlas.size())
+					return false;
+				const size_t first = textureAtlas.size();
+				textureAtlas.resize(first + pixelCount);
+				std::memcpy(textureAtlas.data() + first, state.texture.pixels,
+						pixelCount * sizeof(Color));
+			}
+		}
+
+		u32 encodedState = hybrid::makeState(static_cast<u32>(state.depthMode), state.depthWrite,
+				static_cast<bool>(state.texture), state.bilinearFilter, state.useAlpha,
+				state.shadingInstruction, static_cast<u32>(state.srcBlend),
+				static_cast<u32>(state.dstBlend));
+		if (state.clampU) encodedState |= hybrid::ClampU;
+		if (state.clampV) encodedState |= hybrid::ClampV;
+		if (state.flipU) encodedState |= hybrid::FlipU;
+		if (state.flipV) encodedState |= hybrid::FlipV;
+		if (!state.texelSampleCenter) encodedState &= ~hybrid::TexelSampleCenter;
+		if (state.ignoreTextureAlpha) encodedState |= hybrid::IgnoreTextureAlpha;
+		if (state.alphaTest) encodedState |= hybrid::AlphaTest;
+		if (state.deferBlend) encodedState |= hybrid::Autosort;
+		hybrid::Triangle command {};
+		for (u32 i = 0; i < 3; ++i)
+		{
+			command.x[i] = x[i];
+			command.y[i] = y[i];
+			command.z[i] = vertices[i].z;
+			command.u[i] = vertices[i].u;
+			command.v[i] = vertices[i].v;
+			command.color[i] = packedColor(state.gouraud ? vertices[i].color : flatVertex.color);
+		}
+		command.textureOffset = textureOffset;
+		command.textureWidth = textureWidth;
+		command.textureHeight = textureHeight;
+		command.state = encodedState;
+		command.alphaReference = state.alphaReference;
+		command.minX = minX;
+		command.minY = minY;
+		command.maxX = maxX;
+		command.maxY = maxY;
+		commands.push_back(command);
+		return true;
+	}
+
+	bool appendHybridList(const std::vector<PolyParam>& list, u32 end,
+			bool punchThrough, bool sorting, std::vector<hybrid::Triangle>& commands,
+			std::vector<u32>& textureAtlas,
+			std::unordered_map<const Color *, u32>& textureOffsets)
+	{
+		end = std::min<u32>(end, list.size());
+		for (u32 i = 0; i < end; ++i)
+		{
+			const PolyParam& poly = list[i];
+			if (poly.count < 3)
+				continue;
+			PipelineState state;
+			configureState(poly, state, punchThrough, sorting);
+			state.deferBlend = sorting;
+			if (!state.fpuPixelCenter || state.excludeClip || state.useOffsetColor
+					|| state.textureSuperSample || state.texture.mipLevelCount > 1
+					|| state.trilinearFilter || state.fogMode != 2 || state.colorClamp
+					|| state.shadow || state.srcSelect || state.dstSelect || state.bumpMap
+					|| state.dither || poly.tsp1.full != static_cast<u32>(-1))
+			{
+				static u32 reports = 0;
+				if (std::getenv("FLYCAST_HYBRID_TRACE") != nullptr && reports++ < 40)
+					std::fprintf(stderr, "HYBRID polygon fpu=%u clip=%u offset=%u super=%u mip=%u tri=%u fog=%u clamp=%u shadow=%u src=%u dst=%u bump=%u dither=%u volume=%08x\n",
+							state.fpuPixelCenter, state.excludeClip, state.useOffsetColor,
+							state.textureSuperSample, state.texture.mipLevelCount,
+							state.trilinearFilter, state.fogMode, state.colorClamp,
+							state.shadow, state.srcSelect, state.dstSelect, state.bumpMap,
+							state.dither, poly.tsp1.full);
+				return false;
+			}
+			if (poly.first >= rendContext->idx.size())
+				return false;
+			const u32 count = std::min<u32>(poly.count, rendContext->idx.size() - poly.first);
+			for (u32 vertex = 2; vertex < count; ++vertex)
+			{
+				u32 a = rendContext->idx[poly.first + vertex - 2];
+				u32 b = rendContext->idx[poly.first + vertex - 1];
+				const u32 c = rendContext->idx[poly.first + vertex];
+				if (vertex & 1)
+					std::swap(a, b);
+				if (!appendHybridTriangle(poly, a, b, c, state, commands,
+						textureAtlas, textureOffsets))
+					return false;
+			}
+		}
+		return true;
+	}
+
+	bool tryRenderHybrid(u32 width, u32 height,
+			const std::vector<std::vector<RegionInfo>>& passRegions,
+			std::vector<Color>& frameStore)
+	{
+		const bool trace = std::getenv("FLYCAST_HYBRID_TRACE") != nullptr;
+		auto reject = [trace](const char *reason) {
+			static u32 reports = 0;
+			if (trace && reports++ < 120)
+				std::fprintf(stderr, "HYBRID reject %s\n", reason);
+			return false;
+		};
+		if (std::getenv("FLYCAST_HYBRID_SOFT") == nullptr)
+			return false;
+		if (rendContext->isRTT)
+			return reject("render-to-texture");
+		if (rendContext->render_passes.size() != 1 || passRegions.size() != 1)
+			return reject("multiple-passes");
+		if (config::EmulateFramebuffer)
+			return reject("framebuffer-emulation");
+		const RenderPass& pass = rendContext->render_passes[0];
+		if (pass.mvo_count != 0 || pass.mvo_tr_count != 0)
+			return reject("modifier-volumes");
+		const bool autosort = !config::PerStripSorting && pass.autosort;
+		const bool hasOpaque = pass.op_count != 0;
+		const bool hasPunch = pass.pt_count != 0;
+		const bool hasTranslucent = pass.tr_count != 0;
+		if (!passRegions[0].empty())
+		{
+			std::vector<u8> coverage(static_cast<size_t>(width) * height);
+			for (const RegionInfo& region : passRegions[0])
+			{
+				if (!region.flushAccumulate || (hasOpaque && !region.opaquePresent)
+						|| (hasPunch && !region.punchThroughPresent)
+						|| (hasTranslucent && (!region.translucentPresent
+								|| region.autosort != autosort)))
+					return reject("partial-region-lists");
+				const s32 x0 = std::clamp<s32>(region.x0, 0, width);
+				const s32 y0 = std::clamp<s32>(region.y0, 0, height);
+				const s32 x1 = std::clamp<s32>(region.x1, 0, width);
+				const s32 y1 = std::clamp<s32>(region.y1, 0, height);
+				for (s32 y = y0; y < y1; ++y)
+					std::fill(coverage.begin() + static_cast<size_t>(y) * width + x0,
+							coverage.begin() + static_cast<size_t>(y) * width + x1, 1);
+			}
+			if (std::find(coverage.begin(), coverage.end(), 0) != coverage.end())
+				return reject("partial-region-coverage");
+		}
+
+		std::vector<hybrid::Triangle> commands;
+		std::vector<u32> textureAtlas { 0xffffffffu };
+		std::unordered_map<const Color *, u32> textureOffsets;
+		if (!appendHybridList(rendContext->global_param_op, pass.op_count, false, false,
+				commands, textureAtlas, textureOffsets)
+				|| !appendHybridList(rendContext->global_param_pt, pass.pt_count, true, false,
+						commands, textureAtlas, textureOffsets)
+				|| !appendHybridList(rendContext->global_param_tr, pass.tr_count, false, autosort,
+						commands, textureAtlas, textureOffsets)
+				|| commands.empty())
+			return reject("unsupported-polygon-state");
+		std::vector<u32> initial(frameStore.size());
+		std::memcpy(initial.data(), frameStore.data(), frameStore.size() * sizeof(Color));
+		std::vector<u32> output;
+		std::vector<float> depth;
+		const hybrid::Frame frame { width, height, &commands, &textureAtlas, &initial };
+		hybrid::Timing timing;
+		if (!hybrid::render(frame, output, depth, &timing) || output.size() != frameStore.size())
+			return reject("backend-failure");
+		std::memcpy(frameStore.data(), output.data(), output.size() * sizeof(u32));
+		if (trace)
+			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",
+					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,
+					timing.gpuMilliseconds, timing.readbackMilliseconds);
+		return true;
+	}
 
 	std::vector<RegionInfo> getPassRegions(const RenderPass& pass) const
 	{

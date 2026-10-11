@@ -275,6 +275,28 @@ int main() {
         return 1;
     }
 
+  {
+    const u32 colors[]{0x80602010u, 0x804080c0u, 0x80c04020u};
+    const float depths[]{.8f, .2f, .5f};
+    std::vector<Triangle> commands;
+    for (u32 i = 0; i < 3; ++i) {
+      Triangle command = testTriangle(
+          colors[i], depths[i],
+          rend::soft::hybrid::makeState(6, false, false, false, true, 0, 4,
+                                        5) |
+              rend::soft::hybrid::Autosort);
+      commands.push_back(command);
+    }
+    u32 expected = 0xff000000u;
+    expected = blend(colors[1], expected, 4, 5);
+    expected = blend(colors[2], expected, 4, 5);
+    expected = blend(colors[0], expected, 4, 5);
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != expected || actualDepths[0] != 0.f)
+      return 1;
+  }
+
   const std::vector<u32> atlas{0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
                                0xff0000ffu, 0xff00ff00u, 0xff00ff00u,
                                0xff00ff00u, 0xff00ff00u};

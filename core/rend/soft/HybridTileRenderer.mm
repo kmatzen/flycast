@@ -18,7 +18,7 @@ struct Constants {
   u32 width;
   u32 height;
   u32 tilesX;
-  u32 reserved;
+  u32 useInitialColor;
 };
 
 static_assert(sizeof(Constants) == 16);
@@ -49,7 +49,7 @@ struct Constants {
     uint width;
     uint height;
     uint tilesX;
-    uint reserved;
+    uint useInitialColor;
 };
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -227,16 +227,23 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         device uint *colors [[buffer(3)]], device float *depths [[buffer(4)]],
         const device uint *texture [[buffer(5)]],
         constant Constants& constants [[buffer(6)]],
+        device atomic_uint *overflow [[buffer(7)]],
         uint2 pixel [[thread_position_in_grid]])
 {
     if (pixel.x >= constants.width || pixel.y >= constants.height)
         return;
     const uint offset = pixel.y * constants.width + pixel.x;
     const uint tile = (pixel.y / 32) * constants.tilesX + pixel.x / 32;
-    uint color = 0xff000000u;
+    uint color = constants.useInitialColor != 0 ? colors[offset] : 0xff000000u;
     float depth = 0.0f;
     const int sx = int(pixel.x) * 16 + 8;
     const int sy = int(pixel.y) * 16 + 8;
+    constexpr uint MaxSortedFragments = 64;
+    uint sortedColors[MaxSortedFragments];
+    float sortedDepths[MaxSortedFragments];
+    uint sortedStates[MaxSortedFragments];
+    uint sortedSequences[MaxSortedFragments];
+    uint sortedCount = 0;
     for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
         const Triangle t = triangles[tileReferences[i]];
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
@@ -282,6 +289,27 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             continue;
         if ((t.state & (1u << 13)) != 0)
             source |= 0xff000000u;
+        if ((t.state & (1u << 22)) != 0) {
+            if (sortedCount == MaxSortedFragments) {
+                atomic_store_explicit(overflow, 1u, memory_order_relaxed);
+                continue;
+            }
+            uint position = sortedCount++;
+            while (position != 0 && (z < sortedDepths[position - 1]
+                    || (z == sortedDepths[position - 1]
+                            && tileReferences[i] < sortedSequences[position - 1]))) {
+                sortedColors[position] = sortedColors[position - 1];
+                sortedDepths[position] = sortedDepths[position - 1];
+                sortedStates[position] = sortedStates[position - 1];
+                sortedSequences[position] = sortedSequences[position - 1];
+                --position;
+            }
+            sortedColors[position] = source;
+            sortedDepths[position] = z;
+            sortedStates[position] = t.state;
+            sortedSequences[position] = tileReferences[i];
+            continue;
+        }
         if ((t.state & (1u << 3)) != 0)
             depth = z;
         const uint sourceFactor = (t.state >> 16) & 7;
@@ -292,6 +320,16 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             color = sourceAlphaBlend(source, color);
         else
             color = blend(source, color, sourceFactor, destinationFactor);
+    }
+    for (uint i = 0; i < sortedCount; ++i) {
+        const uint sourceFactor = (sortedStates[i] >> 16) & 7;
+        const uint destinationFactor = (sortedStates[i] >> 19) & 7;
+        if (sourceFactor == 1 && destinationFactor == 0)
+            color = sortedColors[i];
+        else if (sourceFactor == 4 && destinationFactor == 5)
+            color = sourceAlphaBlend(sortedColors[i], color);
+        else
+            color = blend(sortedColors[i], color, sourceFactor, destinationFactor);
     }
     colors[offset] = color;
     depths[offset] = depth;
@@ -364,7 +402,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 22) != 0)
+        triangle.alphaReference > 255 || (triangle.state >> 23) != 0)
       return false;
     const s64 area = (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
                          (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -
@@ -402,6 +440,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   }
 
   const size_t pixelCount = static_cast<size_t>(frame.width) * frame.height;
+  if (frame.initialColors != nullptr &&
+      frame.initialColors->size() != pixelCount)
+    return false;
   id<MTLBuffer> triangleBuffer = makeBuffer(metal.device, *frame.triangles);
   id<MTLBuffer> offsetBuffer = makeBuffer(metal.device, tileOffsets);
   id<MTLBuffer> referenceBuffer = makeBuffer(metal.device, tileReferences);
@@ -412,10 +453,19 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   id<MTLBuffer> depthBuffer =
       [metal.device newBufferWithLength:pixelCount * sizeof(float)
                                 options:MTLResourceStorageModeShared];
+  id<MTLBuffer> overflowBuffer =
+      [metal.device newBufferWithLength:sizeof(u32)
+                                options:MTLResourceStorageModeShared];
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
-      textureBuffer == nil || colorBuffer == nil || depthBuffer == nil)
+      textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
+      overflowBuffer == nil)
     return false;
-  const Constants constants{frame.width, frame.height, tilesX, 0};
+  *static_cast<u32 *>(overflowBuffer.contents) = 0;
+  if (frame.initialColors != nullptr)
+    std::memcpy(colorBuffer.contents, frame.initialColors->data(),
+                pixelCount * sizeof(u32));
+  const Constants constants{frame.width, frame.height, tilesX,
+                            frame.initialColors != nullptr ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
@@ -428,6 +478,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:depthBuffer offset:0 atIndex:4];
   [encoder setBuffer:textureBuffer offset:0 atIndex:5];
   [encoder setBytes:&constants length:sizeof(constants) atIndex:6];
+  [encoder setBuffer:overflowBuffer offset:0 atIndex:7];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
   [encoder endEncoding];
@@ -436,6 +487,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [command waitUntilCompleted];
   const auto gpuEnd = std::chrono::steady_clock::now();
   if (command.status != MTLCommandBufferStatusCompleted)
+    return false;
+  if (*static_cast<const u32 *>(overflowBuffer.contents) != 0)
     return false;
 
   const auto readbackStart = std::chrono::steady_clock::now();

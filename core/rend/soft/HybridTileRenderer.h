@@ -22,6 +22,7 @@ enum StateBits : u32 {
   ShadingInstructionShift = 14,
   SourceBlendShift = 16,
   DestinationBlendShift = 19,
+  Autosort = 1 << 22,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -63,6 +64,8 @@ struct Frame {
   const std::vector<Triangle> *triangles = nullptr;
   // Concatenated RGBA8 texture levels. Triangle offsets index u32 texels.
   const std::vector<u32> *texture = nullptr;
+  // Optional starting accumulation buffer. Null starts at opaque black.
+  const std::vector<u32> *initialColors = nullptr;
 };
 
 struct Timing {
