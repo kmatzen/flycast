@@ -415,6 +415,7 @@ Renderer* rend_OITVulkan();
 Renderer* rend_DirectX9();
 Renderer* rend_DirectX11();
 Renderer* rend_OITDirectX11();
+Renderer* rend_software();
 
 static void rend_create_renderer()
 {
@@ -423,7 +424,9 @@ static void rend_create_renderer()
 #else
 	switch (config::RendererType)
 	{
-	default:
+	case RenderType::Software:
+		renderer = rend_software();
+		break;
 #ifdef USE_OPENGL
 	case RenderType::OpenGL:
 		renderer = rend_GLES2();
@@ -455,6 +458,13 @@ static void rend_create_renderer()
 		renderer = rend_OITDirectX11();
 		break;
 #endif
+	default:
+#ifdef USE_OPENGL
+		renderer = rend_GLES2();
+#else
+		renderer = rend_norend();
+#endif
+		break;
 	}
 #endif
 }
@@ -546,10 +556,18 @@ void rend_start_render()
 	ctx->rend.isRTT = (FB_W_SOF1 & 0x1000000) != 0;
 	ctx->rend.fb_W_SOF1 = FB_W_SOF1;
 	ctx->rend.fb_W_CTRL.full = FB_W_CTRL.full;
+	ctx->rend.fb_R_CTRL.full = FB_R_CTRL.full;
+	ctx->rend.fb_R_SIZE.full = FB_R_SIZE.full;
+	ctx->rend.fb_R_SOF1 = FB_R_SOF1;
+	ctx->rend.fb_R_SOF2 = FB_R_SOF2;
+	ctx->rend.spg_control.full = SPG_CONTROL.full;
+	ctx->rend.spg_status.full = SPG_STATUS.full;
+	ctx->rend.vo_control.full = VO_CONTROL.full;
 
 	ctx->rend.globClip.x = (TA_GLOB_TILE_CLIP.tile_x_num + 1) * 32;
 	ctx->rend.globClip.y = (TA_GLOB_TILE_CLIP.tile_y_num + 1) * 32;
 	ctx->rend.scaler_ctl = SCALER_CTL;
+	ctx->rend.y_coeff = Y_COEFF;
 	ctx->rend.fbClip.origin.x = FB_X_CLIP.min;
 	ctx->rend.fbClip.origin.y = FB_Y_CLIP.min;
 	ctx->rend.fbClip.size.x = FB_X_CLIP.max - FB_X_CLIP.min + 1;
@@ -558,6 +576,19 @@ void rend_start_render()
 
 	ctx->rend.fog_clamp_min = FOG_CLAMP_MIN;
 	ctx->rend.fog_clamp_max = FOG_CLAMP_MAX;
+	ctx->rend.fog_col_ram = FOG_COL_RAM;
+	ctx->rend.fog_col_vert = FOG_COL_VERT;
+	ctx->rend.fog_density = FOG_DENSITY;
+	std::copy_n(FOG_TABLE, std::size(ctx->rend.fog_table), ctx->rend.fog_table);
+	ctx->rend.pt_alpha_ref = PT_ALPHA_REF;
+	ctx->rend.half_offset = HALF_OFFSET;
+	ctx->rend.fpu_cull_val = FPU_CULL_VAL;
+	ctx->rend.fpu_shad_scale = FPU_SHAD_SCALE;
+	ctx->rend.region_base = REGION_BASE;
+	ctx->rend.fpu_param_cfg = FPU_PARAM_CFG;
+	ctx->rend.isp_feed_cfg = ISP_FEED_CFG;
+	ctx->rend.vo_border_col = VO_BORDER_COL;
+	snapshotRegionArray(ctx->rend);
 
 	if (!ctx->rend.isRTT)
 	{

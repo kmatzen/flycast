@@ -167,6 +167,7 @@ public:
 		// In 2-volume mode, only area 0 can be handled on the gpu.
 		// Enabling texture upscaling or dumping also disables this mode.
 		return (tcw.PixelFmt == PixelPal4 || tcw.PixelFmt == PixelPal8)
+				&& !isSoftware(config::RendererType)
 				&& config::TextureUpscale == 1
 				&& !config::DumpTextures
 				&& !custom_texture.enabled()
@@ -292,7 +293,9 @@ void WriteFramebuffer(u32 width, u32 height, const u8 *data, u32 dstAddr, FB_W_C
 
 // width and height in pixels. linestride in bytes
 template<int Red = 0, int Green = 1, int Blue = 2, int Alpha = 3>
-void WriteTextureToVRam(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip);
+void WriteTextureToVRam(u32 width, u32 height, const u8 *data, u16 *dst,
+		FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip,
+		bool hardwareQuantization = false);
 
 static inline void MakeFogTexture(u8 *tex_data)
 {

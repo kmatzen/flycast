@@ -24,7 +24,8 @@ enum RenderAPI {
 	OpenGL,
 	Vulkan,
 	DirectX9,
-	DirectX11
+	DirectX11,
+	SoftwareAPI
 };
 
 void gui_settings_video()
@@ -62,6 +63,10 @@ void gui_settings_video()
 		renderApi = DirectX11;
 		perPixel = true;
 		break;
+	case RenderType::Software:
+		renderApi = SoftwareAPI;
+		perPixel = true;
+		break;
 	}
 
 	constexpr int apiCount = 0
@@ -72,7 +77,7 @@ void gui_settings_video()
 			+ 1
 		#endif
 		#ifdef USE_OPENGL
-			+ 1
+			+ 2
 		#endif
 		#ifdef USE_DX11
 			+ 1
@@ -87,6 +92,8 @@ void gui_settings_video()
 			ImGui::Columns(apiCount, "renderApi", false);
 #ifdef USE_OPENGL
 			ImGui::RadioButton("OpenGL", &renderApi, OpenGL);
+			ImGui::NextColumn();
+			ImGui::RadioButton(T("Software"), &renderApi, SoftwareAPI);
 			ImGui::NextColumn();
 #endif
 #ifdef USE_VULKAN
@@ -434,5 +441,8 @@ void gui_settings_video()
     case DirectX11:
     	config::RendererType = perPixel ? RenderType::DirectX11_OIT : RenderType::DirectX11;
     	break;
+	case SoftwareAPI:
+		config::RendererType = RenderType::Software;
+		break;
     }
 }

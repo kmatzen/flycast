@@ -382,6 +382,13 @@ union ISP_BACKGND_D_type
 {
 	u32 i;
 	f32 f;
+
+	f32 get() const
+	{
+		ISP_BACKGND_D_type value = *this;
+		value.i &= ~0xfu;
+		return value.f;
+	}
 };
 
 union ISP_BACKGND_T_type

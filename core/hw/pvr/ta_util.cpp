@@ -259,8 +259,14 @@ void sortPolyParams(std::vector<PolyParam>& polys, int first, int end, rend_cont
 
 void getRegionTileAddrAndSize(u32& address, u32& size)
 {
-	address = REGION_BASE;
-	const bool type1_tile = ((FPU_PARAM_CFG >> 21) & 1) == 0;
+	getRegionTileAddrAndSize(address, size, REGION_BASE, FPU_PARAM_CFG);
+}
+
+void getRegionTileAddrAndSize(u32& address, u32& size, u32 regionBase,
+		u32 fpuParamCfg)
+{
+	address = regionBase;
+	const bool type1_tile = ((fpuParamCfg >> 21) & 1) == 0;
 	size = (type1_tile ? 5 : 6) * 4;
 	bool empty_first_region = true;
 	for (int i = type1_tile ? 4 : 5; i > 0; i--)
@@ -276,6 +282,26 @@ void getRegionTileAddrAndSize(u32& address, u32& size)
 	if (tile.PreSort)
 		// Windows CE weirdness
 		size = 6 * 4;
+}
+
+void snapshotRegionArray(rend_context& context)
+{
+	u32 address;
+	getRegionTileAddrAndSize(address, context.region_tile_size,
+			context.region_base, context.fpu_param_cfg);
+	context.region_array.clear();
+	const u32 wordCount = context.region_tile_size / sizeof(u32);
+	for (int i = 0; i < 3000; ++i, address += context.region_tile_size)
+	{
+		RegionArrayEntry entry;
+		for (u32 word = 0; word < wordCount; ++word)
+			entry.words[word] = pvr_read32p<u32>(address + word * sizeof(u32));
+		context.region_array.push_back(entry);
+		RegionArrayTile tile;
+		tile.full = entry.words[0];
+		if (tile.LastRegion)
+			break;
+	}
 }
 
 int getTAContextAddresses(u32 *addresses)
@@ -535,4 +561,3 @@ void makeIndex(std::vector<PolyParam>& polys, int first, int end, bool merge, re
 		}
 	}
 }
-

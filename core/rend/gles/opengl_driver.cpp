@@ -71,6 +71,10 @@ void OpenGLDriver::renderDrawData(ImDrawData* drawData, bool gui_open)
 
 void OpenGLDriver::present()
 {
+	// The software renderer produces pixels off the UI thread. Draw its retained
+	// frame here, with the window's GL context current, immediately before swap.
+	if (frameRendered && renderer != nullptr && isSoftware(config::RendererType))
+		renderer->RenderLastFrame();
 	if (frameRendered)
 		GLGraphicsContext::Instance()->swap();
 	frameRendered = false;

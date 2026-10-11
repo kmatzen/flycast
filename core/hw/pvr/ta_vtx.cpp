@@ -1163,17 +1163,22 @@ private:
 	}
 };
 
-static void getRegionTileClipping(u32& xmin, u32& xmax, u32& ymin, u32& ymax);
-static void getRegionSettings(int passNumber, RenderPass& pass);
+static void getRegionTileClipping(const rend_context& context,
+		u32& xmin, u32& xmax, u32& ymin, u32& ymax);
+static void getRegionSettings(const rend_context& context, int passNumber,
+		RenderPass& pass);
 
 static void parseRenderPass(RenderPass& pass, const RenderPass& previousPass, rend_context& ctx, bool primRestart)
 {
 	const bool perPixel = config::RendererType == RenderType::OpenGL_OIT
 			|| config::RendererType == RenderType::DirectX11_OIT
-			|| config::RendererType == RenderType::Vulkan_OIT;
+			|| config::RendererType == RenderType::Vulkan_OIT
+			|| config::RendererType == RenderType::Software;
 	const bool mergeTranslucent = config::PerStripSorting || perPixel;
 
-	if (config::RenderResolution > 480 && !config::EmulateFramebuffer && config::FixUpscaleBleedingEdge)
+	if (config::RenderResolution > 480 && !config::EmulateFramebuffer
+			&& !(ctx.isRTT && isSoftware(config::RendererType))
+			&& config::FixUpscaleBleedingEdge)
 	{
 		fix_texture_bleeding(ctx.global_param_op, previousPass.op_count, pass.op_count, ctx);
 		fix_texture_bleeding(ctx.global_param_pt, previousPass.pt_count, pass.pt_count, ctx);
@@ -1210,7 +1215,8 @@ static void parseRenderPass(RenderPass& pass, const RenderPass& previousPass, re
 void setTileClipping(rend_context& ctx)
 {
 	u32 xmax, ymax;
-	getRegionTileClipping((u32&)ctx.tileClip.origin.x, xmax, (u32&)ctx.tileClip.origin.y, ymax);
+	getRegionTileClipping(ctx, (u32&)ctx.tileClip.origin.x, xmax,
+			(u32&)ctx.tileClip.origin.y, ymax);
 	// intersect with TA global clipping
 	xmax = std::min<u32>(xmax + 32, ctx.globClip.x);
 	ymax = std::min<u32>(ymax + 32, ctx.globClip.y);
@@ -1262,7 +1268,8 @@ static void ta_parse_vdrc(TA_context* ctx, bool primRestart)
 		{
 			vd_rc.render_passes.emplace_back();
 			RenderPass& render_pass = vd_rc.render_passes.back();
-			getRegionSettings(pass, render_pass);
+			render_pass.region_array_pass = pass;
+			getRegionSettings(vd_rc, pass, render_pass);
 			render_pass.op_count = vd_rc.global_param_op.size();
 			render_pass.pt_count = vd_rc.global_param_pt.size();
 			render_pass.tr_count = vd_rc.global_param_tr.size();
@@ -1615,9 +1622,12 @@ void FillBGP(TA_context* ctx)
 		vertex_ptr += strip_vs;
 	}
 
-	// Apply a negative 1e-6 bias since the background plane is clipping too much
-	// (Fixes Xtreme Sports, Blue Stinger (JP) and many WinCE games using yuv FMV)
-	float bg_depth = std::max(ISP_BACKGND_D.f - 1e-6f, 1e-11f);
+	// Holly discards the low four bits of the IEEE depth parameter. The legacy
+	// GPU renderers retain a small host-depth workaround, while the software
+	// renderer uses the exact truncated value.
+	const float hardwareDepth = ISP_BACKGND_D.get();
+	const float bg_depth = isSoftware(config::RendererType) ? hardwareDepth
+			: std::max(hardwareDepth - 1e-6f, 1e-11f);
 	cv[0].z = bg_depth;
 	cv[1].z = bg_depth;
 	cv[2].z = bg_depth;
@@ -1661,29 +1671,22 @@ void FillBGP(TA_context* ctx)
 	}
 }
 
-static void getRegionTileClipping(u32& xmin, u32& xmax, u32& ymin, u32& ymax)
+static void getRegionTileClipping(const rend_context& context,
+		u32& xmin, u32& xmax, u32& ymin, u32& ymax)
 {
 	xmin = 20;
 	xmax = 0;
 	ymin = 15;
 	ymax = 0;
 
-	u32 addr;
-	u32 tile_size;
-	getRegionTileAddrAndSize(addr, tile_size);
-
 	RegionArrayTile tile;
-	int maxTiles = 3000;
-	do {
-		tile.full = pvr_read32p<u32>(addr);
+	for (const RegionArrayEntry& entry : context.region_array) {
+		tile.full = entry.words[0];
 		xmin = std::min(xmin, tile.X);
 		xmax = std::max(xmax, tile.X);
 		ymin = std::min(ymin, tile.Y);
 		ymax = std::max(ymax, tile.Y);
-		addr += tile_size;
-	} while (!tile.LastRegion && --maxTiles >= 0);
-	if (maxTiles < 0)
-		WARN_LOG(PVR, "getRegionTileClipping overflow");
+	}
 
 	xmin *= 32;
 	xmax *= 32;
@@ -1691,34 +1694,42 @@ static void getRegionTileClipping(u32& xmin, u32& xmax, u32& ymin, u32& ymax)
 	ymax *= 32;
 }
 
-static void getRegionSettings(int passNumber, RenderPass& pass)
+static void getRegionSettings(const rend_context& context, int passNumber,
+		RenderPass& pass)
 {
-	u32 addr;
-	u32 tileSize;
-	getRegionTileAddrAndSize(addr, tileSize);
-	addr += passNumber * tileSize;
+	if (passNumber < 0 || static_cast<size_t>(passNumber) >= context.region_array.size())
+	{
+		WARN_LOG(PVR, "Missing region array entry for pass %d", passNumber);
+		pass.autosort = ((context.fpu_param_cfg >> 21) & 1) == 0
+				&& (context.isp_feed_cfg & 1) == 0;
+		pass.z_clear = true;
+		pass.mv_op_tr_shared = false;
+		return;
+	}
+	const RegionArrayEntry& entry = context.region_array[passNumber];
 	RegionArrayTile tile;
-	tile.full = pvr_read32p<u32>(addr);
+	tile.full = entry.words[0];
 
-	if (((FPU_PARAM_CFG >> 21) & 1) == 0)
+	if (((context.fpu_param_cfg >> 21) & 1) == 0)
 		// Type 1 region header type
-		pass.autosort = (ISP_FEED_CFG & 1) == 0;
+		pass.autosort = (context.isp_feed_cfg & 1) == 0;
 	else
 		// Type 2
 		pass.autosort = !tile.PreSort;
 	pass.z_clear = !tile.NoZClear;
-	pass.mv_op_tr_shared = pvr_read32p<u32>(addr + 8) == pvr_read32p<u32>(addr + 16);
+	pass.mv_op_tr_shared = entry.words[2] == entry.words[4];
 }
 
 void rend_context::newRenderPass()
 {
 	RenderPass pass;
+	pass.region_array_pass = render_passes.size();
 	pass.op_count = global_param_op.size();
 	pass.tr_count = global_param_tr.size();
 	pass.pt_count = global_param_pt.size();
 	pass.mvo_count = global_param_mvo.size();
 	pass.mvo_tr_count = global_param_mvo_tr.size();
 	pass.sorted_tr_count = 0;
-	getRegionSettings(render_passes.size(), pass);
+	getRegionSettings(*this, render_passes.size(), pass);
 	render_passes.push_back(pass);
 }
