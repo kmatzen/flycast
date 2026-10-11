@@ -366,6 +366,22 @@ bool SoftwareRasterizer::cullTriangle(u32 mode, float threshold, const Vertex& a
 Color SoftwareRasterizer::blend(Color source, Color destination, BlendFactor sourceFactor,
 		BlendFactor destinationFactor)
 {
+	if (sourceFactor == BlendFactor::One && destinationFactor == BlendFactor::Zero)
+		return source;
+	if (sourceFactor == BlendFactor::Zero && destinationFactor == BlendFactor::One)
+		return destination;
+	if (sourceFactor == BlendFactor::SrcAlpha
+			&& destinationFactor == BlendFactor::OneMinusSrcAlpha)
+	{
+		const float sourceAlpha = source.a / 255.f;
+		const float destinationAlpha = 1.f - sourceAlpha;
+		return {
+			clampByte(source.r * sourceAlpha + destination.r * destinationAlpha),
+			clampByte(source.g * sourceAlpha + destination.g * destinationAlpha),
+			clampByte(source.b * sourceAlpha + destination.b * destinationAlpha),
+			clampByte(source.a * sourceAlpha + destination.a * destinationAlpha),
+		};
+	}
 	const auto sf = factor(sourceFactor, source, destination, true);
 	const auto df = factor(destinationFactor, source, destination, false);
 	return {
