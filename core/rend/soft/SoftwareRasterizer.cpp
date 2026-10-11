@@ -1051,6 +1051,21 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 		prepareMipGradient(state.useArea1VertexData || state.area1 == nullptr
 				? state : *state.area1, 1),
 	};
+	const float vertexZ[3] {
+		vertices[0].z, vertices[1].z, vertices[2].z,
+	};
+	const float vertexUZ[2][3] {
+		{ vertices[0].u * vertexZ[0], vertices[1].u * vertexZ[1],
+				vertices[2].u * vertexZ[2] },
+		{ vertices[0].u1 * vertexZ[0], vertices[1].u1 * vertexZ[1],
+				vertices[2].u1 * vertexZ[2] },
+	};
+	const float vertexVZ[2][3] {
+		{ vertices[0].v * vertexZ[0], vertices[1].v * vertexZ[1],
+				vertices[2].v * vertexZ[2] },
+		{ vertices[0].v1 * vertexZ[0], vertices[1].v1 * vertexZ[1],
+				vertices[2].v1 * vertexZ[2] },
+	};
 
 	auto rasterizeRow = [&](s32 y)
 	{
@@ -1156,35 +1171,29 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			float pvrD = 1.f;
 			if (fragmentState.texture)
 			{
-				const float vertexU0 = area1 ? vertices[0].u1 : vertices[0].u;
-				const float vertexU1 = area1 ? vertices[1].u1 : vertices[1].u;
-				const float vertexU2 = area1 ? vertices[2].u1 : vertices[2].u;
-				const float vertexV0 = area1 ? vertices[0].v1 : vertices[0].v;
-				const float vertexV1 = area1 ? vertices[1].v1 : vertices[1].v;
-				const float vertexV2 = area1 ? vertices[2].v1 : vertices[2].v;
+				const unsigned areaIndex = static_cast<unsigned>(area1);
 				auto projectedAt = [&](s32 sx, s32 sy) {
 					const float q0 = static_cast<float>(edge(points[1], points[2], sx, sy) * inverseArea);
 					const float q1 = static_cast<float>(edge(points[2], points[0], sx, sy) * inverseArea);
 					const float q2 = static_cast<float>(edge(points[0], points[1], sx, sy) * inverseArea);
-					const float q = vertices[0].z * q0 + vertices[1].z * q1 + vertices[2].z * q2;
-					const float uq = vertexU0 * vertices[0].z * q0
-						 + vertexU1 * vertices[1].z * q1 + vertexU2 * vertices[2].z * q2;
-					const float vq = vertexV0 * vertices[0].z * q0
-						 + vertexV1 * vertices[1].z * q1 + vertexV2 * vertices[2].z * q2;
+					const float q = vertexZ[0] * q0 + vertexZ[1] * q1 + vertexZ[2] * q2;
+					const float uq = vertexUZ[areaIndex][0] * q0
+						 + vertexUZ[areaIndex][1] * q1 + vertexUZ[areaIndex][2] * q2;
+					const float vq = vertexVZ[areaIndex][0] * q0
+						 + vertexVZ[areaIndex][1] * q1 + vertexVZ[areaIndex][2] * q2;
 					const float reciprocal = q == 0.f ? 0.f : 1.f / q;
 					return std::array<float, 5> {
 						uq * reciprocal, vq * reciprocal, q, uq, vq,
 					};
 				};
-				const float uq = vertexU0 * vertices[0].z * s0
-						+ vertexU1 * vertices[1].z * s1 + vertexU2 * vertices[2].z * s2;
-				const float vq = vertexV0 * vertices[0].z * s0
-						+ vertexV1 * vertices[1].z * s1 + vertexV2 * vertices[2].z * s2;
+				const float uq = vertexUZ[areaIndex][0] * s0
+						+ vertexUZ[areaIndex][1] * s1 + vertexUZ[areaIndex][2] * s2;
+				const float vq = vertexVZ[areaIndex][0] * s0
+						+ vertexVZ[areaIndex][1] * s1 + vertexVZ[areaIndex][2] * s2;
 				const float u = uq * inverseZ;
 				const float v = vq * inverseZ;
 				if (fragmentState.texture.mipLevelCount > 1)
 				{
-					const unsigned areaIndex = static_cast<unsigned>(area1);
 					const float denominator = shadeZ * shadeZ;
 					const float reciprocalDenominator = denominator == 0.f ? 0.f : 1.f / denominator;
 					if (mipGradients[areaIndex].valid)
@@ -1198,11 +1207,9 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 						const float duqDy = uqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
 						const float dvqDx = vqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
 						const float dvqDy = vqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
-						const float referenceQ = vertices[0].z;
-						const float referenceUQ = (area1 ? vertices[0].u1 : vertices[0].u)
-								* vertices[0].z;
-						const float referenceVQ = (area1 ? vertices[0].v1 : vertices[0].v)
-								* vertices[0].z;
+						const float referenceQ = vertexZ[0];
+						const float referenceUQ = vertexUZ[areaIndex][0];
+						const float referenceVQ = vertexVZ[areaIndex][0];
 						const float dxU = (duqDx * referenceQ - dqDx * referenceUQ)
 								* reciprocalDenominator * fragmentState.texture.width;
 						const float dxV = (dvqDx * referenceQ - dqDx * referenceVQ)
