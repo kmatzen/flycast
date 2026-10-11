@@ -5,7 +5,9 @@
 #include "hw/sh4/sh4_sched.h"
 #include "serialize.h"
 #include "oslib/i18n.h"
+extern "C" {
 #include <libchdr/cdrom.h>
+}
 
 Disc* chd_parse(const char* file, std::vector<u8> *digest);
 Disc* gdi_parse(const char* file, std::vector<u8> *digest);

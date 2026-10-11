@@ -5,7 +5,9 @@
 #include "hw/gdrom/gdrom_if.h"
 #include "hw/gdrom/gdromv3.h"
 #include "imgread/common.h"
+extern "C" {
 #include <libchdr/cdrom.h>
+}
 
 extern Disc *disc;
 
