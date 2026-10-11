@@ -1053,7 +1053,12 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				color.b = static_cast<u8>((color.b * fragmentState.shadeScale + 128) / 256);
 			};
 			scaleIntensityRgb(intensitySource);
-			const float fog = fogCoefficient(shadeZ, fragmentState.fogDensity, fragmentState.fogTable);
+			// Table fog is only consumed by lookup fog and lookup-fog alpha.
+			// Vertex fog uses the offset alpha, while fog mode 2 bypasses fog
+			// entirely, so avoid the exponent/mantissa lookup for those pixels.
+			const float fog = fragmentState.fogMode == 0 || fragmentState.fogMode == 3
+					? fogCoefficient(shadeZ, fragmentState.fogDensity, fragmentState.fogTable)
+					: 0.f;
 			if (fragmentState.fogMode == 3)
 			{
 				source.r = fragmentState.fogRamColor.r;
