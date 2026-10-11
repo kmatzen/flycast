@@ -1046,13 +1046,18 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			};
 			if (!fragmentState.useAlpha)
 				source.a = 255;
+			const bool needsIntensitySource = fragmentState.intensityShadow
+					&& (state.deferBlend ? state.shadow
+							: (!area1 && state.area1 == nullptr
+									&& (stencilBuffer_[offset] & 0x81) == 0x81));
 			Color intensitySource = source;
 			auto scaleIntensityRgb = [&](Color& color) {
 				color.r = static_cast<u8>((color.r * fragmentState.shadeScale + 128) / 256);
 				color.g = static_cast<u8>((color.g * fragmentState.shadeScale + 128) / 256);
 				color.b = static_cast<u8>((color.b * fragmentState.shadeScale + 128) / 256);
 			};
-			scaleIntensityRgb(intensitySource);
+			if (needsIntensitySource)
+				scaleIntensityRgb(intensitySource);
 			// Table fog is only consumed by lookup fog and lookup-fog alpha.
 			// Vertex fog uses the offset alpha, while fog mode 2 bypasses fog
 			// entirely, so avoid the exponent/mantissa lookup for those pixels.
@@ -1065,7 +1070,8 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				source.g = fragmentState.fogRamColor.g;
 				source.b = fragmentState.fogRamColor.b;
 				source.a = clampByte(fog * 255.f);
-				intensitySource = source;
+				if (needsIntensitySource)
+					intensitySource = source;
 			}
 			float pvrD = 1.f;
 			if (fragmentState.texture)
@@ -1199,20 +1205,24 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 					}
 				};
 				applyTexture(source);
-				applyTexture(intensitySource);
+				if (needsIntensitySource)
+					applyTexture(intensitySource);
 				if (fragmentState.useOffsetColor && !fragmentState.bumpMap)
 				{
 					const Color offsetColor { clampByte(interpolate(true, &Color::r)),
 						clampByte(interpolate(true, &Color::g)),
 						clampByte(interpolate(true, &Color::b)), 0 };
-					Color intensityOffset = offsetColor;
-					scaleIntensityRgb(intensityOffset);
 					source.r = clampByte(source.r + offsetColor.r);
 					source.g = clampByte(source.g + offsetColor.g);
 					source.b = clampByte(source.b + offsetColor.b);
-					intensitySource.r = clampByte(intensitySource.r + intensityOffset.r);
-					intensitySource.g = clampByte(intensitySource.g + intensityOffset.g);
-					intensitySource.b = clampByte(intensitySource.b + intensityOffset.b);
+					if (needsIntensitySource)
+					{
+						Color intensityOffset = offsetColor;
+						scaleIntensityRgb(intensityOffset);
+						intensitySource.r = clampByte(intensitySource.r + intensityOffset.r);
+						intensitySource.g = clampByte(intensitySource.g + intensityOffset.g);
+						intensitySource.b = clampByte(intensitySource.b + intensityOffset.b);
+					}
 				}
 			}
 			if (!state.deferBlend && !area1 && fragmentState.intensityShadow
@@ -1252,7 +1262,8 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			}
 			};
 			finishColor(source);
-			finishColor(intensitySource);
+			if (needsIntensitySource)
+				finishColor(intensitySource);
 			if (fragmentState.alphaTest && source.a < fragmentState.alphaReference)
 				continue;
 			if (fragmentState.alphaTest)
