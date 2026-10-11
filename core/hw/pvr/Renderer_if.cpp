@@ -557,6 +557,12 @@ void rend_start_render()
 	ctx->rend.fb_W_SOF1 = FB_W_SOF1;
 	ctx->rend.fb_W_CTRL.full = FB_W_CTRL.full;
 	ctx->rend.fb_R_CTRL.full = FB_R_CTRL.full;
+	ctx->rend.fb_R_SIZE.full = FB_R_SIZE.full;
+	ctx->rend.fb_R_SOF1 = FB_R_SOF1;
+	ctx->rend.fb_R_SOF2 = FB_R_SOF2;
+	ctx->rend.spg_control.full = SPG_CONTROL.full;
+	ctx->rend.spg_status.full = SPG_STATUS.full;
+	ctx->rend.vo_control.full = VO_CONTROL.full;
 
 	ctx->rend.globClip.x = (TA_GLOB_TILE_CLIP.tile_x_num + 1) * 32;
 	ctx->rend.globClip.y = (TA_GLOB_TILE_CLIP.tile_y_num + 1) * 32;

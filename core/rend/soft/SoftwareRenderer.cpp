@@ -83,11 +83,6 @@ BlendFactor convertBlend(u32 factor)
 	return static_cast<BlendFactor>(factor & 7);
 }
 
-DepthMode convertDepth(u32 mode)
-{
-	return static_cast<DepthMode>(mode & 7);
-}
-
 class SoftwareRenderer final : public Renderer
 {
 public:
@@ -180,7 +175,6 @@ public:
 			frameStore = std::move(previousFrameStore);
 		else
 			frameStore = rasterizer->colorBuffer();
-
 		matrices.CalcMatrices(rendContext, width, height);
 		std::vector<std::vector<RegionInfo>> passRegions;
 		passRegions.reserve(rendContext->render_passes.size());
@@ -235,12 +229,25 @@ public:
 							region.x0, region.y0, region.x1, region.y1);
 					passCommittedRegions.push_back(region);
 				}
+			if (regions.empty())
+			{
+				// With no usable region headers, preserve the full-target fallback
+				// promised below. Previously the lists rendered, but no accumulation
+				// pixels were ever committed to the local or VRAM frame store.
+				RegionInfo fullTarget { 0, 0,
+						static_cast<s32>(rasterizer->width()),
+						static_cast<s32>(rasterizer->height()), false, true,
+						pass.autosort, false, true, true, true, true, true };
+				rasterizer->flushColorRect(frameStore, fullTarget.x0, fullTarget.y0,
+						fullTarget.x1, fullTarget.y1);
+				passCommittedRegions.push_back(fullTarget);
+			}
 			// Hardware commits tiles as region-array passes complete. Writing here,
 			// rather than once after the whole render, lets a texture used by a
 			// later pass observe framebuffer feedback through the VRAM cache locks.
 			if (rendContext->isRTT)
 				writeFramebufferToVram(frameStore, passCommittedRegions);
-			else if (config::EmulateFramebuffer)
+			else
 				writeDisplayFramebufferToVram(frameStore, passCommittedRegions);
 			backgroundCoverageMask = nullptr;
 		};
@@ -274,30 +281,49 @@ public:
 		else
 		{
 			rawFrameStore = std::move(frameStore);
-			glm::ivec2 scaledSize;
-			Rect finalClip;
-			getWriteFBToVramParams(*rendContext, scaledSize, finalClip);
-			presentationWidth = scaledSize.x > 0 ? scaledSize.x : rasterizer->width();
-			presentationHeight = scaledSize.y > 0 ? scaledSize.y : rasterizer->height();
-			const bool filterY = rendContext->scaler_ctl.vscalefactor > 1024
-					&& presentationHeight < rasterizer->height();
-			const bool selectField = rendContext->scaler_ctl.interlace
-					&& rendContext->scaler_ctl.vscalefactor == 2048;
-			std::vector<Color> scaledFrameStore = SoftwareRasterizer::scaleFramebufferForOutput(
-					rawFrameStore, rasterizer->width(), rasterizer->height(),
-					presentationWidth, presentationHeight, filterY,
-					static_cast<u8>(rendContext->y_coeff),
-					static_cast<u8>(rendContext->y_coeff >> 8), selectField,
-					rendContext->scaler_ctl.fieldselect != 0,
-					rendContext->scaler_ctl.hscale);
-			presentationBuffer = SoftwareRasterizer::prepareFramebufferForDisplay(scaledFrameStore,
-					presentationWidth, presentationHeight,
-					rendContext->fb_W_CTRL.fb_dither,
-					rendContext->fb_W_CTRL.fb_packmode,
-					rendContext->fb_W_CTRL.fb_kval,
-					rendContext->fb_W_CTRL.fb_alpha_threshold,
-					rendContext->fb_R_CTRL.fb_depth,
-					static_cast<u8>(rendContext->fb_R_CTRL.fb_concat));
+			FramebufferInfo info;
+			// Render jobs may execute after the emulated CPU has already begun
+			// programming the following frame. Scan out using the register image
+			// captured with this STARTRENDER, never a mixture of later live state.
+			info.fb_r_size = rendContext->fb_R_SIZE;
+			info.fb_r_ctrl = rendContext->fb_R_CTRL;
+			info.spg_control = rendContext->spg_control;
+			info.spg_status = rendContext->spg_status;
+			info.fb_r_sof1 = rendContext->fb_R_SOF1;
+			info.fb_r_sof2 = rendContext->fb_R_SOF2;
+			info.vo_control = rendContext->vo_control;
+			info.vo_border_col = rendContext->vo_border_col;
+			int displayWidth = 0;
+			int displayHeight = 0;
+			getDCFramebufferReadSize(info, displayWidth, displayHeight);
+			presentationWidth = std::max(1, displayWidth);
+			presentationHeight = std::max(1, displayHeight);
+			if (info.fb_r_ctrl.fb_enable == 0 || info.vo_control.blank_video == 1)
+			{
+				const Color border {
+						static_cast<u8>(info.vo_border_col.red() * 255.f),
+						static_cast<u8>(info.vo_border_col.green() * 255.f),
+						static_cast<u8>(info.vo_border_col.blue() * 255.f), 255 };
+				presentationBuffer.assign(static_cast<size_t>(presentationWidth)
+						* presentationHeight, border);
+			}
+			else
+			{
+				PixelBuffer<u32> pixels;
+				ReadFramebuffer(info, pixels, displayWidth, displayHeight);
+				presentationWidth = std::max(1, displayWidth);
+				presentationHeight = std::max(1, displayHeight);
+				presentationBuffer.resize(static_cast<size_t>(presentationWidth)
+						* presentationHeight);
+				for (u32 y = 0; y < presentationHeight; ++y)
+					for (u32 x = 0; x < presentationWidth; ++x)
+					{
+						const u32 value = *pixels.data(x, y);
+						presentationBuffer[static_cast<size_t>(y) * presentationWidth + x] = {
+								static_cast<u8>(value), static_cast<u8>(value >> 8),
+								static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) };
+					}
+			}
 		}
 		activeCoverageMask = nullptr;
 		if (!rendContext->isRTT)
@@ -843,10 +869,18 @@ private:
 	void configureState(const PolyParam& poly, PipelineState& state, bool punchThrough, bool sorting)
 	{
 		state.coverageMask = activeCoverageMask == nullptr ? nullptr : activeCoverageMask->data();
-		state.depthMode = (punchThrough || sorting) ? DepthMode::GreaterOrEqual : convertDepth(poly.isp.DepthMode);
+		state.depthMode = SoftwareRasterizer::selectDepthMode(poly.isp.DepthMode,
+				punchThrough, sorting);
 		state.depthWrite = punchThrough || (!sorting && !poly.isp.ZWriteDis);
 		state.srcBlend = convertBlend(poly.tsp.SrcInstr);
 		state.dstBlend = convertBlend(poly.tsp.DstInstr);
+		if (punchThrough)
+		{
+			// Punch Through pixels are opaque writes. TSP blend and secondary
+			// accumulation selections are not part of this list's processing.
+			state.srcBlend = BlendFactor::One;
+			state.dstBlend = BlendFactor::Zero;
+		}
 		state.gouraud = poly.pcw.Gouraud;
 		state.useAlpha = poly.tsp.UseAlpha;
 		state.ignoreTextureAlpha = poly.tsp.IgnoreTexA || poly.tcw.PixelFmt == Pixel565;
@@ -896,6 +930,8 @@ private:
 		state.intensityShadow = rendContext->fpu_shad_scale.intensity_shadow;
 		state.srcSelect = poly.tsp.SrcSelect;
 		state.dstSelect = poly.tsp.DstSelect;
+		if (punchThrough)
+			state.srcSelect = state.dstSelect = false;
 		state.bumpMap = poly.tcw.PixelFmt == PixelBumpMap;
 		// Zero is illegal on hardware; keep it neutral for malformed streams.
 		state.mipDAdjust = poly.tsp.MipMapD == 0 ? 1.f : poly.tsp.MipMapD / 4.f;
@@ -934,6 +970,12 @@ private:
 				&& (rendContext->fog_clamp_min.full != 0 || rendContext->fog_clamp_max.full != 0xffffffff);
 		state.srcSelect = poly.tsp1.SrcSelect;
 		state.dstSelect = poly.tsp1.DstSelect;
+		if (state.alphaTest)
+		{
+			state.srcBlend = BlendFactor::One;
+			state.dstBlend = BlendFactor::Zero;
+			state.srcSelect = state.dstSelect = false;
+		}
 		state.bumpMap = poly.tcw1.PixelFmt == PixelBumpMap;
 		state.mipDAdjust = poly.tsp1.MipMapD == 0 ? 1.f : poly.tsp1.MipMapD / 4.f;
 		state.trilinearFilter = poly.pcw.Texture && validTrilinear;
@@ -1034,7 +1076,10 @@ private:
 		for (u32 i = first; i < end; ++i)
 		{
 			const PolyParam& poly = list[i];
-			if (poly.count < 3 || ((!sorting || &list != &rendContext->global_param_tr) && poly.isp.DepthMode == 0))
+			// Do not discard DepthMode::Never here. Punch Through and autosorted
+			// translucent lists ignore the encoded mode and force GreaterOrEqual;
+			// ordinary polygons will be rejected naturally by depthTest.
+			if (poly.count < 3)
 				continue;
 			PipelineState state;
 			configureState(poly, state, punchThrough, sorting);
@@ -1058,7 +1103,19 @@ private:
 				configureArea1(poly, area1State);
 				state.area1 = &area1State;
 			}
-			drawStrip(poly, poly.first, poly.count, state);
+			if (punchThrough && state.area1 != nullptr)
+			{
+				// Holly2 first draws the accepted area-0 Punch Through pixel,
+				// then redraws area 1. If area 1 fails its own alpha test, the
+				// area-0 result remains visible rather than becoming a hole.
+				state.area1 = nullptr;
+				drawStrip(poly, poly.first, poly.count, state);
+				area1State.useArea1VertexData = true;
+				area1State.modifierArea1Only = true;
+				drawStrip(poly, poly.first, poly.count, area1State);
+			}
+			else
+				drawStrip(poly, poly.first, poly.count, state);
 		}
 	}
 

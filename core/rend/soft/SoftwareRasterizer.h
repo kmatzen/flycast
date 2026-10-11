@@ -149,6 +149,7 @@ struct PipelineState
 	bool deferBlend = false;
 	bool deferArea1 = false;
 	bool useArea1VertexData = false;
+	bool modifierArea1Only = false;
 	bool recordVisibility = false;
 	bool testVisibility = false;
 	// Optional render-target-sized region mask used when type-2 region
@@ -191,6 +192,7 @@ public:
 	void setPixel(u32 x, u32 y, Color color);
 
 	static bool depthTest(DepthMode mode, float source, float destination);
+	static DepthMode selectDepthMode(u32 encodedMode, bool punchThrough, bool autosort);
 	static bool cullTriangle(u32 mode, float threshold, const Vertex& a,
 			const Vertex& b, const Vertex& c);
 	static Color blend(Color source, Color destination, BlendFactor sourceFactor,
@@ -217,9 +219,12 @@ public:
 	static void convertFramebufferForDisplay(std::vector<Color>& pixels,
 			u32 writePackMode, u8 writeKValue, u8 alphaThreshold,
 			u32 readDepth, u8 concat);
+	static u32 framebufferDisplayWidth(u32 writeWidth, u32 writePackMode, u32 readDepth);
 	static std::vector<Color> prepareFramebufferForDisplay(const std::vector<Color>& frameStore,
 			u32 width, u32 height, bool dither, u32 writePackMode,
 			u8 writeKValue, u8 alphaThreshold, u32 readDepth, u8 concat);
+	static void copyColorRect(const std::vector<Color>& source, std::vector<Color>& destination,
+			u32 width, u32 height, s32 x0, s32 y0, s32 x1, s32 y1);
 	static float fogCoefficient(float inverseDepth, float density, const u32 *table);
 
 private:

@@ -158,18 +158,7 @@ void SoftwareRasterizer::clearSecondary(Color color)
 void SoftwareRasterizer::flushColorRect(std::vector<Color>& frameStore,
 		s32 x0, s32 y0, s32 x1, s32 y1) const
 {
-	if (frameStore.size() != colorBuffer_.size())
-		frameStore.resize(colorBuffer_.size());
-	x0 = std::clamp<s32>(x0, 0, width_);
-	y0 = std::clamp<s32>(y0, 0, height_);
-	x1 = std::clamp<s32>(x1, x0, width_);
-	y1 = std::clamp<s32>(y1, y0, height_);
-	for (s32 y = y0; y < y1; ++y)
-	{
-		const size_t offset = static_cast<size_t>(y) * width_ + x0;
-		std::copy(colorBuffer_.begin() + offset,
-				colorBuffer_.begin() + offset + (x1 - x0), frameStore.begin() + offset);
-	}
+	copyColorRect(colorBuffer_, frameStore, width_, height_, x0, y0, x1, y1);
 }
 
 void SoftwareRasterizer::clearVisibility()
@@ -275,6 +264,15 @@ bool SoftwareRasterizer::depthTest(DepthMode mode, float source, float destinati
 	case DepthMode::Always: return true;
 	}
 	return false;
+}
+
+DepthMode SoftwareRasterizer::selectDepthMode(u32 encodedMode, bool punchThrough,
+		bool autosort)
+{
+	// Holly2 ignores the ISP instruction for Punch Through, and the span
+	// sorter does the same for autosorted translucent polygons.
+	return punchThrough || autosort ? DepthMode::GreaterOrEqual
+			: static_cast<DepthMode>(encodedMode & 7);
 }
 
 bool SoftwareRasterizer::cullTriangle(u32 mode, float threshold, const Vertex& a,
@@ -618,35 +616,63 @@ void SoftwareRasterizer::ditherFramebuffer(std::vector<Color>& pixels, u32 width
 void SoftwareRasterizer::convertFramebufferForDisplay(std::vector<Color>& pixels,
 		u32 writePackMode, u8 writeKValue, u8 alphaThreshold, u32 readDepth, u8 concat)
 {
-	concat &= 7;
-	for (Color& color : pixels)
+	static constexpr u8 writeBytesPerPixel[8] { 2, 2, 2, 2, 3, 4, 4, 0 };
+	static constexpr u8 readBytesPerPixel[4] { 2, 2, 3, 4 };
+	writePackMode &= 7;
+	readDepth &= 3;
+	const u32 writeBpp = writeBytesPerPixel[writePackMode];
+	const u32 readBpp = readBytesPerPixel[readDepth];
+	if (writeBpp == 0)
 	{
-		// The frame-store write and display read formats are independent. For
-		// 16-bit framebuffers, reproduce the actual stored word before decoding
-		// it according to FB_R_CTRL; merely truncating each source channel gives
-		// incorrect colors whenever the two formats differ.
-		if (writePackMode <= 3 && readDepth <= 1)
+		pixels.clear();
+		return;
+	}
+	std::vector<u8> bytes;
+	bytes.reserve(pixels.size() * writeBpp);
+	auto append16 = [&](u16 value) {
+		bytes.push_back(static_cast<u8>(value));
+		bytes.push_back(static_cast<u8>(value >> 8));
+	};
+	for (const Color& color : pixels)
+	{
+		switch (writePackMode)
 		{
-			u16 stored = 0;
-			switch (writePackMode)
-			{
-			case 0:
-				stored = static_cast<u16>(((writeKValue & 0x80) << 8)
-						| ((color.r >> 3) << 10) | ((color.g >> 3) << 5) | (color.b >> 3));
-				break;
-			case 1:
-				stored = static_cast<u16>(((color.r >> 3) << 11)
-						| ((color.g >> 2) << 5) | (color.b >> 3));
-				break;
-			case 2:
-				stored = static_cast<u16>(((color.a >> 4) << 12) | ((color.r >> 4) << 8)
-						| ((color.g >> 4) << 4) | (color.b >> 4));
-				break;
-			case 3:
-				stored = static_cast<u16>((color.a >= alphaThreshold ? 0x8000 : 0)
-						| ((color.r >> 3) << 10) | ((color.g >> 3) << 5) | (color.b >> 3));
-				break;
-			}
+		case 0:
+			append16(static_cast<u16>(((writeKValue & 0x80) << 8)
+					| ((color.r >> 3) << 10) | ((color.g >> 3) << 5) | (color.b >> 3)));
+			break;
+		case 1:
+			append16(static_cast<u16>(((color.r >> 3) << 11)
+					| ((color.g >> 2) << 5) | (color.b >> 3)));
+			break;
+		case 2:
+			append16(static_cast<u16>(((color.a >> 4) << 12) | ((color.r >> 4) << 8)
+					| ((color.g >> 4) << 4) | (color.b >> 4)));
+			break;
+		case 3:
+			append16(static_cast<u16>((color.a >= alphaThreshold ? 0x8000 : 0)
+					| ((color.r >> 3) << 10) | ((color.g >> 3) << 5) | (color.b >> 3)));
+			break;
+		case 4:
+			bytes.insert(bytes.end(), { color.b, color.g, color.r });
+			break;
+		case 5:
+			bytes.insert(bytes.end(), { color.b, color.g, color.r, writeKValue });
+			break;
+		case 6:
+			bytes.insert(bytes.end(), { color.b, color.g, color.r, color.a });
+			break;
+		}
+	}
+	concat &= 7;
+	std::vector<Color> decoded(bytes.size() / readBpp);
+	for (size_t i = 0; i < decoded.size(); ++i)
+	{
+		const u8 *source = &bytes[i * readBpp];
+		Color& color = decoded[i];
+		if (readDepth <= 1)
+		{
+			const u16 stored = static_cast<u16>(source[0] | (source[1] << 8));
 			if (readDepth == 0)
 			{
 				color.r = static_cast<u8>(((stored >> 10) & 0x1f) << 3) | concat;
@@ -660,7 +686,24 @@ void SoftwareRasterizer::convertFramebufferForDisplay(std::vector<Color>& pixels
 				color.b = static_cast<u8>((stored & 0x1f) << 3) | concat;
 			}
 		}
+		else
+		{
+			color.b = source[0];
+			color.g = source[1];
+			color.r = source[2];
+		}
+		color.a = 255;
 	}
+	pixels = std::move(decoded);
+}
+
+u32 SoftwareRasterizer::framebufferDisplayWidth(u32 writeWidth, u32 writePackMode,
+		u32 readDepth)
+{
+	static constexpr u8 writeBytesPerPixel[8] { 2, 2, 2, 2, 3, 4, 4, 0 };
+	static constexpr u8 readBytesPerPixel[4] { 2, 2, 3, 4 };
+	return writeWidth * writeBytesPerPixel[writePackMode & 7]
+			/ readBytesPerPixel[readDepth & 3];
 }
 
 std::vector<Color> SoftwareRasterizer::prepareFramebufferForDisplay(
@@ -670,9 +713,42 @@ std::vector<Color> SoftwareRasterizer::prepareFramebufferForDisplay(
 	std::vector<Color> result = frameStore;
 	if (dither && writePackMode <= 3)
 		ditherFramebuffer(result, width, height, writePackMode);
-	convertFramebufferForDisplay(result, writePackMode, writeKValue, alphaThreshold,
-			readDepth, concat);
-	return result;
+	std::vector<Color> display;
+	display.reserve(static_cast<size_t>(framebufferDisplayWidth(width, writePackMode, readDepth))
+			* height);
+	for (u32 y = 0; y < height; ++y)
+	{
+		const auto first = result.begin() + std::min<size_t>(static_cast<size_t>(y) * width,
+				result.size());
+		const auto last = result.begin() + std::min<size_t>(static_cast<size_t>(y + 1) * width,
+				result.size());
+		std::vector<Color> row(first, last);
+		convertFramebufferForDisplay(row, writePackMode, writeKValue, alphaThreshold,
+				readDepth, concat);
+		display.insert(display.end(), row.begin(), row.end());
+	}
+	return display;
+}
+
+void SoftwareRasterizer::copyColorRect(const std::vector<Color>& source,
+		std::vector<Color>& destination, u32 width, u32 height,
+		s32 x0, s32 y0, s32 x1, s32 y1)
+{
+	const size_t pixelCount = static_cast<size_t>(width) * height;
+	if (source.size() < pixelCount)
+		return;
+	if (destination.size() != pixelCount)
+		destination.resize(pixelCount);
+	x0 = std::clamp<s32>(x0, 0, width);
+	y0 = std::clamp<s32>(y0, 0, height);
+	x1 = std::clamp<s32>(x1, x0, width);
+	y1 = std::clamp<s32>(y1, y0, height);
+	for (s32 y = y0; y < y1; ++y)
+	{
+		const size_t offset = static_cast<size_t>(y) * width + x0;
+		std::copy(source.begin() + offset, source.begin() + offset + (x1 - x0),
+				destination.begin() + offset);
+	}
 }
 
 void SoftwareRasterizer::applyFramebufferDither(u32 packMode)
@@ -777,8 +853,11 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				continue;
 			if (state.testVisibility && visibilityBuffer_[offset] != state.sequence)
 				continue;
+			const bool modifierArea1 = (stencilBuffer_[offset] & 0x81) == 0x81;
+			if (state.modifierArea1Only && !modifierArea1)
+				continue;
 			const bool area1 = state.useArea1VertexData
-					|| (state.area1 != nullptr && (stencilBuffer_[offset] & 0x81) == 0x81);
+					|| (state.area1 != nullptr && modifierArea1);
 			const PipelineState& fragmentState = area1 && !state.useArea1VertexData
 					? *state.area1 : state;
 			const s32 shadeSampleX = x * SUBPIXEL_SCALE + tspSampleOffset;

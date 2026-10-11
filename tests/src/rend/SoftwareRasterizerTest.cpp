@@ -29,6 +29,14 @@ TEST(SoftwareRasterizer, ImplementsAllDepthModes)
 	EXPECT_TRUE(SoftwareRasterizer::depthTest(DepthMode::Always, 0.f, 1.f));
 }
 
+TEST(SoftwareRasterizer, OverridesDepthModeForPunchThroughAndAutosort)
+{
+	EXPECT_EQ(SoftwareRasterizer::selectDepthMode(0, false, false), DepthMode::Never);
+	EXPECT_EQ(SoftwareRasterizer::selectDepthMode(0, true, false), DepthMode::GreaterOrEqual);
+	EXPECT_EQ(SoftwareRasterizer::selectDepthMode(0, false, true), DepthMode::GreaterOrEqual);
+	EXPECT_EQ(SoftwareRasterizer::selectDepthMode(7, false, false), DepthMode::Always);
+}
+
 TEST(SoftwareRasterizer, ImplementsPvrCullingModes)
 {
 	const Vertex a { 0, 0, 1 };
@@ -614,27 +622,42 @@ TEST(SoftwareRasterizer, QuantizesFramebufferAndAppendsDisplayConcatBits)
 {
 	std::vector<Color> pixels { { 0xab, 0xcd, 0xef, 0x42 } };
 	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 1, 0, 0, 1, 5);
-	EXPECT_EQ(pixels[0], (Color { 0xad, 0xcd, 0xed, 0x42 }));
+	EXPECT_EQ(pixels[0], (Color { 0xad, 0xcd, 0xed, 0xff }));
 
 	pixels[0] = { 0xab, 0xcd, 0xef, 0x42 };
 	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 3, 0, 0, 0, 2);
-	EXPECT_EQ(pixels[0], (Color { 0xaa, 0xca, 0xea, 0x42 }));
+	EXPECT_EQ(pixels[0], (Color { 0xaa, 0xca, 0xea, 0xff }));
 
 	pixels[0] = { 0xab, 0xcd, 0xef, 0x42 };
 	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 6, 0, 0, 3, 7);
-	EXPECT_EQ(pixels[0], (Color { 0xab, 0xcd, 0xef, 0x42 }));
+	EXPECT_EQ(pixels[0], (Color { 0xab, 0xcd, 0xef, 0xff }));
 
 	// KRGB's K bit becomes the high red bit when the same stored word is
 	// interpreted as 565 by the display controller.
 	pixels[0] = { 0, 0, 0, 0x42 };
 	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 0, 0x80, 0, 1, 5);
-	EXPECT_EQ(pixels[0], (Color { 0x85, 0x01, 0x05, 0x42 }));
+	EXPECT_EQ(pixels[0], (Color { 0x85, 0x01, 0x05, 0xff }));
 
 	// Likewise, a 4444 RTT word read as displayable 0555 crosses channel
 	// boundaries; it is not equivalent to independently truncating RGB.
 	pixels[0] = { 0xab, 0xcd, 0xef, 0x42 };
 	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 2, 0, 0, 0, 2);
-	EXPECT_EQ(pixels[0], (Color { 0x92, 0xb2, 0x72, 0x42 }));
+	EXPECT_EQ(pixels[0], (Color { 0x92, 0xb2, 0x72, 0xff }));
+
+	// The display controller groups the stored bytes independently of the
+	// writer. Two 565 pixels therefore become one 0888 display pixel.
+	pixels = { { 0x11, 0x22, 0x33, 0x44 }, { 0xaa, 0xbb, 0xcc, 0xdd } };
+	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 1, 0, 0, 3, 0);
+	ASSERT_EQ(pixels.size(), 1u);
+	EXPECT_EQ(pixels[0], (Color { 0xd9, 0x11, 0x06, 0xff }));
+	EXPECT_EQ(SoftwareRasterizer::framebufferDisplayWidth(640, 1, 3), 320u);
+
+	// Conversely, one 0888 stored pixel is displayed as two 565 pixels.
+	pixels = { { 0x12, 0x34, 0x56, 0x78 } };
+	SoftwareRasterizer::convertFramebufferForDisplay(pixels, 5, 0x9a, 0, 1, 0);
+	ASSERT_EQ(pixels.size(), 2u);
+	EXPECT_EQ(pixels[0], (Color { 0x30, 0x88, 0xb0, 0xff }));
+	EXPECT_EQ(pixels[1], (Color { 0x98, 0x40, 0x90, 0xff }));
 }
 
 TEST(SoftwareRasterizer, RebuildsPresentationFromUnditheredFrameStore)
@@ -646,7 +669,7 @@ TEST(SoftwareRasterizer, RebuildsPresentationFromUnditheredFrameStore)
 			frameStore, 1, 1, true, 1, 0, 0, 1, 0);
 	EXPECT_EQ(first, second);
 	EXPECT_EQ(frameStore[0], (Color { 100, 100, 100, 100 }));
-	EXPECT_EQ(first[0], (Color { 96, 100, 96, 101 }));
+	EXPECT_EQ(first[0], (Color { 96, 100, 96, 255 }));
 }
 
 TEST(SoftwareRasterizer, DecodesBumpMapNormalIntoAlpha)
@@ -781,6 +804,85 @@ TEST(SoftwareRasterizer, PunchThroughHoleExposesNextVisiblePolygon)
 	rasterizer.drawTriangle({ 0, 0, 2, transparentGreen }, { 2, 0, 2, transparentGreen },
 			{ 0, 2, 2, transparentGreen }, color);
 	EXPECT_EQ(rasterizer.pixel(0, 0), opaqueRed);
+}
+
+TEST(SoftwareRasterizer, PunchThroughEqualDepthSelectsLaterAcceptedPolygon)
+{
+	SoftwareRasterizer rasterizer(1, 1);
+	rasterizer.clearVisibility();
+	const Color red { 255, 0, 0, 255 };
+	const Color green { 0, 255, 0, 255 };
+	const Color transparentBlue { 0, 0, 255, 0 };
+	PipelineState geometry;
+	geometry.depthMode = DepthMode::GreaterOrEqual;
+	geometry.colorWrite = false;
+	geometry.recordVisibility = true;
+	geometry.alphaTest = true;
+	geometry.alphaReference = 128;
+	geometry.sequence = 1;
+	rasterizer.drawTriangle({ 0, 0, 1, red }, { 2, 0, 1, red },
+			{ 0, 2, 1, red }, geometry);
+	geometry.sequence = 2;
+	rasterizer.drawTriangle({ 0, 0, 1, green }, { 2, 0, 1, green },
+			{ 0, 2, 1, green }, geometry);
+	geometry.sequence = 3;
+	rasterizer.drawTriangle({ 0, 0, 1, transparentBlue }, { 2, 0, 1, transparentBlue },
+			{ 0, 2, 1, transparentBlue }, geometry);
+
+	rasterizer.clearDepth();
+	PipelineState color = geometry;
+	color.colorWrite = true;
+	color.recordVisibility = false;
+	color.testVisibility = true;
+	for (const auto& fragment : { std::pair { 1u, red }, std::pair { 2u, green },
+			std::pair { 3u, transparentBlue } })
+	{
+		color.sequence = fragment.first;
+		rasterizer.drawTriangle({ 0, 0, 1, fragment.second },
+				{ 2, 0, 1, fragment.second }, { 0, 2, 1, fragment.second }, color);
+	}
+	EXPECT_EQ(rasterizer.pixel(0, 0), green);
+}
+
+TEST(SoftwareRasterizer, PunchThroughAreaOneRejectPreservesAreaZero)
+{
+	SoftwareRasterizer rasterizer(1, 1);
+	const Color red { 255, 0, 0, 255 };
+	const Color transparentGreen { 0, 255, 0, 0 };
+	PipelineState area0;
+	area0.depthMode = DepthMode::GreaterOrEqual;
+	area0.alphaTest = true;
+	area0.alphaReference = 128;
+	rasterizer.drawTriangle({ 0, 0, 1, red }, { 2, 0, 1, red },
+			{ 0, 2, 1, red }, area0);
+
+	PipelineState shadowed;
+	shadowed.depthMode = DepthMode::GreaterOrEqual;
+	shadowed.shadow = true;
+	shadowed.colorWrite = false;
+	rasterizer.drawTriangle({ 0, 0, 1, red }, { 2, 0, 1, red },
+			{ 0, 2, 1, red }, shadowed);
+	rasterizer.drawModifierTriangle({ 0, 0, 2 }, { 2, 0, 2 }, { 0, 2, 2 },
+			ModifierMode::Xor);
+	rasterizer.drawModifierTriangle({ 0, 0, 2 }, { 2, 0, 2 }, { 0, 2, 2 },
+			ModifierMode::Inclusion);
+
+	PipelineState area1 = area0;
+	area1.useArea1VertexData = true;
+	area1.modifierArea1Only = true;
+	Vertex area1v0 { 0, 0, 1 };
+	Vertex area1v1 { 2, 0, 1 };
+	Vertex area1v2 { 0, 2, 1 };
+	area1v0.color1 = area1v1.color1 = area1v2.color1 = transparentGreen;
+	rasterizer.drawTriangle(area1v0, area1v1, area1v2, area1);
+	EXPECT_EQ(rasterizer.pixel(0, 0), red);
+
+	const Color blue { 0, 0, 255, 200 };
+	area1v0.color1 = area1v1.color1 = area1v2.color1 = blue;
+	rasterizer.drawTriangle(area1v0, area1v1, area1v2, area1);
+	// Accepted Punch Through output is opaque even when its shading alpha is
+	// merely above PT_ALPHA_REF rather than already equal to 0xff.
+	EXPECT_EQ(rasterizer.pixel(0, 0), (Color { 0, 0, 255, 255 }));
 }
 
 TEST(SoftwareRasterizer, SelectsAreaOneInsideModifierVolume)

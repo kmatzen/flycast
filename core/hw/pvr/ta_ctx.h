@@ -266,6 +266,12 @@ struct rend_context
 	u32 fb_W_SOF1;
 	FB_W_CTRL_type fb_W_CTRL;
 	FB_R_CTRL_type fb_R_CTRL;
+	FB_R_SIZE_type fb_R_SIZE;
+	u32 fb_R_SOF1;
+	u32 fb_R_SOF2;
+	SPG_CONTROL_type spg_control;
+	SPG_STATUS_type spg_status;
+	VO_CONTROL_type vo_control;
 	u32 y_coeff;
 	u32 framebufferWidth;
 	u32 framebufferHeight;
