@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #ifdef TARGET_MAC
 #include <dispatch/dispatch.h>
 #endif
@@ -429,6 +432,29 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 	const Color c11 = pixels[static_cast<size_t>(sy1) * width + sx1];
 	const float tx = texelX - x0;
 	const float ty = texelY - y0;
+#if defined(__ARM_NEON)
+	auto channels = [](Color color) {
+		u32 packed;
+		std::memcpy(&packed, &color, sizeof(packed));
+		const uint8x8_t bytes = vreinterpret_u8_u32(vdup_n_u32(packed));
+		return vcvtq_f32_u32(vmovl_u16(vget_low_u16(vmovl_u8(bytes))));
+	};
+	const float32x4_t f00 = channels(c00);
+	const float32x4_t f10 = channels(c10);
+	const float32x4_t f01 = channels(c01);
+	const float32x4_t f11 = channels(c11);
+	const float32x4_t top = vfmaq_n_f32(f00, vsubq_f32(f10, f00), tx);
+	const float32x4_t bottom = vfmaq_n_f32(f01, vsubq_f32(f11, f01), tx);
+	float32x4_t interpolated = vfmaq_n_f32(top, vsubq_f32(bottom, top), ty);
+	interpolated = vmaxq_f32(vdupq_n_f32(0.f),
+			vminq_f32(vdupq_n_f32(255.f), interpolated));
+	const uint16x4_t rounded = vmovn_u32(vcvtaq_u32_f32(interpolated));
+	const uint8x8_t packedBytes = vmovn_u16(vcombine_u16(rounded, vdup_n_u16(0)));
+	const u32 packed = vget_lane_u32(vreinterpret_u32_u8(packedBytes), 0);
+	Color result;
+	std::memcpy(&result, &packed, sizeof(result));
+	return result;
+#else
 	auto bilinear = [&](auto member) {
 		const float top = c00.*member + (c10.*member - c00.*member) * tx;
 		const float bottom = c01.*member + (c11.*member - c01.*member) * tx;
@@ -436,6 +462,7 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 	};
 	return { bilinear(&Color::r), bilinear(&Color::g), bilinear(&Color::b),
 		bilinear(&Color::a) };
+#endif
 }
 
 TextureView SoftwareRasterizer::makeTextureView(const Color *pixels, u32 width, u32 height,
