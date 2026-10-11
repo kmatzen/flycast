@@ -90,10 +90,15 @@ public:
 	{
 		BaseTextureCacheData::SetDirectXColorOrder(false);
 #ifdef USE_OPENGL
+		// The software rasterizer still uses OpenGL to present its completed
+		// framebuffer. Initialize the shared GL capability/shader state before
+		// constructing the presentation quad, just as the GL renderers do.
+		findGLVersion();
 		presentTexture = glcache.GenTexture();
 		glcache.BindTexture(GL_TEXTURE_2D, presentTexture);
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		quadDrawer = std::make_unique<GlQuadDrawer>();
@@ -111,7 +116,9 @@ public:
 #endif
 		textureCache.Clear();
 		screenRasterizer.reset();
+		framebufferRasterizer.reset();
 		rttRasterizer.reset();
+		displayRasterizer = nullptr;
 		rasterizer = nullptr;
 		rawFrameStore.clear();
 		presentationBuffer.clear();
@@ -147,6 +154,8 @@ public:
 				|| targetRasterizer->height() != height)
 			targetRasterizer = std::make_unique<SoftwareRasterizer>(width, height);
 		rasterizer = targetRasterizer.get();
+		if (!rendContext->isRTT)
+			displayRasterizer = rasterizer;
 		std::vector<Color> previousFrameStore;
 		if (!rendContext->isRTT)
 		{
@@ -186,39 +195,71 @@ public:
 		}
 		auto renderRegions = [&](size_t passIndex, const std::vector<RegionInfo>& regions)
 		{
+			regionClipEnabled = !regions.empty() && !config::PerStripSorting;
+			if (regionClipEnabled)
+			{
+				regionClipX0 = regions.front().x0;
+				regionClipY0 = regions.front().y0;
+				regionClipX1 = regions.front().x1;
+				regionClipY1 = regions.front().y1;
+				for (const RegionInfo& region : regions)
+				{
+					regionClipX0 = std::min(regionClipX0, region.x0);
+					regionClipY0 = std::min(regionClipY0, region.y0);
+					regionClipX1 = std::max(regionClipX1, region.x1);
+					regionClipY1 = std::max(regionClipY1, region.y1);
+				}
+			}
 			const RenderPass& pass = rendContext->render_passes[passIndex];
 			const RenderPass previous = passIndex == 0
 					? RenderPass {} : rendContext->render_passes[passIndex - 1];
-			const std::vector<u8> opaqueMask = makeRegionMask(regions,
+			std::vector<u8> opaqueMask = makeRegionMask(regions,
 					[](const RegionInfo& region) { return region.opaquePresent; });
 			const std::vector<u8> allRegionMask = makeRegionMask(regions,
 					[](const RegionInfo&) { return true; });
-			const std::vector<u8> punchThroughMask = makeRegionMask(regions,
+			std::vector<u8> punchThroughMask = makeRegionMask(regions,
 					[](const RegionInfo& region) { return region.punchThroughPresent; });
-			const std::vector<u8> opaqueModifierMask = makeRegionMask(regions,
+			std::vector<u8> opaqueModifierMask = makeRegionMask(regions,
 					[](const RegionInfo& region) { return region.opaqueModifierPresent; });
-			clearPassDepth(pass, regions);
-			const std::vector<float> previousDepth = rasterizer->depthBuffer();
-			rasterizer->clearVisibility();
-			backgroundCoverageMask = maskPointer(allRegionMask);
-			activeCoverageMask = maskPointer(opaqueMask);
-			drawList(rendContext->global_param_op, previous.op_count, pass.op_count,
-					false, false, false, false, false, true);
-			activeCoverageMask = maskPointer(punchThroughMask);
-			drawList(rendContext->global_param_pt, previous.pt_count, pass.pt_count,
-					true, false, false, false, false, true);
-			if (config::ModifierVolumes)
+			if (config::PerStripSorting)
 			{
+				opaqueMask.clear();
+				punchThroughMask.clear();
+				opaqueModifierMask.clear();
+			}
+			clearPassDepth(pass, regions);
+			backgroundCoverageMask = config::PerStripSorting ? nullptr : maskPointer(allRegionMask);
+			const bool hasOpaqueModifiers = config::ModifierVolumes
+					&& pass.mvo_count > previous.mvo_count;
+			if (hasOpaqueModifiers)
+			{
+				const std::vector<float> previousDepth = rasterizer->depthBuffer();
+				rasterizer->clearVisibility();
+				activeCoverageMask = maskPointer(opaqueMask);
+				drawList(rendContext->global_param_op, previous.op_count, pass.op_count,
+						false, false, false, false, false, true, false);
+				activeCoverageMask = maskPointer(punchThroughMask);
+				drawList(rendContext->global_param_pt, previous.pt_count, pass.pt_count,
+						true, false, false, false, false, true, false);
 				activeCoverageMask = maskPointer(opaqueModifierMask);
 				drawModifierVolumes(rendContext->global_param_mvo, previous.mvo_count, pass.mvo_count);
+				rasterizer->restoreDepth(previousDepth);
+				activeCoverageMask = maskPointer(opaqueMask);
+				drawList(rendContext->global_param_op, previous.op_count, pass.op_count,
+						false, false, true, false, false, false, true);
+				activeCoverageMask = maskPointer(punchThroughMask);
+				drawList(rendContext->global_param_pt, previous.pt_count, pass.pt_count,
+						true, false, true, false, false, false, true);
 			}
-			rasterizer->restoreDepth(previousDepth);
-			activeCoverageMask = maskPointer(opaqueMask);
-			drawList(rendContext->global_param_op, previous.op_count, pass.op_count,
-					false, false, true, false, false, false, true);
-			activeCoverageMask = maskPointer(punchThroughMask);
-			drawList(rendContext->global_param_pt, previous.pt_count, pass.pt_count,
-					true, false, true, false, false, false, true);
+			else
+			{
+				activeCoverageMask = maskPointer(opaqueMask);
+				drawList(rendContext->global_param_op, previous.op_count, pass.op_count,
+						false, false, true);
+				activeCoverageMask = maskPointer(punchThroughMask);
+				drawList(rendContext->global_param_pt, previous.pt_count, pass.pt_count,
+						true, false, true);
+			}
 			rasterizer->clearModifierResults();
 			drawTranslucentPass(passIndex, previous, pass, regions);
 			std::vector<RegionInfo> passCommittedRegions;
@@ -247,9 +288,10 @@ public:
 			// later pass observe framebuffer feedback through the VRAM cache locks.
 			if (rendContext->isRTT)
 				writeFramebufferToVram(frameStore, passCommittedRegions);
-			else
+			else if (config::EmulateFramebuffer)
 				writeDisplayFramebufferToVram(frameStore, passCommittedRegions);
 			backgroundCoverageMask = nullptr;
+			regionClipEnabled = false;
 		};
 		if (tileCount == 0)
 		{
@@ -260,13 +302,13 @@ public:
 		}
 		else
 		{
-			// Region records are interleaved pass-within-tile. Execute in that
-			// order so depth clears, accumulation flushes, and VRAM feedback become
-			// visible at the same point they do on Holly.
-			for (size_t tile = 0; tile < tileCount; ++tile)
-				for (size_t passIndex = 0; passIndex < passRegions.size(); ++passIndex)
-					if (tile < passRegions[passIndex].size())
-						renderRegions(passIndex, { passRegions[passIndex][tile] });
+			// Region coverage makes tiles independent within each pass. Batch each
+			// pass's regions so its primitive lists are transformed and traversed
+			// once, while clear/flush rectangles and list-presence masks continue to
+			// follow the individual region headers. Pass order and the VRAM commit
+			// between passes remain observable to later framebuffer-texture reads.
+			for (size_t passIndex = 0; passIndex < passRegions.size(); ++passIndex)
+				renderRegions(passIndex, passRegions[passIndex]);
 		}
 		if (rendContext->isRTT)
 		{
@@ -345,9 +387,13 @@ public:
 		if (info.fb_r_ctrl.fb_enable == 0 || info.vo_control.blank_video == 1)
 		{
 			getDCFramebufferReadSize(info, width, height);
-			screenRasterizer = std::make_unique<SoftwareRasterizer>(
-					std::max(1, width), std::max(1, height));
-			rasterizer = screenRasterizer.get();
+			const u32 rasterWidth = std::max(1, width);
+			const u32 rasterHeight = std::max(1, height);
+			if (!framebufferRasterizer || framebufferRasterizer->width() != rasterWidth
+					|| framebufferRasterizer->height() != rasterHeight)
+				framebufferRasterizer = std::make_unique<SoftwareRasterizer>(rasterWidth, rasterHeight);
+			rasterizer = framebufferRasterizer.get();
+			displayRasterizer = rasterizer;
 			rasterizer->clear({ static_cast<u8>(info.vo_border_col.red() * 255.f),
 				static_cast<u8>(info.vo_border_col.green() * 255.f),
 				static_cast<u8>(info.vo_border_col.blue() * 255.f), 255 });
@@ -357,14 +403,16 @@ public:
 			rendContext = nullptr;
 			return;
 		}
-		PixelBuffer<u32> pixels;
-		ReadFramebuffer(info, pixels, width, height);
-		screenRasterizer = std::make_unique<SoftwareRasterizer>(width, height);
-		rasterizer = screenRasterizer.get();
+		ReadFramebuffer(info, framebufferPixels, width, height);
+		if (!framebufferRasterizer || framebufferRasterizer->width() != static_cast<u32>(width)
+				|| framebufferRasterizer->height() != static_cast<u32>(height))
+			framebufferRasterizer = std::make_unique<SoftwareRasterizer>(width, height);
+		rasterizer = framebufferRasterizer.get();
+		displayRasterizer = rasterizer;
 		for (int y = 0; y < height; ++y)
 			for (int x = 0; x < width; ++x)
 			{
-				const u32 value = *pixels.data(x, y);
+				const u32 value = *framebufferPixels.data(x, y);
 				rasterizer->setPixel(x, y, {
 					static_cast<u8>(value), static_cast<u8>(value >> 8),
 					static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) });
@@ -377,19 +425,36 @@ public:
 
 	bool RenderLastFrame() override
 	{
-		return frameReady && !clearLastFrame && Present();
+		if (!displayRasterizer || clearLastFrame)
+			return false;
+		return drawFrame();
 	}
 
 	bool Present() override
 	{
-		if (!frameReady || !rasterizer)
+		if (!frameReady)
+			return false;
+		frameReady = false;
+	#ifndef LIBRETRO
+		imguiDriver->setFrameRendered();
+	#endif
+		return true;
+	}
+
+	bool drawFrame()
+	{
+		if (!displayRasterizer)
 			return false;
 	#ifdef USE_OPENGL
+	#ifndef TARGET_IPHONE
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	#endif
 		const bool prepared = !presentationBuffer.empty();
 		const auto& pixels = prepared
-				? presentationBuffer : rasterizer->colorBuffer();
-		const u32 pixelWidth = prepared ? presentationWidth : rasterizer->width();
-		const u32 pixelHeight = prepared ? presentationHeight : rasterizer->height();
+				? presentationBuffer : displayRasterizer->colorBuffer();
+		const u32 pixelWidth = prepared ? presentationWidth : displayRasterizer->width();
+		const u32 pixelHeight = prepared ? presentationHeight : displayRasterizer->height();
+		glActiveTexture(GL_TEXTURE0);
 		glcache.BindTexture(GL_TEXTURE_2D, presentTexture);
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pixelWidth, pixelHeight, 0,
@@ -406,6 +471,7 @@ public:
 				frameAspectRatio, dx, dy, config::Rotate90);
 		glViewport(dx, dy, settings.display.width - dx * 2, settings.display.height - dy * 2);
 		glcache.Disable(GL_BLEND);
+		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 		quadDrawer->draw(presentTexture, config::Rotate90, true);
 		glCheck();
 #endif
@@ -414,11 +480,11 @@ public:
 
 	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override
 	{
-		if (!frameReady || !rasterizer)
+		if (!displayRasterizer || clearLastFrame)
 			return false;
 		const bool prepared = !presentationBuffer.empty();
-		const int sourceWidth = prepared ? presentationWidth : rasterizer->width();
-		const int sourceHeight = prepared ? presentationHeight : rasterizer->height();
+		const int sourceWidth = prepared ? presentationWidth : displayRasterizer->width();
+		const int sourceHeight = prepared ? presentationHeight : displayRasterizer->height();
 		const int orientedWidth = config::Rotate90 ? sourceHeight : sourceWidth;
 		const int orientedHeight = config::Rotate90 ? sourceWidth : sourceHeight;
 		const float aspectRatio = frameAspectRatio;
@@ -437,7 +503,7 @@ public:
 		else if (height == 0)
 			height = std::max(1, static_cast<int>(width / aspectRatio));
 		data.resize(static_cast<size_t>(width) * height * 3);
-		const auto& source = prepared ? presentationBuffer : rasterizer->colorBuffer();
+		const auto& source = prepared ? presentationBuffer : displayRasterizer->colorBuffer();
 		for (int y = 0; y < height; ++y)
 			for (int x = 0; x < width; ++x)
 			{
@@ -580,7 +646,9 @@ private:
 	{
 		for (const RegionInfo& region : regions)
 			if (region.zClear)
+			{
 				rasterizer->clearDepthRect(region.x0, region.y0, region.x1, region.y1, 0.f);
+			}
 		// Preserve the parser's first-tile behavior for malformed or truncated
 		// region arrays where the requested pass header could not be found.
 		if (regions.empty() && pass.z_clear)
@@ -641,6 +709,14 @@ private:
 	void drawTranslucentPass(size_t passIndex, const RenderPass& previous,
 			const RenderPass& pass, const std::vector<RegionInfo>& regions)
 	{
+		if (config::PerStripSorting)
+		{
+			activeCoverageMask = nullptr;
+			drawList(rendContext->global_param_tr, previous.tr_count, pass.tr_count,
+					false, false, true);
+			activeCoverageMask = nullptr;
+			return;
+		}
 		const bool hasAutosort = std::any_of(regions.begin(), regions.end(),
 				[](const RegionInfo& region) {
 					return region.translucentPresent && region.autosort;
@@ -903,6 +979,15 @@ private:
 		state.tspPixelCenter = (rendContext->half_offset & 2) != 0;
 		state.texelSampleCenter = (rendContext->half_offset & 4) != 0;
 		state.textureSuperSample = poly.tsp.SupSample;
+		if (config::TextureFiltering == 1)
+		{
+			// Match the hardware backends' force-nearest option. Besides selecting
+			// point samples, hide the mip chain so the scalar path can skip the
+			// derivative calculation that is irrelevant to nearest filtering.
+			state.bilinearFilter = false;
+			state.textureSuperSample = false;
+			state.texture.mipLevelCount = std::min<u8>(1, state.texture.mipLevelCount);
+		}
 		state.dCalcCtrl = poly.isp.DCalcCtrl;
 		const glm::mat4& viewport = matrices.GetViewportMatrix();
 		state.nativeToHostScaleX = std::abs(viewport[0][0]);
@@ -994,6 +1079,16 @@ private:
 		state.scissorY0 = clip.origin.y;
 		state.scissorX1 = clip.origin.x + clip.size.x;
 		state.scissorY1 = clip.origin.y + clip.size.y;
+		// Region-array passes revisit the same primitive lists once per tile.
+		// Restrict rasterization to those tiles as well as using the coverage
+		// mask; otherwise every tile scans each triangle's full-screen bounds.
+		if (regionClipEnabled)
+		{
+			state.scissorX0 = std::max(state.scissorX0, regionClipX0);
+			state.scissorY0 = std::max(state.scissorY0, regionClipY0);
+			state.scissorX1 = std::min(state.scissorX1, regionClipX1);
+			state.scissorY1 = std::min(state.scissorY1, regionClipY1);
+		}
 		if (tileMode == TileClipping::Inside)
 		{
 			state.excludeClip = true;
@@ -1219,17 +1314,25 @@ private:
 	// destinations. Keeping separate CPU surfaces also preserves the previous
 	// display frame when an intervening RTT render uses identical dimensions.
 	std::unique_ptr<SoftwareRasterizer> screenRasterizer;
+	std::unique_ptr<SoftwareRasterizer> framebufferRasterizer;
 	std::unique_ptr<SoftwareRasterizer> rttRasterizer;
 	SoftwareRasterizer *rasterizer = nullptr;
+	SoftwareRasterizer *displayRasterizer = nullptr;
 	// Keep the emulated frame store in pre-dither CORE color precision. A new
 	// partial render may preserve untouched tiles; deriving presentation from
 	// this raw copy prevents those tiles from accumulating dither repeatedly.
 	std::vector<Color> rawFrameStore;
+	PixelBuffer<u32> framebufferPixels;
 	std::vector<Color> presentationBuffer;
 	u32 presentationWidth = 0;
 	u32 presentationHeight = 0;
 	const std::vector<u8> *activeCoverageMask = nullptr;
 	const std::vector<u8> *backgroundCoverageMask = nullptr;
+	bool regionClipEnabled = false;
+	s32 regionClipX0 = 0;
+	s32 regionClipY0 = 0;
+	s32 regionClipX1 = 0;
+	s32 regionClipY1 = 0;
 	bool frameReady = false;
 	float frameAspectRatio = 4.f / 3.f;
 #ifdef USE_OPENGL

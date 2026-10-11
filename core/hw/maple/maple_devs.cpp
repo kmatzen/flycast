@@ -1333,7 +1333,10 @@ struct maple_microphone: maple_base
 					return MDRS_DeviceReply;
 
 				case MDRE_TransmitAgain:
-					WARN_LOG(MAPLE, "maple_microphone::dma MDCF_MICControl MDRE_TransmitAgain");
+					// Seaman polls this normal retry response continuously while waiting
+					// for microphone data. It is protocol flow, not an emulator warning;
+					// warning-level output can dominate accurate-interpreter execution.
+					DEBUG_LOG(MAPLE, "maple_microphone::dma MDCF_MICControl MDRE_TransmitAgain");
 					//apparently this doesnt matter
 					//wptr(micdata, SIZE_OF_MIC_DATA);
 					return MDRS_DeviceReply;//MDRS_DataTransfer;

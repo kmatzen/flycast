@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#ifdef TARGET_MAC
+#include <dispatch/dispatch.h>
+#endif
 
 namespace rend::soft {
 namespace {
@@ -70,6 +73,31 @@ float wrapCoordinate(float coordinate, bool clamp, bool flip)
 		return fraction;
 	}
 	return coordinate - std::floor(coordinate);
+}
+
+u32 wrapTexel(s32 coordinate, u32 size, bool clamp, bool flip)
+{
+	if (size <= 1)
+		return 0;
+	if (clamp)
+		return static_cast<u32>(std::clamp<s32>(coordinate, 0, static_cast<s32>(size) - 1));
+
+	const s32 signedSize = static_cast<s32>(size);
+	if (flip)
+	{
+		const s32 period = signedSize * 2;
+		s32 wrapped = coordinate % period;
+		if (wrapped < 0)
+			wrapped += period;
+		if (wrapped >= signedSize)
+			wrapped = period - 1 - wrapped;
+		return static_cast<u32>(wrapped);
+	}
+
+	s32 wrapped = coordinate % signedSize;
+	if (wrapped < 0)
+		wrapped += signedSize;
+	return static_cast<u32>(wrapped);
 }
 
 std::array<float, 4> factor(BlendFactor blendFactor, Color source, Color destination,
@@ -330,12 +358,8 @@ Color SoftwareRasterizer::sampleTexture(TextureView texture, float u, float v,
 	const float texelX = u * texture.width - sampleAdjustment;
 	const float texelY = v * texture.height - sampleAdjustment;
 	auto fetch = [&](s32 x, s32 y) {
-		float sampleU = (x + .5f) / texture.width;
-		float sampleV = (y + .5f) / texture.height;
-		sampleU = wrapCoordinate(sampleU, state.clampU, state.flipU);
-		sampleV = wrapCoordinate(sampleV, state.clampV, state.flipV);
-		const u32 sx = std::min(static_cast<u32>(sampleU * texture.width), texture.width - 1);
-		const u32 sy = std::min(static_cast<u32>(sampleV * texture.height), texture.height - 1);
+		const u32 sx = wrapTexel(x, texture.width, state.clampU, state.flipU);
+		const u32 sy = wrapTexel(y, texture.height, state.clampV, state.flipV);
 		return texture.pixels[static_cast<size_t>(sy) * texture.width + sx];
 	};
 	if (!state.bilinearFilter)
@@ -824,19 +848,29 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 	const bool topLeft1 = isTopLeft(points[2], points[0]);
 	const bool topLeft2 = isTopLeft(points[0], points[1]);
 	const double inverseArea = 1.0 / static_cast<double>(area);
+	const s64 edgeStepX0 = -(static_cast<s64>(points[2].y) - points[1].y) * SUBPIXEL_SCALE;
+	const s64 edgeStepX1 = -(static_cast<s64>(points[0].y) - points[2].y) * SUBPIXEL_SCALE;
+	const s64 edgeStepX2 = -(static_cast<s64>(points[1].y) - points[0].y) * SUBPIXEL_SCALE;
 
-	for (s32 y = minY; y <= maxY; ++y)
+	auto rasterizeRow = [&](s32 y)
 	{
-		for (s32 x = minX; x <= maxX; ++x)
+		const s32 sampleY = y * SUBPIXEL_SCALE + fpuSampleOffset;
+		const s32 firstSampleX = minX * SUBPIXEL_SCALE + fpuSampleOffset;
+		s64 w0 = edge(points[1], points[2], firstSampleX, sampleY);
+		s64 w1 = edge(points[2], points[0], firstSampleX, sampleY);
+		s64 w2 = edge(points[0], points[1], firstSampleX, sampleY);
+		const s32 shadeSampleY = y * SUBPIXEL_SCALE + tspSampleOffset;
+		const s32 firstShadeSampleX = minX * SUBPIXEL_SCALE + tspSampleOffset;
+		s64 shadeW0 = edge(points[1], points[2], firstShadeSampleX, shadeSampleY);
+		s64 shadeW1 = edge(points[2], points[0], firstShadeSampleX, shadeSampleY);
+		s64 shadeW2 = edge(points[0], points[1], firstShadeSampleX, shadeSampleY);
+		for (s32 x = minX; x <= maxX; ++x,
+				w0 += edgeStepX0, w1 += edgeStepX1, w2 += edgeStepX2,
+				shadeW0 += edgeStepX0, shadeW1 += edgeStepX1, shadeW2 += edgeStepX2)
 		{
 			if (state.excludeClip && x >= state.excludeX0 && x < state.excludeX1
 					&& y >= state.excludeY0 && y < state.excludeY1)
 				continue;
-			const s32 sampleX = x * SUBPIXEL_SCALE + fpuSampleOffset;
-			const s32 sampleY = y * SUBPIXEL_SCALE + fpuSampleOffset;
-			const s64 w0 = edge(points[1], points[2], sampleX, sampleY);
-			const s64 w1 = edge(points[2], points[0], sampleX, sampleY);
-			const s64 w2 = edge(points[0], points[1], sampleX, sampleY);
 			if (w0 < 0 || (w0 == 0 && !topLeft0)
 					|| w1 < 0 || (w1 == 0 && !topLeft1)
 					|| w2 < 0 || (w2 == 0 && !topLeft2))
@@ -861,10 +895,9 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			const PipelineState& fragmentState = area1 && !state.useArea1VertexData
 					? *state.area1 : state;
 			const s32 shadeSampleX = x * SUBPIXEL_SCALE + tspSampleOffset;
-			const s32 shadeSampleY = y * SUBPIXEL_SCALE + tspSampleOffset;
-			const float s0 = static_cast<float>(edge(points[1], points[2], shadeSampleX, shadeSampleY) * inverseArea);
-			const float s1 = static_cast<float>(edge(points[2], points[0], shadeSampleX, shadeSampleY) * inverseArea);
-			const float s2 = static_cast<float>(edge(points[0], points[1], shadeSampleX, shadeSampleY) * inverseArea);
+			const float s0 = static_cast<float>(shadeW0 * inverseArea);
+			const float s1 = static_cast<float>(shadeW1 * inverseArea);
+			const float s2 = static_cast<float>(shadeW2 * inverseArea);
 			const float shadeZ = vertices[0].z * s0 + vertices[1].z * s1 + vertices[2].z * s2;
 
 			const float inverseZ = shadeZ == 0.f ? 0.f : 1.f / shadeZ;
@@ -1165,6 +1198,28 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			if (!state.deferArea1 && state.depthWrite)
 				depthBuffer_[offset] = z;
 		}
+	};
+#ifdef TARGET_MAC
+	const size_t rowCount = static_cast<size_t>(maxY - minY + 1);
+	if (rowCount >= 16)
+	{
+		struct RowContext
+		{
+			decltype(rasterizeRow) *rasterize;
+			s32 firstRow;
+		} rowContext { &rasterizeRow, minY };
+		dispatch_apply_f(rowCount,
+				dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+				&rowContext, [](void *opaque, size_t row) {
+					auto& context = *static_cast<RowContext *>(opaque);
+					(*context.rasterize)(context.firstRow + static_cast<s32>(row));
+				});
+	}
+	else
+#endif
+	{
+		for (s32 y = minY; y <= maxY; ++y)
+			rasterizeRow(y);
 	}
 }
 
