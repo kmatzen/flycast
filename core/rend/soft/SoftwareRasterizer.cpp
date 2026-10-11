@@ -67,6 +67,11 @@ float wrapCoordinate(float coordinate, bool clamp, bool flip)
 		return 0.f;
 	if (clamp)
 		return std::clamp(coordinate, 0.f, 1.f);
+	// Texture coordinates produced by ordinary Dreamcast polygons are already
+	// in the fundamental repeat interval. Avoid a floor operation for every
+	// axis and every (potentially supersampled) fragment in that common case.
+	if (coordinate >= 0.f && coordinate < 1.f)
+		return coordinate;
 	if (flip)
 	{
 		float period = std::floor(coordinate);
