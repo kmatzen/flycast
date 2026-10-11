@@ -122,28 +122,42 @@ u32 wrapTexel(s32 coordinate, u32 size, bool clamp, bool flip)
 	return static_cast<u32>(wrapped);
 }
 
-std::array<float, 4> factor(BlendFactor blendFactor, Color source, Color destination,
+std::array<u16, 4> factorNumerator(BlendFactor blendFactor, Color source, Color destination,
 		bool sourceTerm)
 {
 	const Color other = sourceTerm ? destination : source;
 	switch (blendFactor)
 	{
 	case BlendFactor::Zero: return { 0, 0, 0, 0 };
-	case BlendFactor::One: return { 1, 1, 1, 1 };
+	case BlendFactor::One: return { 255, 255, 255, 255 };
 	case BlendFactor::OtherColor:
-		return { other.r / 255.f, other.g / 255.f, other.b / 255.f, other.a / 255.f };
+		return { other.r, other.g, other.b, other.a };
 	case BlendFactor::OneMinusOtherColor:
-		return { 1 - other.r / 255.f, 1 - other.g / 255.f, 1 - other.b / 255.f, 1 - other.a / 255.f };
+		return { static_cast<u16>(255 - other.r), static_cast<u16>(255 - other.g),
+				static_cast<u16>(255 - other.b), static_cast<u16>(255 - other.a) };
 	case BlendFactor::SrcAlpha:
-		return { source.a / 255.f, source.a / 255.f, source.a / 255.f, source.a / 255.f };
+		return { source.a, source.a, source.a, source.a };
 	case BlendFactor::OneMinusSrcAlpha:
-		return { 1 - source.a / 255.f, 1 - source.a / 255.f, 1 - source.a / 255.f, 1 - source.a / 255.f };
+		return { static_cast<u16>(255 - source.a), static_cast<u16>(255 - source.a),
+				static_cast<u16>(255 - source.a), static_cast<u16>(255 - source.a) };
 	case BlendFactor::DstAlpha:
-		return { destination.a / 255.f, destination.a / 255.f, destination.a / 255.f, destination.a / 255.f };
+		return { destination.a, destination.a, destination.a, destination.a };
 	case BlendFactor::OneMinusDstAlpha:
-		return { 1 - destination.a / 255.f, 1 - destination.a / 255.f, 1 - destination.a / 255.f, 1 - destination.a / 255.f };
+		return { static_cast<u16>(255 - destination.a), static_cast<u16>(255 - destination.a),
+				static_cast<u16>(255 - destination.a), static_cast<u16>(255 - destination.a) };
 	}
 	return {};
+}
+
+u8 blendChannel(u8 source, u8 destination, u16 sourceFactor, u16 destinationFactor)
+{
+	// All PVR blend factors are exact 8-bit fractions. The largest numerator
+	// is 2 * 255 * 255, so this stays comfortably within an unsigned integer.
+	// Division by the odd value 255 can never produce an exact half-integer;
+	// adding 127 therefore matches round-to-nearest without a tie case.
+	return static_cast<u8>(std::min<u32>(255,
+			(static_cast<u32>(source) * sourceFactor
+					+ static_cast<u32>(destination) * destinationFactor + 127) / 255));
 }
 
 } // namespace
@@ -370,25 +384,13 @@ Color SoftwareRasterizer::blend(Color source, Color destination, BlendFactor sou
 		return source;
 	if (sourceFactor == BlendFactor::Zero && destinationFactor == BlendFactor::One)
 		return destination;
-	if (sourceFactor == BlendFactor::SrcAlpha
-			&& destinationFactor == BlendFactor::OneMinusSrcAlpha)
-	{
-		const float sourceAlpha = source.a / 255.f;
-		const float destinationAlpha = 1.f - sourceAlpha;
-		return {
-			clampByte(source.r * sourceAlpha + destination.r * destinationAlpha),
-			clampByte(source.g * sourceAlpha + destination.g * destinationAlpha),
-			clampByte(source.b * sourceAlpha + destination.b * destinationAlpha),
-			clampByte(source.a * sourceAlpha + destination.a * destinationAlpha),
-		};
-	}
-	const auto sf = factor(sourceFactor, source, destination, true);
-	const auto df = factor(destinationFactor, source, destination, false);
+	const auto sf = factorNumerator(sourceFactor, source, destination, true);
+	const auto df = factorNumerator(destinationFactor, source, destination, false);
 	return {
-		clampByte(source.r * sf[0] + destination.r * df[0]),
-		clampByte(source.g * sf[1] + destination.g * df[1]),
-		clampByte(source.b * sf[2] + destination.b * df[2]),
-		clampByte(source.a * sf[3] + destination.a * df[3]),
+		blendChannel(source.r, destination.r, sf[0], df[0]),
+		blendChannel(source.g, destination.g, sf[1], df[1]),
+		blendChannel(source.b, destination.b, sf[2], df[2]),
+		blendChannel(source.a, destination.a, sf[3], df[3]),
 	};
 }
 
