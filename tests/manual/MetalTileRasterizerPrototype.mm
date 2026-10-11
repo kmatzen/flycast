@@ -1,10 +1,14 @@
 // Standalone feasibility test for a GPU-executed, tile-ordered software PVR.
 // Build on macOS with:
-//   clang++ -std=c++20 -O3 -fobjc-arc -framework Foundation -framework Metal \
-//     tests/manual/MetalTileRasterizerPrototype.mm -o /tmp/metal-tile-prototype
+//   clang++ -std=c++20 -O3 -fobjc-arc -Icore -Icore/deps/nowide/include \
+//     -framework Foundation \
+//     -framework Metal tests/manual/MetalTileRasterizerPrototype.mm \
+//     core/rend/soft/HybridTileRenderer.mm -o /tmp/metal-tile-prototype
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+
+#include "rend/soft/HybridTileRenderer.h"
 
 #include <algorithm>
 #include <array>
@@ -27,22 +31,7 @@ constexpr int32_t SubpixelScale = 16;
 constexpr int32_t SampleOffset = 8;
 constexpr uint32_t TextureSize = 64;
 
-struct Triangle {
-  int32_t x[3];
-  int32_t y[3];
-  float z[3];
-  float u[3];
-  float v[3];
-  uint32_t color[3];
-  // Bit 0: source-alpha blend. Bit 1: depth write.
-  uint32_t flags;
-  int32_t minX;
-  int32_t minY;
-  int32_t maxX;
-  int32_t maxY;
-};
-
-static_assert(sizeof(Triangle) == 92);
+using Triangle = rend::soft::hybrid::Triangle;
 
 uint32_t channel(uint32_t color, uint32_t shift) {
   return (color >> shift) & 0xff;
@@ -498,17 +487,67 @@ int main() {
       depthMismatches +=
           std::memcmp(&gpuDepths[i], &referenceDepths[i], sizeof(float)) != 0;
     }
+    std::vector<uint32_t> productionColors;
+    std::vector<float> productionDepths;
+    const rend::soft::hybrid::Frame productionFrame{
+        Width, Height, TextureSize, TextureSize, &triangles, &texture};
+    // The first dispatch pays Metal's lazy pipeline warm-up cost. Validate the
+    // steady-state path used by subsequent emulated frames separately.
+    if (!rend::soft::hybrid::render(productionFrame, productionColors,
+                                    productionDepths)) {
+      std::fprintf(stderr, "Production hybrid backend unavailable\n");
+      return 2;
+    }
+    rend::soft::hybrid::Timing productionTiming;
+    if (!rend::soft::hybrid::render(productionFrame, productionColors,
+                                    productionDepths, &productionTiming)) {
+      std::fprintf(stderr, "Production hybrid backend failed after warm-up\n");
+      return 2;
+    }
+    size_t productionColorMismatches = 0;
+    size_t productionDepthMismatches = 0;
+    for (size_t i = 0; i < referenceColors.size(); ++i) {
+      productionColorMismatches += productionColors[i] != referenceColors[i];
+      productionDepthMismatches +=
+          std::memcmp(&productionDepths[i], &referenceDepths[i],
+                      sizeof(float)) != 0;
+    }
+    std::vector<Triangle> invalidTriangles = triangles;
+    invalidTriangles[0].x[2] = invalidTriangles[0].x[1];
+    invalidTriangles[0].y[2] = invalidTriangles[0].y[1];
+    const rend::soft::hybrid::Frame invalidFrame{
+        Width, Height, TextureSize, TextureSize, &invalidTriangles, &texture};
+    std::vector<uint32_t> fallbackColors{0x12345678u};
+    std::vector<float> fallbackDepths{.25f};
+    if (rend::soft::hybrid::render(invalidFrame, fallbackColors,
+                                   fallbackDepths) ||
+        fallbackColors != std::vector<uint32_t>{0x12345678u} ||
+        fallbackDepths != std::vector<float>{.25f}) {
+      std::fprintf(stderr, "Invalid hybrid work modified fallback state\n");
+      return 2;
+    }
     const double cpuMs =
         std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count() /
         20.;
     const double gpuMs =
         std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count() /
         100.;
-    std::printf("device=%s triangles=%zu tile_refs=%zu cpu_ms=%.3f gpu_ms=%.3f "
-                "speedup=%.2fx color_mismatches=%zu depth_bit_mismatches=%zu\n",
-                [device.name UTF8String], triangles.size(),
-                tileReferences.size(), cpuMs, gpuMs, cpuMs / gpuMs,
-                colorMismatches, depthMismatches);
-    return colorMismatches == 0 ? 0 : 1;
+    std::printf(
+        "device=%s triangles=%zu tile_refs=%zu cpu_ms=%.3f gpu_ms=%.3f "
+        "speedup=%.2fx color_mismatches=%zu depth_bit_mismatches=%zu "
+        "production_encode_ms=%.3f production_gpu_ms=%.3f "
+        "production_readback_ms=%.3f "
+        "production_color_mismatches=%zu "
+        "production_depth_bit_mismatches=%zu\n",
+        [device.name UTF8String], triangles.size(), tileReferences.size(),
+        cpuMs, gpuMs, cpuMs / gpuMs, colorMismatches, depthMismatches,
+        productionTiming.encodeMilliseconds, productionTiming.gpuMilliseconds,
+        productionTiming.readbackMilliseconds, productionColorMismatches,
+        productionDepthMismatches);
+    return colorMismatches == 0 && depthMismatches == 0 &&
+                   productionColorMismatches == 0 &&
+                   productionDepthMismatches == 0
+               ? 0
+               : 1;
   }
 }

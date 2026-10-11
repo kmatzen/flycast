@@ -15,7 +15,15 @@ target_sources(${PROJECT_NAME} PRIVATE
         soft/SoftwareRasterizer.h
         soft/SoftwareRenderer.cpp
         soft/SoftwareRenderer.h
+        soft/HybridTileRenderer.cpp
+        soft/HybridTileRenderer.h
         norend/norend.cpp)
+
+if(APPLE AND NOT IOS)
+    target_sources(${PROJECT_NAME} PRIVATE soft/HybridTileRenderer.mm)
+    find_library(HYBRID_METAL_LIBRARY Metal REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${HYBRID_METAL_LIBRARY})
+endif()
 
 if(USE_OPENGL)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OPENGL)
