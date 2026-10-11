@@ -3,6 +3,7 @@
 #include "types.h"
 
 #include <array>
+#include <utility>
 #include <vector>
 
 namespace rend::soft {
@@ -256,6 +257,86 @@ private:
 		bool area1DstSelect = false;
 	};
 
+	class FragmentList
+	{
+	public:
+		bool empty() const { return !inlineUsed_ && multiple_.empty(); }
+		bool multiple() const { return !multiple_.empty(); }
+
+		void clear()
+		{
+			inlineUsed_ = false;
+			multiple_.clear();
+		}
+
+		void push_back(const Fragment& fragment)
+		{
+			if (!multiple_.empty())
+			{
+				multiple_.push_back(fragment);
+				return;
+			}
+			if (!inlineUsed_)
+			{
+				inline_ = fragment;
+				inlineUsed_ = true;
+				return;
+			}
+			multiple_.push_back(inline_);
+			multiple_.push_back(fragment);
+			inlineUsed_ = false;
+		}
+
+		Fragment& back() { return multiple_.empty() ? inline_ : multiple_.back(); }
+		const Fragment& back() const { return multiple_.empty() ? inline_ : multiple_.back(); }
+
+		template<typename Visitor>
+		void forEach(Visitor&& visitor)
+		{
+			if (inlineUsed_)
+				visitor(inline_);
+			else
+				for (Fragment& fragment : multiple_)
+					visitor(fragment);
+		}
+
+		template<typename Visitor>
+		void forEach(Visitor&& visitor) const
+		{
+			if (inlineUsed_)
+				visitor(inline_);
+			else
+				for (const Fragment& fragment : multiple_)
+					visitor(fragment);
+		}
+
+		template<typename Visitor>
+		void forEachReverseUntil(Visitor&& visitor)
+		{
+			if (inlineUsed_)
+			{
+				visitor(inline_);
+				return;
+			}
+			for (auto it = multiple_.rbegin(); it != multiple_.rend(); ++it)
+				if (visitor(*it))
+					break;
+		}
+
+		template<typename Compare>
+		void stableSort(Compare&& compare)
+		{
+			if (!multiple_.empty())
+				std::stable_sort(multiple_.begin(), multiple_.end(),
+						std::forward<Compare>(compare));
+		}
+
+	private:
+		Fragment inline_ {};
+		bool inlineUsed_ = false;
+		std::vector<Fragment> multiple_;
+	};
+
 	u32 width_ = 0;
 	u32 height_ = 0;
 	std::vector<Color> colorBuffer_;
@@ -263,7 +344,7 @@ private:
 	std::vector<u8> stencilBuffer_;
 	std::vector<Color> secondaryBuffer_;
 	std::vector<u32> visibilityBuffer_;
-	std::vector<std::vector<Fragment>> deferredFragments_;
+	std::vector<FragmentList> deferredFragments_;
 };
 
 } // namespace rend::soft

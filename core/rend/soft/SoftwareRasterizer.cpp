@@ -238,13 +238,12 @@ void SoftwareRasterizer::resolveDeferredFragments()
 		auto& fragments = deferredFragments_[offset];
 		if (fragments.empty())
 			continue;
-		std::stable_sort(fragments.begin(), fragments.end(), [](const Fragment& left, const Fragment& right) {
+		fragments.stableSort([](const Fragment& left, const Fragment& right) {
 			return left.depth < right.depth || (left.depth == right.depth && left.sequence < right.sequence);
 		});
 		Color finalColor = colorBuffer_[offset];
 		Color secondary = secondaryBuffer_[offset];
-		for (const Fragment& fragment : fragments)
-		{
+		fragments.forEach([&](const Fragment& fragment) {
 			const bool area1 = fragment.shadowEnabled && (fragment.modifier & 2) != 0
 					&& fragment.hasArea1;
 			Color fragmentColor = area1 ? fragment.area1Color : fragment.color;
@@ -262,7 +261,7 @@ void SoftwareRasterizer::resolveDeferredFragments()
 				secondary = result;
 			else
 				finalColor = result;
-		}
+		});
 		const Fragment& last = fragments.back();
 		if (last.dither)
 		{
@@ -1210,17 +1209,19 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 					if (state.deferArea1)
 					{
 						auto& fragments = deferredFragments_[offset];
-						for (auto it = fragments.rbegin(); it != fragments.rend(); ++it)
-							if (it->sequence == state.sequence && it->depth == z)
+						fragments.forEachReverseUntil([&](Fragment& fragment) {
+							if (fragment.sequence == state.sequence && fragment.depth == z)
 							{
-								it->hasArea1 = true;
-								it->area1Color = source;
-								it->area1SrcBlend = fragmentState.srcBlend;
-								it->area1DstBlend = fragmentState.dstBlend;
-								it->area1SrcSelect = fragmentState.srcSelect;
-								it->area1DstSelect = fragmentState.dstSelect;
-								break;
+								fragment.hasArea1 = true;
+								fragment.area1Color = source;
+								fragment.area1SrcBlend = fragmentState.srcBlend;
+								fragment.area1DstBlend = fragmentState.dstBlend;
+								fragment.area1SrcSelect = fragmentState.srcSelect;
+								fragment.area1DstSelect = fragmentState.dstSelect;
+								return true;
 							}
+							return false;
+						});
 					}
 					else
 					{
@@ -1347,14 +1348,13 @@ void SoftwareRasterizer::drawModifierTriangle(const Vertex& in0, const Vertex& i
 			{
 				const float z = static_cast<float>((vertices[0].z * w0 + vertices[1].z * w1
 						+ vertices[2].z * w2) * inverseArea);
-				for (Fragment& fragment : deferredFragments_[offset])
-				{
+				deferredFragments_[offset].forEach([&](Fragment& fragment) {
 					if (!fragment.shadowEnabled)
-						continue;
+						return;
 					if (mode == ModifierMode::Xor || mode == ModifierMode::Or)
 					{
 						if (z <= fragment.depth)
-							continue;
+							return;
 						if (mode == ModifierMode::Xor)
 							fragment.modifier ^= 1;
 						else
@@ -1377,7 +1377,7 @@ void SoftwareRasterizer::drawModifierTriangle(const Vertex& in0, const Vertex& i
 						if ((previous & 3) == 2)
 							fragment.modifier |= 2;
 					}
-				}
+				});
 				continue;
 			}
 			if (mode == ModifierMode::Xor || mode == ModifierMode::Or)
