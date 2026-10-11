@@ -1,6 +1,7 @@
 #include "rend/soft/SoftwareRasterizer.h"
 #include "hw/pvr/pvr_regs.h"
 
+#include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
 
@@ -101,6 +102,67 @@ TEST(SoftwareRasterizer, BlendsUsingPvrFactors)
 	EXPECT_EQ(SoftwareRasterizer::blend(source, destination, BlendFactor::One, BlendFactor::Zero), source);
 	EXPECT_EQ(SoftwareRasterizer::blend(source, destination, BlendFactor::SrcAlpha,
 			BlendFactor::OneMinusSrcAlpha), (Color { 110, 70, 65, 96 }));
+}
+
+TEST(SoftwareRasterizer, ExhaustivelyMatchesStandardAlphaBlendEquation)
+{
+	for (unsigned alpha = 0; alpha <= 255; ++alpha)
+		for (unsigned sourceValue = 0; sourceValue <= 255; ++sourceValue)
+			for (unsigned destinationValue = 0; destinationValue <= 255; ++destinationValue)
+			{
+				const Color source { static_cast<u8>(sourceValue), static_cast<u8>(sourceValue),
+						static_cast<u8>(sourceValue), static_cast<u8>(alpha) };
+				const Color destination { static_cast<u8>(destinationValue),
+						static_cast<u8>(destinationValue), static_cast<u8>(destinationValue),
+						static_cast<u8>(destinationValue) };
+				const Color result = SoftwareRasterizer::blend(source, destination,
+						BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha);
+				const float sourceFactor = alpha / 255.f;
+				const float destinationFactor = 1.f - sourceFactor;
+				const u8 expectedRgb = static_cast<u8>(std::clamp(std::lround(
+						sourceValue * sourceFactor + destinationValue * destinationFactor),
+						0l, 255l));
+				const u8 expectedAlpha = static_cast<u8>(std::clamp(std::lround(
+						alpha * sourceFactor + destinationValue * destinationFactor), 0l, 255l));
+				if (!(result == Color { expectedRgb, expectedRgb, expectedRgb, expectedAlpha }))
+				{
+					ADD_FAILURE() << "alpha=" << alpha << " source=" << sourceValue
+							<< " destination=" << destinationValue;
+					return;
+				}
+			}
+}
+
+TEST(SoftwareRasterizer, ImplementsAllTextureShadingInstructions)
+{
+	const Color base { 100, 150, 200, 128 };
+	const Color texel { 200, 100, 50, 64 };
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.texture = SoftwareRasterizer::makeTextureView(&texel, 1, 1, false);
+	const Vertex v0 { 0, 0, 1, base };
+	const Vertex v1 { 2, 0, 1, base };
+	const Vertex v2 { 0, 2, 1, base };
+	const Color expected[] {
+		texel,
+		{ 78, 59, 39, 64 },
+		{ 125, 137, 162, 128 },
+		{ 78, 59, 39, 32 },
+	};
+	for (u8 instruction = 0; instruction < 4; ++instruction)
+	{
+		SoftwareRasterizer rasterizer(1, 1);
+		state.shadingInstruction = instruction;
+		rasterizer.drawTriangle(v0, v1, v2, state);
+		EXPECT_EQ(rasterizer.pixel(0, 0), expected[instruction])
+				<< "instruction=" << static_cast<unsigned>(instruction);
+	}
+
+	SoftwareRasterizer ignoreAlpha(1, 1);
+	state.shadingInstruction = 0;
+	state.ignoreTextureAlpha = true;
+	ignoreAlpha.drawTriangle(v0, v1, v2, state);
+	EXPECT_EQ(ignoreAlpha.pixel(0, 0), (Color { 200, 100, 50, 255 }));
 }
 
 TEST(SoftwareRasterizer, PreservesFragmentAlphaOutsidePunchThrough)
