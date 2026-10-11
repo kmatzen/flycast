@@ -376,6 +376,9 @@ Color SoftwareRasterizer::blend(Color source, Color destination, BlendFactor sou
 	};
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
 Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, float v,
 		const PipelineState& state, float pvrD)
 {
