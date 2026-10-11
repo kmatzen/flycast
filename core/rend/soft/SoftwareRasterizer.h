@@ -200,6 +200,7 @@ public:
 			BlendFactor destinationFactor);
 	static Color sampleTexture(const TextureView& texture, float u, float v,
 			const PipelineState& state, float pvrD = 1.f);
+	static void forceNearestFiltering(PipelineState& state);
 	static TextureView makeTextureView(const Color *pixels, u32 width, u32 height,
 			bool mipmapped);
 	static std::vector<Color> generateMipChain(const Color *pixels, u32 dimension);

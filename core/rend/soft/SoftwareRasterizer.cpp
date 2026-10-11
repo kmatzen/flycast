@@ -465,6 +465,14 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 #endif
 }
 
+void SoftwareRasterizer::forceNearestFiltering(PipelineState& state)
+{
+	state.bilinearFilter = false;
+	state.textureSuperSample = false;
+	state.trilinearFilter = false;
+	state.texture.mipLevelCount = std::min<u8>(1, state.texture.mipLevelCount);
+}
+
 TextureView SoftwareRasterizer::makeTextureView(const Color *pixels, u32 width, u32 height,
 		bool mipmapped)
 {

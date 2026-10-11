@@ -930,7 +930,9 @@ private:
 		if (poly.pcw.Texture)
 			state.texture = currentTexture(poly.texture);
 		const bool hasMipChain = state.texture.mipLevelCount > 1;
-		const bool validTrilinear = poly.tsp.FilterMode > 1 && hasMipChain && !punchThrough;
+		const bool forceNearest = config::TextureFiltering == 1;
+		const bool validTrilinear = poly.tsp.FilterMode > 1 && hasMipChain
+				&& !punchThrough && !forceNearest;
 		// The PVR processes an invalid trilinear request (no mip chain) as
 		// point sampled, not as ordinary bilinear filtering.
 		state.bilinearFilter = poly.tsp.FilterMode == 1 || validTrilinear;
@@ -942,15 +944,6 @@ private:
 		state.tspPixelCenter = (rendContext->half_offset & 2) != 0;
 		state.texelSampleCenter = (rendContext->half_offset & 4) != 0;
 		state.textureSuperSample = poly.tsp.SupSample;
-		if (config::TextureFiltering == 1)
-		{
-			// Match the hardware backends' force-nearest option. Besides selecting
-			// point samples, hide the mip chain so the scalar path can skip the
-			// derivative calculation that is irrelevant to nearest filtering.
-			state.bilinearFilter = false;
-			state.textureSuperSample = false;
-			state.texture.mipLevelCount = std::min<u8>(1, state.texture.mipLevelCount);
-		}
 		state.dCalcCtrl = poly.isp.DCalcCtrl;
 		const glm::mat4& viewport = matrices.GetViewportMatrix();
 		state.nativeToHostScaleX = std::abs(viewport[0][0]);
@@ -985,6 +978,8 @@ private:
 		state.mipDAdjust = poly.tsp.MipMapD == 0 ? 1.f : poly.tsp.MipMapD / 4.f;
 		state.trilinearFilter = poly.pcw.Texture && validTrilinear;
 		state.trilinearPassB = poly.tsp.FilterMode == 3;
+		if (forceNearest)
+			SoftwareRasterizer::forceNearestFiltering(state);
 		state.shadeScale = rendContext->fpu_shad_scale.scale_factor;
 		configureClip(poly.tileclip, state);
 	}
@@ -1001,8 +996,9 @@ private:
 		if (poly.pcw.Texture)
 			state.texture = currentTexture(poly.texture1);
 		const bool hasMipChain = state.texture.mipLevelCount > 1;
+		const bool forceNearest = config::TextureFiltering == 1;
 		const bool validTrilinear = poly.tsp1.FilterMode > 1 && hasMipChain
-				&& !state.alphaTest;
+				&& !state.alphaTest && !forceNearest;
 		state.bilinearFilter = poly.tsp1.FilterMode == 1 || validTrilinear;
 		state.clampU = poly.tsp1.ClampU;
 		state.clampV = poly.tsp1.ClampV;
@@ -1028,6 +1024,8 @@ private:
 		state.mipDAdjust = poly.tsp1.MipMapD == 0 ? 1.f : poly.tsp1.MipMapD / 4.f;
 		state.trilinearFilter = poly.pcw.Texture && validTrilinear;
 		state.trilinearPassB = poly.tsp1.FilterMode == 3;
+		if (forceNearest)
+			SoftwareRasterizer::forceNearestFiltering(state);
 	}
 
 	void configureClip(u32 tileclip, PipelineState& state)

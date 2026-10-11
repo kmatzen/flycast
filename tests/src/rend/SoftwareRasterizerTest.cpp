@@ -1261,6 +1261,24 @@ TEST(SoftwareRasterizer, AppliesTrilinearPassWeight)
 	EXPECT_EQ(magnified.pixel(0, 0), (Color { 100, 50, 20, 64 }));
 }
 
+TEST(SoftwareRasterizer, ForceNearestDisablesEveryTextureFilteringStage)
+{
+	Color texels[5] {};
+	PipelineState state;
+	state.texture = SoftwareRasterizer::makeTextureView(texels, 2, 2, true);
+	state.bilinearFilter = true;
+	state.textureSuperSample = true;
+	state.trilinearFilter = true;
+	ASSERT_GT(state.texture.mipLevelCount, 1);
+
+	SoftwareRasterizer::forceNearestFiltering(state);
+
+	EXPECT_FALSE(state.bilinearFilter);
+	EXPECT_FALSE(state.textureSuperSample);
+	EXPECT_FALSE(state.trilinearFilter);
+	EXPECT_EQ(state.texture.mipLevelCount, 1);
+}
+
 TEST(SoftwareRasterizer, RejectsInvalidAndSafelyClampsExtremeCoordinates)
 {
 	SoftwareRasterizer rasterizer(1, 1);
