@@ -323,49 +323,12 @@ public:
 		else
 		{
 			rawFrameStore = std::move(frameStore);
-			FramebufferInfo info;
-			// Render jobs may execute after the emulated CPU has already begun
-			// programming the following frame. Scan out using the register image
-			// captured with this STARTRENDER, never a mixture of later live state.
-			info.fb_r_size = rendContext->fb_R_SIZE;
-			info.fb_r_ctrl = rendContext->fb_R_CTRL;
-			info.spg_control = rendContext->spg_control;
-			info.spg_status = rendContext->spg_status;
-			info.fb_r_sof1 = rendContext->fb_R_SOF1;
-			info.fb_r_sof2 = rendContext->fb_R_SOF2;
-			info.vo_control = rendContext->vo_control;
-			info.vo_border_col = rendContext->vo_border_col;
-			int displayWidth = 0;
-			int displayHeight = 0;
-			getDCFramebufferReadSize(info, displayWidth, displayHeight);
-			presentationWidth = std::max(1, displayWidth);
-			presentationHeight = std::max(1, displayHeight);
-			if (info.fb_r_ctrl.fb_enable == 0 || info.vo_control.blank_video == 1)
-			{
-				const Color border {
-						static_cast<u8>(info.vo_border_col.red() * 255.f),
-						static_cast<u8>(info.vo_border_col.green() * 255.f),
-						static_cast<u8>(info.vo_border_col.blue() * 255.f), 255 };
-				presentationBuffer.assign(static_cast<size_t>(presentationWidth)
-						* presentationHeight, border);
-			}
-			else
-			{
-				PixelBuffer<u32> pixels;
-				ReadFramebuffer(info, pixels, displayWidth, displayHeight);
-				presentationWidth = std::max(1, displayWidth);
-				presentationHeight = std::max(1, displayHeight);
-				presentationBuffer.resize(static_cast<size_t>(presentationWidth)
-						* presentationHeight);
-				for (u32 y = 0; y < presentationHeight; ++y)
-					for (u32 x = 0; x < presentationWidth; ++x)
-					{
-						const u32 value = *pixels.data(x, y);
-						presentationBuffer[static_cast<size_t>(y) * presentationWidth + x] = {
-								static_cast<u8>(value), static_cast<u8>(value >> 8),
-								static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) };
-					}
-			}
+			// A normal PVR render targets its internal frame store. It is not
+			// written to Dreamcast VRAM unless framebuffer emulation is enabled,
+			// so present the committed software frame directly.
+			presentationBuffer = rawFrameStore;
+			presentationWidth = rasterizer->width();
+			presentationHeight = rasterizer->height();
 		}
 		activeCoverageMask = nullptr;
 		if (!rendContext->isRTT)
