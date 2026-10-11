@@ -29,7 +29,9 @@ static void CCN_PTEH_write(u32 addr, u32 value)
 	temp.reg_data = value & 0xfffffcff;
 #ifdef FAST_MMU
 	if (temp.ASID != CCN_PTEH.ASID)
-		mmuAddressLUTFlush(false);
+		// ASID participates in every non-shared user translation, not only
+		// addresses in the first 32 MiB slot.
+		mmuAddressLUTFlush(true);
 #endif
 
 	CCN_PTEH = temp;
@@ -41,6 +43,9 @@ static void CCN_MMUCR_write(u32 addr, u32 value)
 	temp.reg_data = value & 0xfcfcff05;
 
 	bool mmu_changed_state = temp.AT != CCN_MMUCR.AT;
+#ifdef FAST_MMU
+	bool translation_context_changed = temp.SV != CCN_MMUCR.SV;
+#endif
 
 	if (temp.TI != 0)
 	{
@@ -50,6 +55,11 @@ static void CCN_MMUCR_write(u32 addr, u32 value)
 		temp.TI = 0;
 	}
 	CCN_MMUCR = temp;
+
+#ifdef FAST_MMU
+	if (translation_context_changed)
+		mmuAddressLUTFlush(true);
+#endif
 
 	if (mmu_changed_state)
 	{
@@ -145,5 +155,22 @@ void CCNRegisters::init()
 	// CCN PRR 0xFF000044 0x1F000044 (undocumented)
 	setReadOnly<CCN_PRR_addr>(CCN_PRR_read);
 
-	reset();
+	reset(true);
+}
+
+void CCNRegisters::reset(bool hard)
+{
+	// TEA and the two UBC ASID registers are held by a manual reset. Their
+	// power-on values are undefined, for which zero remains our deterministic
+	// initialization value.
+	const u32 tea = CCN_TEA;
+	const u32 basra = CCN_BASRA;
+	const u32 basrb = CCN_BASRB;
+	super::reset();
+	if (!hard)
+	{
+		CCN_TEA = tea;
+		CCN_BASRA = basra;
+		CCN_BASRB = basrb;
+	}
 }

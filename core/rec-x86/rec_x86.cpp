@@ -107,21 +107,6 @@ void X86Compiler::compile(RuntimeBlockInfo* block, bool force_checks, bool optim
 	unwinder.endProlog(0);
 
 	checkBlock(force_checks, block);
-	if (mmu_enabled() && block->has_fpu_op)
-	{
-		Xbyak::Label fpu_enabled;
-		mov(eax, dword[&sh4ctx.sr.status]);
-		test(eax, 0x8000);			// test SR.FD bit
-		jz(fpu_enabled);
-		push(Sh4Ex_FpuDisabled);	// exception code
-		push(block->vaddr);			// pc
-		call((void (*)())Do_Exception);
-		add(esp, 8);
-		mov(ecx, dword[&sh4ctx.pc]);
-		jmp((const void *)no_update);
-		L(fpu_enabled);
-	}
-
 	mov(eax, dword[&sh4ctx.cycle_counter]);
 	test(eax, eax);
 	Xbyak::Label no_up;
@@ -129,6 +114,41 @@ void X86Compiler::compile(RuntimeBlockInfo* block, bool force_checks, bool optim
 	mov(ecx, block->vaddr);
 	call((const void *)intc_sched);
 	L(no_up);
+	cmp(dword[&sh4ctx.interrupt_pend], 0);
+	Xbyak::Label no_pending_interrupt;
+	je(no_pending_interrupt, T_SHORT);
+	mov(dword[&sh4ctx.pc], block->vaddr);
+	call((void *)UpdateINTC);
+	mov(ecx, dword[&sh4ctx.pc]);
+	jmp((const void *)no_update);
+	L(no_pending_interrupt);
+	// SR.FD is architectural in both MMU modes; cached blocks can outlive a
+	// change to it. Check it after interrupt recognition, but before the first
+	// guest instruction in the block executes.
+	if (block->has_fpu_op)
+	{
+		Xbyak::Label fpu_enabled;
+		mov(eax, dword[&sh4ctx.sr.status]);
+		test(eax, 0x8000);			// test SR.FD bit
+		jz(fpu_enabled);
+		sub(dword[&sh4ctx.cycle_counter], block->entry_cycles);
+		push(Sh4Ex_FpuDisabled);	// exception code
+		push(block->vaddr);			// pc
+		call((void (*)())Do_Exception);
+		add(esp, 8);
+		mov(ecx, dword[&sh4ctx.pc]);
+		jmp((const void *)no_update);
+		L(fpu_enabled);
+
+		Xbyak::Label fpscr_matches;
+		mov(eax, dword[&sh4ctx.fpscr.full]);
+		xor_(eax, block->fpu_cfg.full);
+		test(eax, RuntimeBlockInfo::FpscrDecodeMask);
+		jz(fpscr_matches);
+		mov(ecx, block->vaddr);
+		jmp((const void *)no_update);
+		L(fpscr_matches);
+	}
 	sub(dword[&sh4ctx.cycle_counter], block->guest_cycles);
 
 	regalloc.doAlloc(block);
@@ -610,6 +630,9 @@ bool X86Compiler::genReadMemImmediate(const shil_opcode& op, RuntimeBlockInfo* b
 {
 	if (!op.rs1.is_imm())
 		return false;
+	if ((op.rs1._imm & 0x80000000) != 0 || (op.size == 8 && op.rs1._imm == 0x7ffffffc)
+			|| (op.size > 1 && (op.rs1._imm & (op.size - 1)) != 0))
+		return false;
 	void *ptr;
 	bool isram;
 	u32 addr;
@@ -722,6 +745,9 @@ bool X86Compiler::genWriteMemImmediate(const shil_opcode& op, RuntimeBlockInfo* 
 {
 	if (!op.rs1.is_imm())
 		return false;
+	if ((op.rs1._imm & 0x80000000) != 0 || (op.size == 8 && op.rs1._imm == 0x7ffffffc)
+			|| (op.size > 1 && (op.rs1._imm & (op.size - 1)) != 0))
+		return false;
 	void *ptr;
 	bool isram;
 	u32 addr;
@@ -825,7 +851,7 @@ void X86Compiler::checkBlock(bool smc_checks, RuntimeBlockInfo* block)
 	if (!smc_checks)
 		return;
 
-	s32 sz = block->sh4_code_size;
+	s32 sz = block->contiguousCodeSize();
 	u32 sa = block->addr;
 	while (sz > 0)
 	{
@@ -840,6 +866,15 @@ void X86Compiler::checkBlock(bool smc_checks, RuntimeBlockInfo* block)
 		}
 		sz -= 4;
 		sa += 4;
+	}
+	if (block->tail_addr != NullAddress)
+	{
+		u16 *tail = (u16 *)GetMemPtr(block->tail_addr, sizeof(*tail));
+		if (tail != nullptr)
+		{
+			cmp(word[tail], block->tail_opcode);
+			jne((const void *)ngen_blockcheckfail);
+		}
 	}
 }
 

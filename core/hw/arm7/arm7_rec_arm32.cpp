@@ -286,6 +286,19 @@ static void emitDataProcOp(const ArmOp& op)
 		die("invalid op");
 		break;
 	}
+
+	// The assembler may choose a different immediate rotation after the
+	// guest Operand2 value has been decoded. For logical flag operations,
+	// restore the carry produced by the guest encoding's actual rotation.
+	if ((op.flags & ArmOp::OP_SETS_FLAGS) && op.isLogicalOp()
+			&& op.immediateCarryValid)
+	{
+		ass.Mrs(r3, APSR);
+		ass.Bic(r3, r3, 1u << 29);
+		if (op.immediateCarry)
+			ass.Orr(r3, r3, 1u << 29);
+		ass.Msr(APSR_nzcvq, r3);
+	}
 }
 
 static void jump(const void *code)
@@ -421,6 +434,9 @@ static void emitFallback(const ArmOp& op)
 	//Call interpreter
 	ass.Mov(r0, op.arg[0].getImmediate());
 	call((void *)recompiler::interpret);
+	// ARM32 stores APSR back to RN_PSR_FLAGS unconditionally at block exit.
+	// Reload the flags produced by interpret() after the helper clobbers APSR.
+	loadFlags();
 }
 
 void arm7backend_compile(const std::vector<ArmOp>& block_ops, u32 cycles)

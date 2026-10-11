@@ -377,7 +377,8 @@ void init()
 		sys_nvmem = new SRamChip(settings.platform.flash_size);
 		break;
 	case DC_PLATFORM_ATOMISWAVE:
-		sys_rom = new DCFlashChip(settings.platform.bios_size, settings.platform.bios_size / 2);
+		sys_rom = new DCFlashChip(settings.platform.bios_size, settings.platform.bios_size / 2,
+				DCFlashChip::Type::Macronix29L001MC);
 		sys_nvmem = new SRamChip(settings.platform.flash_size);
 		break;
 	case DC_PLATFORM_SYSTEMSP:

@@ -37,8 +37,9 @@ public:
 	virtual bool sendReceive(const MapleMsg& txMsg, MapleMsg& rxMsg) = 0;
 	//! Called on GetLastError command over previous writes
 	//! @param[in] msg The message which contains GetLastError command
-	//! @return true iff successful
-	virtual bool handleGetLastError(const MapleMsg& msg) = 0;
+	//! @param[out] response The response returned by the linked device
+	//! @return true iff a response was received
+	virtual bool handleGetLastError(const MapleMsg& msg, MapleMsg& response) = 0;
 	//! True if VMU reads and writes should be sent to the device
 	virtual bool storageEnabled() = 0;
 	//! True if the link is operational
@@ -77,7 +78,7 @@ class BaseMapleLink : public MapleLink
 public:
 	~BaseMapleLink();
 	bool storageEnabled() override;
-	bool handleGetLastError(const MapleMsg& msg) override;
+	bool handleGetLastError(const MapleMsg& msg, MapleMsg& response) override;
 
 protected:
 	BaseMapleLink(bool storageSupported);

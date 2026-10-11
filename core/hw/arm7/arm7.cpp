@@ -5,7 +5,7 @@
 namespace aica::arm
 {
 
-#define CPUReadMemoryQuick(addr) (*(u32*)&aica_ram[(addr) & ARAM_MASK])
+#define CPUReadMemoryQuick(addr) (*(u32*)&aica_ram[(addr) & soundRamMask()])
 #define CPUReadByte readMem<u8>
 #define CPUReadMemory readMem<u32>
 #define CPUReadHalfWord readMem<u16>
@@ -44,10 +44,28 @@ bool Arm7Enabled = false;
 
 u8 cpuBitsSet[256];
 
+static u32 CPUUpdateTicksMultiply(u32 multiplier)
+{
+	// ARM7DI uses a two-bit Booth multiplier. Negative multipliers terminate
+	// when their remaining high bits are all ones, so complement them before
+	// counting the significant two-bit groups.
+	if ((s32)multiplier < 0)
+		multiplier = ~multiplier;
+	if (multiplier <= 1)
+		return 1;
+
+	u32 cycles = 1;
+	do {
+		multiplier >>= 2;
+		cycles++;
+	} while (multiplier > 1);
+	return cycles;
+}
+
 static void CPUSwitchMode(int mode, bool saveState);
 static void CPUUpdateFlags();
-static void CPUSoftwareInterrupt(int comment);
-static void CPUUndefinedException();
+static void CPUSoftwareInterrupt(int comment, u32 returnAddress);
+static void CPUUndefinedException(u32 returnAddress);
 
 //
 // ARM7 interpreter
@@ -65,7 +83,14 @@ static void runInterpreter(u32 CycleCount)
 	while (arm7ClockTicks < 0)
 	{
 		if (reg[INTR_PEND].I)
+		{
 			CPUFiq();
+			// Exception entry can consume the rest of this timeslice. Do not
+			// execute the first handler instruction until budget remains, just
+			// as the dynarec dispatcher rechecks CYCL_CNT after CPUFiq().
+			if (arm7ClockTicks >= 0)
+				break;
+		}
 
 		reg[15].I = armNextPC + 8;
 
@@ -83,7 +108,8 @@ void run(u32 samples)
 {
 	for (u32 i = 0; i < samples; i++)
 	{
-		runInterpreter(ARM_CYCLES_PER_SAMPLE);
+		if (soundCpuAccessAllowed(CommonData->MRWINH))
+			runInterpreter(ARM_CYCLES_PER_SAMPLE);
 		timeStep();
 	}
 }
@@ -125,7 +151,6 @@ static void CPUSwitchMode(int mode, bool saveState)
 	switch(armMode)
 	{
 	case 0x10:
-	case 0x1F:
 		reg[R13_USR].I = reg[13].I;
 		reg[R14_USR].I = reg[14].I;
 		reg[RN_SPSR].I = reg[RN_CPSR].I;
@@ -168,10 +193,10 @@ static void CPUSwitchMode(int mode, bool saveState)
 	switch(mode)
 	{
 	case 0x10:
-	case 0x1F:
 		reg[13].I = reg[R13_USR].I;
 		reg[14].I = reg[R14_USR].I;
-		reg[RN_CPSR].I = SPSR;
+		if (!saveState)
+			reg[RN_CPSR].I = SPSR;
 		break;
 	case 0x11:
 		CPUSwap(&reg[8].I, &reg[R8_FIQ].I);
@@ -184,48 +209,61 @@ static void CPUSwitchMode(int mode, bool saveState)
 		if(saveState)
 			reg[RN_SPSR].I = CPSR;
 		else
+		{
 			reg[RN_SPSR].I = reg[SPSR_FIQ].I;
+			reg[RN_CPSR].I = SPSR;
+		}
 		break;
 	case 0x12:
 		reg[13].I = reg[R13_IRQ].I;
 		reg[14].I = reg[R14_IRQ].I;
-		reg[RN_CPSR].I = SPSR;
 		if(saveState)
 			reg[RN_SPSR].I = CPSR;
 		else
+		{
 			reg[RN_SPSR].I = reg[SPSR_IRQ].I;
+			reg[RN_CPSR].I = SPSR;
+		}
 		break;
 	case 0x13:
 		reg[13].I = reg[R13_SVC].I;
 		reg[14].I = reg[R14_SVC].I;
-		reg[RN_CPSR].I = SPSR;
 		if(saveState)
 			reg[RN_SPSR].I = CPSR;
 		else
+		{
 			reg[RN_SPSR].I = reg[SPSR_SVC].I;
+			reg[RN_CPSR].I = SPSR;
+		}
 		break;
 	case 0x17:
 		reg[13].I = reg[R13_ABT].I;
 		reg[14].I = reg[R14_ABT].I;
-		reg[RN_CPSR].I = SPSR;
 		if(saveState)
 			reg[RN_SPSR].I = CPSR;
 		else
+		{
 			reg[RN_SPSR].I = reg[SPSR_ABT].I;
+			reg[RN_CPSR].I = SPSR;
+		}
 		break;
 	case 0x1b:
 		reg[13].I = reg[R13_UND].I;
 		reg[14].I = reg[R14_UND].I;
-		reg[RN_CPSR].I = SPSR;
 		if(saveState)
 			reg[RN_SPSR].I = CPSR;
 		else
+		{
 			reg[RN_SPSR].I = reg[SPSR_UND].I;
+			reg[RN_CPSR].I = SPSR;
+		}
 		break;
 	default:
 		// An illegal mode causes the processor to enter an unrecoverable state
 		ERROR_LOG(AICA_ARM, "Unsupported ARM mode %02x", mode);
 		Arm7Enabled = false;
+		arm7ClockTicks = 0;
+		reg[CYCL_CNT].I = 0;
 		break;
 	}
 	armMode = mode;
@@ -237,7 +275,8 @@ void CPUUpdateCPSR()
 {
 	reg_pair CPSR;
 
-	CPSR.I = reg[RN_CPSR].I & 0x40;
+	// Preserve ARM7DI's reserved PSR bits [27:8,5].
+	CPSR.I = reg[RN_CPSR].I & 0x0FFFFF20;
 
 	CPSR.PSR.NZCV = reg[RN_PSR_FLAGS].FLG.NZCV;
 
@@ -262,23 +301,23 @@ static void CPUUpdateFlags()
 	update_armintc();
 }
 
-static void CPUSoftwareInterrupt(int comment)
+static void CPUSoftwareInterrupt(int comment, u32 returnAddress)
 {
-	u32 PC = reg[R15_ARM_NEXT].I+4;
 	CPUSwitchMode(0x13, true);
-	reg[14].I = PC;
+	reg[14].I = returnAddress;
 	
 	armIrqEnable = false;
+	CPUUpdateCPSR();
 	armNextPC = 0x08;
 }
 
-static void CPUUndefinedException()
+static void CPUUndefinedException(u32 returnAddress)
 {
 	WARN_LOG(AICA_ARM, "arm7: CPUUndefinedException(). SOMETHING WENT WRONG");
-	u32 PC = reg[R15_ARM_NEXT].I+4;
 	CPUSwitchMode(0x1b, true);
-	reg[14].I = PC;
+	reg[14].I = returnAddress;
 	armIrqEnable = false;
+	CPUUpdateCPSR();
 	armNextPC = 0x04;
 }
 
@@ -295,6 +334,9 @@ void reset()
 	e68k_reg_M = 0;
 
 	Arm7Enabled = false;
+	// The interpreter carries fractional scheduling debt between run() calls.
+	// A hardware reset starts a new execution timeline and must discard it.
+	arm7ClockTicks = 0;
 	// clean registers
 	memset(&arm_Reg[0], 0, sizeof(arm_Reg));
 
@@ -305,7 +347,8 @@ void reset()
 	reg[RN_CPSR].I = 0x00000000;
 	reg[R13_IRQ].I = 0x03007FA0;
 	reg[R13_SVC].I = 0x03007FE0;
-	armIrqEnable = true;      
+	// ARM7 reset enters supervisor mode with both interrupt classes masked.
+	armIrqEnable = false;
 	armFiqEnable = false;
 	update_armintc();
 
@@ -322,11 +365,21 @@ void reset()
 
 void CPUFiq()
 {
+	// CPUFiq is called after the interrupted instruction's final cycle. ARM7DI
+	// then takes two more cycles before executing the instruction at 0x1c
+	// (Tfiq in section 3.4.8). The execution engines represent their remaining
+	// budgets with opposite signs.
+#if FEAT_AREC == DYNAREC_NONE
+	arm7ClockTicks += 2;
+#else
+	reg[CYCL_CNT].I -= 2;
+#endif
 	u32 PC = reg[R15_ARM_NEXT].I+4;
 	CPUSwitchMode(0x11, true);
 	reg[14].I = PC;
 	armIrqEnable = false;
 	armFiqEnable = false;
+	CPUUpdateCPSR();
 	update_armintc();
 
 	armNextPC = 0x1c;
@@ -416,8 +469,7 @@ void DYNACALL MSR_do(u32 v, u32 mask)
 		}
 		if (mask & 8)
 			newValue = (newValue & 0x00FFFFFF) | (v & 0xFF000000);
-		newValue |= 0x10;
-		if(armMode > 0x10)
+		if(armMode > 0x10 && (mask & 1))
 		{
 			CPUSwitchMode(newValue & 0x1f, false);
 		}

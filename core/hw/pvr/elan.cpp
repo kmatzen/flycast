@@ -62,6 +62,7 @@
 #include "elan_struct.h"
 #include "network/ggpo.h"
 #include "cfg/option.h"
+#include <deque>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -84,6 +85,32 @@ static u32 reg30 = 0x31;
 static u32 elanCmd[32 / 4];
 
 static int schedId = -1;
+
+struct TextureDma
+{
+	u32 source;
+	u32 destination;
+	u32 remaining;
+	bool eramSource;
+};
+
+static std::deque<TextureDma> textureDmas;
+
+// ELAN's texture path is 64 bits wide at 100 MHz. In SH4 clock units that is
+// four bytes per cycle. Commit a cache-line-sized unit at each bus deadline so
+// software can observe an in-flight transfer instead of an eager memcpy.
+static constexpr u32 TextureDmaUnit = 32;
+
+static void queueTextureDma(u32 source, u32 destination, u32 size, bool eramSource)
+{
+	if (size == 0)
+		return;
+	const bool idle = textureDmas.empty();
+	textureDmas.push_back({ source, destination, size, eramSource });
+	if (idle)
+		sh4_sched_request(schedId,
+				(std::min(size, TextureDmaUnit) + 3) / 4);
+}
 
 static u32 DYNACALL read_elanreg(u32 paddr)
 {
@@ -1608,10 +1635,8 @@ static void executeCommand(u8 *data, int size)
 						}
 						DEBUG_LOG(PVR, "Texture DMA from %x to %x (%x) %s", DMAC_SAR(2), link->vramAddress & 0x1ffffff8, link->size,
 								data >= (u8 *)elanCmd && data < (u8 *)elanCmd + sizeof(elanCmd) ? "CMD" : "ERAM");
-						memcpy(&vram[link->vramAddress & VRAM_MASK], &mem_b[DMAC_SAR(2) & RAM_MASK], link->size);
-						// theoretical bandwidth: 64 bits @ 100 MHz
-						// but initdv3j needs ~50 MB/s to boot
-						sh4_sched_request(schedId, 512);
+						if (Active)
+							queueTextureDma(DMAC_SAR(2), link->vramAddress, link->size, false);
 					}
 					else if (link->offset & 0x20000000)
 					{
@@ -1623,8 +1648,8 @@ static void executeCommand(u8 *data, int size)
 						}
 						DEBUG_LOG(PVR, "Texture DMA from eram %x -> %x (%x) %s", link->offset & ELAN_RAM_MASK, link->vramAddress & VRAM_MASK, link->size,
 								data >= (u8 *)elanCmd && data < (u8 *)elanCmd + sizeof(elanCmd) ? "CMD" : "ERAM");
-						memcpy(&vram[link->vramAddress & VRAM_MASK], &RAM[link->offset & ELAN_RAM_MASK], link->size);
-						sh4_sched_request(schedId, 512);
+						if (Active)
+							queueTextureDma(link->offset, link->vramAddress, link->size, true);
 					}
 					else
 					{
@@ -1772,9 +1797,44 @@ static void DYNACALL write_elanram(u32 addr, T data)
 
 int schedCallback(int tag, int cycles, int lag, void *arg)
 {
-	// DMA done
-	reg74 |= 1;
-	return 0;
+	int remainingLag = std::max(0, lag);
+	for (;;)
+	{
+		if (textureDmas.empty())
+			return 0;
+
+		TextureDma& dma = textureDmas.front();
+		const u32 unit = std::min(dma.remaining, TextureDmaUnit);
+		const u32 sourceMask = dma.eramSource ? ELAN_RAM_MASK : RAM_MASK;
+		if (dma.eramSource) {
+			for (u32 i = 0; i < unit; ++i)
+				vram[(dma.destination + i) & VRAM_MASK] = RAM[(dma.source + i) & sourceMask];
+		}
+		else {
+			for (u32 i = 0; i < unit; ++i)
+				vram[(dma.destination + i) & VRAM_MASK] = mem_b[(dma.source + i) & sourceMask];
+		}
+		dma.source += unit;
+		dma.destination += unit;
+		dma.remaining -= unit;
+		if (dma.remaining == 0) {
+			textureDmas.pop_front();
+			reg74 |= 1;
+		}
+
+		if (textureDmas.empty())
+		{
+			// The command containing the final queued texture operation is now done.
+			reg74 |= 2;
+			return 0;
+		}
+
+		const int nextCycles =
+				(std::min(textureDmas.front().remaining, TextureDmaUnit) + 3) / 4;
+		if (nextCycles > remainingLag)
+			return std::max(0, lag) + nextCycles - remainingLag;
+		remainingLag -= nextCycles;
+	}
 }
 
 void init()
@@ -1785,6 +1845,9 @@ void init()
 
 void reset(bool hard)
 {
+	textureDmas.clear();
+	if (schedId != -1)
+		sh4_sched_request(schedId, -1);
 	if (hard)
 	{
 		memset(RAM, 0, ERAM_SIZE);
@@ -1828,6 +1891,9 @@ void serialize(Serializer& ser)
 	if (!ser.rollback())
 		ser.serialize(RAM, ERAM_SIZE);
 	state.serialize(ser);
+	ser << (u32)textureDmas.size();
+	for (const TextureDma& dma : textureDmas)
+		ser << dma.source << dma.destination << dma.remaining << dma.eramSource;
 	sh4_sched_serialize(ser, schedId);
 }
 
@@ -1841,6 +1907,16 @@ void deserialize(Deserializer& deser)
 	if (!deser.rollback())
 		deser.deserialize(RAM, ERAM_SIZE);
 	state.deserialize(deser);
+	textureDmas.clear();
+	if (deser.version() >= Deserializer::V100) {
+		u32 dmaCount;
+		deser >> dmaCount;
+		for (u32 i = 0; i < dmaCount; ++i) {
+			TextureDma dma{};
+			deser >> dma.source >> dma.destination >> dma.remaining >> dma.eramSource;
+			textureDmas.push_back(dma);
+		}
+	}
 	if (deser.version() >= Deserializer::V44)
 		sh4_sched_deserialize(deser, schedId);
 }

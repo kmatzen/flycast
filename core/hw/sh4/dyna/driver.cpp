@@ -103,8 +103,10 @@ void AnalyseBlock(RuntimeBlockInfo* blk);
 bool RuntimeBlockInfo::Setup(u32 rpc,fpscr_t rfpu_cfg)
 {
 	addr = host_code_size = 0;
-	guest_cycles = guest_opcodes = host_opcodes = 0;
+	guest_cycles = entry_cycles = guest_opcodes = host_opcodes = 0;
 	sh4_code_size = 0;
+	tail_addr = NullAddress;
+	tail_opcode = 0;
 	pBranchBlock=pNextBlock=0;
 	code=0;
 	has_jcond=false;
@@ -115,10 +117,9 @@ bool RuntimeBlockInfo::Setup(u32 rpc,fpscr_t rfpu_cfg)
 	temp_block = false;
 	
 	vaddr = rpc;
-	if (vaddr & 1)
+	if (sh4InstructionAddressError(vaddr))
 	{
-		// read address error
-		Do_Exception(vaddr, Sh4Ex_AddressErrorRead);
+		DoMMUException(vaddr, MmuError::BADADDR, MMU_TT_IREAD);
 		return false;
 	}
 	else if (mmu_enabled())
@@ -143,7 +144,10 @@ bool RuntimeBlockInfo::Setup(u32 rpc,fpscr_t rfpu_cfg)
 			return false;
 	}
 	catch (const SH4ThrownException& ex) {
-		Do_Exception(rpc, ex.expEvn);
+		// Architectural decode fetches are restricted to the first instruction
+		// or a cross-page delay slot. In the latter case the branch has issued.
+		Sh4cntx.cycle_counter -= entry_cycles;
+		Do_Exception(ex.epc, ex.expEvn);
 		return false;
 	}
 	SetProtectedFlags();
@@ -238,7 +242,10 @@ DynarecCodeEntryPtr DYNACALL rdv_BlockCheckFail(u32 addr)
 		Sh4cntx.pc = addr;
 		Sh4Recompiler::Instance->ResetCache();
 	}
-	return (DynarecCodeEntryPtr)CC_RW2RX(compilePC(blockcheck_failures));
+	DynarecCodeEntryPtr code = compilePC(blockcheck_failures);
+	if (code == nullptr)
+		return rdv_FailedToFindBlock(Sh4cntx.pc);
+	return (DynarecCodeEntryPtr)CC_RW2RX(code);
 }
 
 //Finds or compiles code @pc
@@ -246,7 +253,7 @@ static DynarecCodeEntryPtr findOrCompile()
 {
 	DynarecCodeEntryPtr rv = bm_GetCodeByVAddr(Sh4cntx.pc);  // Returns exec addr
 	if (rv == ngen_FailedToFindBlock)
-		rv = (DynarecCodeEntryPtr)CC_RW2RX(compilePC(0));  // Returns rw addr
+		rv = rdv_FailedToFindBlock(Sh4cntx.pc);
 	
 	return rv;
 }
@@ -414,20 +421,26 @@ static bool translateAddress(u32 addr, int size, u32 access, u32& outAddr, Runti
 
 bool rdv_readMemImmediate(u32 addr, int size, void*& ptr, bool& isRam, u32& physAddr, RuntimeBlockInfo* block)
 {
-	size = std::min(size, 4);
+	if (mmu_enabled() && block != nullptr)
+		return false;
+	if (sh4DataAddressError(addr, size, false))
+		return false;
 	if (!translateAddress(addr, size, MMU_TT_DREAD, physAddr, block))
 		return false;
-	ptr = addrspace::readConst(physAddr, isRam, size);
+	ptr = addrspace::readConst(physAddr, isRam, std::min(size, 4));
 
 	return true;
 }
 
 bool rdv_writeMemImmediate(u32 addr, int size, void*& ptr, bool& isRam, u32& physAddr, RuntimeBlockInfo* block)
 {
-	size = std::min(size, 4);
+	if (mmu_enabled() && block != nullptr)
+		return false;
+	if (sh4DataAddressError(addr, size, true))
+		return false;
 	if (!translateAddress(addr, size, MMU_TT_DWRITE, physAddr, block))
 		return false;
-	ptr = addrspace::writeConst(physAddr, isRam, size);
+	ptr = addrspace::writeConst(physAddr, isRam, std::min(size, 4));
 
 	return true;
 }

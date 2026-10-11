@@ -87,10 +87,19 @@ static void jitWriteProtect(Sh4CodeBuffer &codeBuffer, bool enable)
 #endif
 }
 
-static void interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
+static bool interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 {
 	try {
+		if (ctx->sr.MD == 0 && OpDesc[op]->IsPrivileged(op))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
+			throw SH4ThrownException(pc & ~1, Sh4Ex_FpuDisabled);
+		if (OpDesc[op]->IsIllegalFpuMode(op, ctx->fpscr.PR, ctx->fpscr.SZ))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (OpDesc[op]->ClearsFpuCause(op))
+			ctx->fpscr.full &= ~0x3f000u;
 		oph(ctx, op);
+		return false;
 	} catch (SH4ThrownException& ex) {
 		if (pc & 1)
 		{
@@ -99,7 +108,7 @@ static void interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 			pc--;
 		}
 		Do_Exception(pc, ex.expEvn);
-		handleException();
+		return true;
 	}
 }
 
@@ -260,7 +269,7 @@ public:
 		jitWriteProtect(codeBuffer, false);
 		this->block = block;
 		CheckBlock(force_checks, block);
-		
+
 		// run register allocator
 		regalloc.DoAlloc(block);
 
@@ -268,11 +277,31 @@ public:
 		Ldr(w1, sh4_context_mem_operand(&sh4ctx.cycle_counter));
 		Cmp(w1, 0);
 		Label cycles_remaining;
-		B(&cycles_remaining, pl);
+		B(&cycles_remaining, gt);
 		Mov(w0, block->vaddr);
 		GenCall(arm64_intc_sched);
 		Mov(w1, w0);
 		Bind(&cycles_remaining);
+
+		Ldr(w0, sh4_context_mem_operand(&sh4ctx.interrupt_pend));
+		Label no_pending_interrupt;
+		Cbz(w0, &no_pending_interrupt);
+		Mov(w0, block->vaddr);
+		Str(w0, sh4_context_mem_operand(&sh4ctx.pc));
+		GenCallRuntime(UpdateINTC);
+		Ldr(w29, sh4_context_mem_operand(&sh4ctx.pc));
+		GenBranch(arm64_no_update);
+		Bind(&no_pending_interrupt);
+
+		// Cached FPU blocks can outlive changes to SR.FD and to the FPSCR fields
+		// used while decoding them. Validate both after interrupt recognition.
+		if (block->has_fpu_op)
+		{
+			Mov(w0, block->vaddr);
+			Mov(w2, block->entry_cycles);
+			Mov(w3, block->fpu_cfg.full);
+			GenCall(checkBlockFpu);
+		}
 
 		Sub(w1, w1, block->guest_cycles);
 		Str(w1, sh4_context_mem_operand(&sh4ctx.cycle_counter));
@@ -293,16 +322,15 @@ public:
 
 				Mov(x0, x28);
 				Mov(w1, op.rs3._imm);
-				if (!mmu_enabled())
+				Mov(x2, reinterpret_cast<uintptr_t>(*OpDesc[op.rs3._imm]->oph));	// op handler
+				Mov(w3, block->vaddr + op.guest_offs - (op.delay_slot ? 1 : 0));	// pc
+				GenCallRuntime(interpreter_fallback);
 				{
-					GenCallRuntime(OpDesc[op.rs3._imm]->oph);
-				}
-				else
-				{
-					Mov(x2, reinterpret_cast<uintptr_t>(*OpDesc[op.rs3._imm]->oph));	// op handler
-					Mov(w3, block->vaddr + op.guest_offs - (op.delay_slot ? 1 : 0));	// pc
-
-					GenCallRuntime(interpreter_fallback);
+					Label no_exception;
+					Cbz(w0, &no_exception);
+					Ldr(w29, sh4_context_mem_operand(&sh4ctx.pc));
+					GenBranch(arm64_no_update);
+					Bind(&no_exception);
 				}
 
 				break;
@@ -1441,25 +1469,19 @@ public:
 
 		Sub(x0, x0, sizeof(Sh4Context));
 		Label reenterLabel;
+		// Save a dispatcher stack in every mode. Address/alignment exceptions can
+		// leave generated code even when address translation is disabled.
+		Stp(x0, x1, MemOperand(sp, -16, PreIndex));
+		unwinder.allocStack(0, 16);
+
+		Ldr(x0, reinterpret_cast<uintptr_t>(&jmp_stack));
+		Mov(x1, sp);
+		Str(x1, MemOperand(x0));
+
+		Bind(&reenterLabel);
+		Ldr(x28, MemOperand(sp));	// Set context
 		if (mmu_enabled())
-		{
-			// Push context
-			Stp(x0, x1, MemOperand(sp, -16, PreIndex));
-			unwinder.allocStack(0, 16);
-
-			Ldr(x0, reinterpret_cast<uintptr_t>(&jmp_stack));
-			Mov(x1, sp);
-			Str(x1, MemOperand(x0));
-
-			Bind(&reenterLabel);
-			Ldr(x28, MemOperand(sp));	// Set context
 			Mov(x27, reinterpret_cast<uintptr_t>(mmuAddressLUT));
-		}
-		else
-		{
-			// Use x28 as sh4 context pointer
-			Mov(x28, x0);
-		}
 		Label do_interrupts;
 
 		// w29 is next_pc
@@ -1491,9 +1513,8 @@ public:
 		Br(x0);
 
 		Bind(&end_mainloop);
-		if (mmu_enabled())
-			// Pop context
-			Add(sp, sp, 16);
+		// Pop context and alignment slot.
+		Add(sp, sp, 16);
 		// Restore registers
 		Ldp(x29, x30, MemOperand(sp, 144));
 		Ldp(d12, d13, MemOperand(sp, 128));
@@ -1534,26 +1555,36 @@ public:
 		//
 		Label handleExceptionLabel;
 		Bind(&handleExceptionLabel);
-		if (mmu_enabled())
-		{
-			Ldr(x0, reinterpret_cast<uintptr_t>(&jmp_stack));
-			Ldr(x1, MemOperand(x0));
-			Mov(sp, x1);
-			B(&reenterLabel);
-		}
+		Ldr(x0, reinterpret_cast<uintptr_t>(&jmp_stack));
+		Ldr(x1, MemOperand(x0));
+		Mov(sp, x1);
+		B(&reenterLabel);
 
-		// MMU Block check: SR.FD == 1 (FPU enabled)
-		// w0: vaddr
+		// Block-entry check: FPU enabled and decode-time FPSCR mode unchanged.
+		// w0: vaddr, w2: first instruction's issue cycles, w3: expected FPSCR
 		checkBlockFpu = GetCursorAddress<DynaCode *>();
 		Label fpu_enabled;
 		Ldr(w10, sh4_context_mem_operand(&sh4ctx.sr.status));
 		Tbz(w10, 15, &fpu_enabled);			// test SR.FD bit
 
+		Ldr(w10, sh4_context_mem_operand(&sh4ctx.cycle_counter));
+		Sub(w10, w10, w2);
+		Str(w10, sh4_context_mem_operand(&sh4ctx.cycle_counter));
 		Mov(w1, Sh4Ex_FpuDisabled);	// exception code
 		GenCallRuntime(Do_Exception);
 		Ldr(w29, sh4_context_mem_operand(&sh4ctx.pc));
 		B(&no_update);
 		Bind(&fpu_enabled);
+		Ldr(w10, sh4_context_mem_operand(&sh4ctx.fpscr.full));
+		Eor(w10, w10, w3);
+		Mov(w11, RuntimeBlockInfo::FpscrDecodeMask);
+		Tst(w10, w11);
+		Label fpscr_matches;
+		B(&fpscr_matches, eq);
+		Str(w0, sh4_context_mem_operand(&sh4ctx.pc));
+		Ldr(w29, sh4_context_mem_operand(&sh4ctx.pc));
+		B(&no_update);
+		Bind(&fpscr_matches);
 		Ret();
 
 		// MMU Block check: pc == vaddr
@@ -1727,27 +1758,49 @@ private:
 
 	void genMmuLookup(const shil_opcode& op, u32 write)
 	{
-		if (mmu_enabled())
+		if (!mmu_enabled())
 		{
-			Label inCache;
+			Label lookup;
 			Label done;
-
-			Lsr(w1, w0, 12);
-			Ldr(w1, MemOperand(x27, x1, LSL, 2));
-			Cbnz(w1, &inCache);
+			if (op.size > 1)
+			{
+				Tst(w0, op.size - 1);
+				B(ne, &lookup);
+			}
+			if (op.size == 8)
+			{
+				Add(w1, w0, 4);
+				Tbnz(w1, 31, &lookup);
+			}
+			Tbnz(w0, 31, &lookup);
+			B(&done);
+			Bind(&lookup);
+			Mov(w1, write);
+			Mov(w2, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+			Mov(w3, op.size);
+			GenCallRuntime(mmuDynarecLookup);
+			Bind(&done);
+			return;
+		}
+		else
+		{
 			Mov(w1, write);
 			Mov(w2, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
+			Mov(w3, op.size);
 			GenCallRuntime(mmuDynarecLookup);
-			B(&done);
-			Bind(&inCache);
-			And(w0, w0, 0xFFF);
-			Orr(w0, w0, w1);
-			Bind(&done);
 		}
 	}
 
 	void GenReadMemory(const shil_opcode& op, size_t opid, bool optimise)
 	{
+		if (op.size == 8 && mmu_enabled())
+		{
+			GenMemAddr(op, &w0);
+			Mov(w1, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+			GenCallRuntime(mmuDynarecRead64);
+			host_reg_to_shil_param(op.rd, x0);
+			return;
+		}
 		if (GenReadMemoryImmediate(op))
 			return;
 
@@ -1766,6 +1819,9 @@ private:
 	bool GenReadMemoryImmediate(const shil_opcode& op)
 	{
 		if (!op.rs1.is_imm())
+			return false;
+		if ((op.rs1._imm & 0x80000000) != 0 || (op.size == 8 && op.rs1._imm == 0x7ffffffc)
+				|| (op.size > 1 && (op.rs1._imm & (op.size - 1)) != 0))
 			return false;
 		void *ptr;
 		bool isram;
@@ -1930,6 +1986,15 @@ private:
 
 	void GenWriteMemory(const shil_opcode& op, size_t opid, bool optimise)
 	{
+		if (op.size == 8 && mmu_enabled())
+		{
+			GenMemAddr(op, &w0);
+			shil_param_to_host_reg(op.rs2, x1);
+			Lsr(x2, x1, 32);
+			Mov(w3, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+			GenCallRuntime(mmuDynarecWrite64);
+			return;
+		}
 		if (GenWriteMemoryImmediate(op))
 			return;
 
@@ -1949,6 +2014,9 @@ private:
 	bool GenWriteMemoryImmediate(const shil_opcode& op)
 	{
 		if (!op.rs1.is_imm())
+			return false;
+		if ((op.rs1._imm & 0x80000000) != 0 || (op.size == 8 && op.rs1._imm == 0x7ffffffc)
+				|| (op.size > 1 && (op.rs1._imm & (op.size - 1)) != 0))
 			return false;
 
 		void *ptr;
@@ -2091,7 +2159,7 @@ private:
 		{
 			// Verify that the block hasn't been modified
 			Label blockcheck_fail;
-			s32 sz = block->sh4_code_size;
+			s32 sz = block->contiguousCodeSize();
 			u8* ptr = GetMemPtr(block->addr, sz);
 			if (ptr != NULL)
 			{
@@ -2126,6 +2194,18 @@ private:
 					B(ne, &blockcheck_fail);
 				}
 			}
+			if (block->tail_addr != NullAddress)
+			{
+				u16 *tail = (u16 *)GetMemPtr(block->tail_addr, sizeof(*tail));
+				if (tail != nullptr)
+				{
+					Ldr(x9, reinterpret_cast<uintptr_t>(tail));
+					Ldrh(w10, MemOperand(x9));
+					Mov(w11, block->tail_opcode);
+					Cmp(w10, w11);
+					B(ne, &blockcheck_fail);
+				}
+			}
 
 			Label blockcheck_success;
 			B(&blockcheck_success);
@@ -2136,12 +2216,6 @@ private:
 			Bind(&blockcheck_success);
 		}
 
-		if (mmu_enabled() && block->has_fpu_op)
-		{
-			// Verify that the FPU is enabled
-			Mov(w0, block->vaddr);
-			GenCall(checkBlockFpu);
-		}
 	}
 
 	void shil_param_to_host_reg(const shil_param& param, const Register& reg)

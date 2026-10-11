@@ -1111,59 +1111,58 @@ private:
 template<typename FBLineWriter>
 static void writeTexture(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip)
 {
-	int srcPadding = 0;
-	int destPadding = 0;
 	if (linestride == 0)
 		linestride = width * 2;
-	else if (linestride > width * 2u)
-		destPadding = linestride - width * 2;
-	else
-		srcPadding = (width * 2 - linestride) * 2;
-	height = std::min<u32>(height, clip.bottomRight().y + 1);
-
-	const int xmin = clip.origin.x;
-	int xmax = std::min<int>(clip.bottomRight().x + 1, width);
-	xmax = std::min<int>(xmax, linestride / 2);
-	TexPixelWriter pixWriter(dst + clip.origin.y * (width + destPadding / 2) + xmin);
-	data += clip.origin.y * (width * 2 + srcPadding) + xmin * 2;
-	const int deltaPix = xmin + std::min(linestride / 2, width) - xmax;
-	destPadding += deltaPix * 2;
-	srcPadding += deltaPix * 4;
+	const u32 destinationPitch = linestride / 2;
+	const int ymin = std::max(0, clip.origin.y);
+	height = std::min<u32>(height, std::max(0, clip.bottomRight().y + 1));
+	const int xmin = std::max(0, clip.origin.x);
+	const int xmax = std::min<int>({ clip.bottomRight().x + 1,
+			static_cast<int>(width), static_cast<int>(destinationPitch) });
+	if (xmin >= xmax || ymin >= static_cast<int>(height))
+		return;
+	TexPixelWriter pixWriter(dst + static_cast<size_t>(ymin) * destinationPitch + xmin);
+	data += (static_cast<size_t>(ymin) * width + xmin) * 4;
+	const int destinationAdvance = linestride - (xmax - xmin) * 2;
+	const int sourceAdvance = (static_cast<int>(width) - xmax + xmin) * 4;
 	FBLineWriter lineWriter(fb_w_ctrl, pixWriter);
-	for (u32 l = clip.origin.y; l < height; l++)
+	for (u32 l = ymin; l < height; l++)
 	{
 		lineWriter.write(xmin, xmax, data, l);
-		pixWriter.advance(destPadding);
-		data += srcPadding;
+		pixWriter.advance(destinationAdvance);
+		data += sourceAdvance;
 	}
 }
 
 template<int Red, int Green, int Blue, int Alpha>
-void WriteTextureToVRam(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip)
+void WriteTextureToVRam(u32 width, u32 height, const u8 *data, u16 *dst,
+		FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip,
+		bool hardwareQuantization)
 {
-	bool dither = fb_w_ctrl.fb_dither && config::EmulateFramebuffer;
+	const bool truncate = hardwareQuantization
+			|| (fb_w_ctrl.fb_dither && config::EmulateFramebuffer);
 	switch (fb_w_ctrl.fb_packmode)
 	{
 	case 0: // 0555 KRGB 16 bit  (default)
-		if (dither)
+		if (truncate)
 			writeTexture<FBLineWriter0555<Red, Green, Blue, Alpha, TexPixelWriter, false>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		else
 			writeTexture<FBLineWriter0555<Red, Green, Blue, Alpha, TexPixelWriter, true>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		break;
 	case 1: // 565 RGB 16 bit
-		if (dither)
+		if (truncate)
 			writeTexture<FBLineWriter565<Red, Green, Blue, Alpha, TexPixelWriter, false>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		else
 			writeTexture<FBLineWriter565<Red, Green, Blue, Alpha, TexPixelWriter, true>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		break;
 	case 2: // 4444 ARGB 16 bit
-		if (dither)
+		if (truncate)
 			writeTexture<FBLineWriter4444<Red, Green, Blue, Alpha, TexPixelWriter, false>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		else
 			writeTexture<FBLineWriter4444<Red, Green, Blue, Alpha, TexPixelWriter, true>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		break;
 	case 3: // 1555 ARGB 16 bit
-		if (dither)
+		if (truncate)
 			writeTexture<FBLineWriter1555<Red, Green, Blue, Alpha, TexPixelWriter, false>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
 		else
 			writeTexture<FBLineWriter1555<Red, Green, Blue, Alpha, TexPixelWriter, true>>(width, height, data, dst, fb_w_ctrl, linestride, clip);
@@ -1173,8 +1172,10 @@ void WriteTextureToVRam(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_CT
 		break;
 	}
 }
-template void WriteTextureToVRam<0, 1, 2, 3>(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip);
-template void WriteTextureToVRam<2, 1, 0, 3>(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip);
+template void WriteTextureToVRam<0, 1, 2, 3>(u32 width, u32 height, const u8 *data,
+		u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip, bool hardwareQuantization);
+template void WriteTextureToVRam<2, 1, 0, 3>(u32 width, u32 height, const u8 *data,
+		u16 *dst, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip, bool hardwareQuantization);
 
 template<typename FBLineWriter>
 static void writeFramebufferLW(u32 width, u32 height, const u8 *data, u32 dstAddr, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip)

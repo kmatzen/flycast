@@ -1,5 +1,7 @@
 #include "dsp.h"
 #include "aica.h"
+#include "aica_if.h"
+#include "hw/hwreg.h"
 /*
 	DSP rec_v1
 
@@ -24,8 +26,9 @@ DSPState state;
 //float format is ?
 u16 DYNACALL PACK(s32 val)
 {
-	int sign = (val >> 23) & 0x1;
-	u32 temp = (val ^ (val << 1)) & 0xFFFFFF;
+	u32 bits = static_cast<u32>(val);
+	int sign = (bits >> 23) & 0x1;
+	u32 temp = (bits ^ (bits << 1)) & 0xFFFFFF;
 	int exponent = 0;
 	for (int k = 0; k < 12; k++)
 	{
@@ -35,14 +38,14 @@ u16 DYNACALL PACK(s32 val)
 		exponent += 1;
 	}
 	if (exponent < 12)
-		val <<= exponent;
+		bits = (bits << exponent) & 0x3FFFFF;
 	else
-		val <<= 11;
-	val = (val >> 11) & 0x7FF;	// avoid sign extension of mantissa
-	val |= sign << 15;
-	val |= exponent << 11;
+		bits <<= 11;
+	bits = (bits >> 11) & 0x7FF;
+	bits |= sign << 15;
+	bits |= exponent << 11;
 
-	return (u16)val;
+	return (u16)bits;
 }
 
 s32 DYNACALL UNPACK(u16 val)
@@ -50,18 +53,43 @@ s32 DYNACALL UNPACK(u16 val)
 	int sign = (val >> 15) & 0x1;
 	int exponent = (val >> 11) & 0xF;
 	int mantissa = val & 0x7FF;
-	s32 uval = mantissa << 11;
-	uval |= sign << 22;		// take the sign in bit 22
+	u32 uval = mantissa << 11;
 	if (exponent > 11)
+	{
 		exponent = 11;		// cap exponent to 11 for denormals
+		uval |= sign << 22;
+	}
 	else
-		uval ^= 1 << 22;	// reverse bit 22 for normals
+		uval |= (sign ^ 1) << 22;
 	uval |= sign << 23;		// actual sign bit
-	uval <<= 8;
-	uval >>= 8;
-	uval >>= exponent;
+	s32 signedValue = (uval & 0x800000) != 0
+			? static_cast<s32>(uval | 0xFF000000)
+			: static_cast<s32>(uval);
 
-	return uval;
+	return static_cast<s32>(arithmeticShiftRight(signedValue, exponent));
+}
+
+void DYNACALL commitMemoryWrite()
+{
+	if (state.MWT_PENDING != 0)
+	{
+		if (memoryAccessAllowed())
+			WriteMemArr(&aica_ram[0], state.MWT_ADDR & soundRamMask(),
+					static_cast<u16>(state.MWT_DATA));
+		state.MWT_PENDING = 0;
+	}
+}
+
+bool memoryAccessAllowed()
+{
+	return (CommonData->MRWINH & 1) == 0;
+}
+
+void advanceRingCounter()
+{
+	--state.MDEC_CT;
+	if (state.MDEC_CT == 0)
+		state.MDEC_CT = state.RBL + 1;
 }
 
 void DecodeInst(const u32 *IPtr, Instruction *i)
@@ -77,8 +105,11 @@ void DecodeInst(const u32 *IPtr, Instruction *i)
 	i->IWA = (IPtr[1] >> 1) & 0x1F;
 
 	i->TABLE = IPtr[2] & 0x8000;
-	i->MWT = IPtr[2] & 0x4000;
-	i->MRD = IPtr[2] & 0x2000;
+	// MRWINH bit 0 removes DSP sound-memory requests from the bus. JIT
+	// backends decode these flags while compiling, and writes to MRWINH mark
+	// the program dirty so a changed gate is reflected on the next sample.
+	i->MWT = (IPtr[2] & 0x4000) && memoryAccessAllowed();
+	i->MRD = (IPtr[2] & 0x2000) && memoryAccessAllowed();
 	i->EWT = IPtr[2] & 0x1000;
 	i->EWA = (IPtr[2] >> 8) & 0x0F;
 	i->ADRL = IPtr[2] & 0x80;
@@ -109,8 +140,11 @@ void recompile() {
 void init()
 {
 	memset(&state, 0, sizeof(state));
-	state.RBL = 0x8000 - 1;
-	state.RBP = 0;
+	// Keep the decoded address generator in sync with the visible reset
+	// registers. RBL=0 selects an 8-Kword ring; the historical 32-Kword
+	// default addressed the wrong quarter of the ring until the guest wrote it.
+	state.RBL = (8192 << CommonData->RBL) - 1;
+	state.RBP = (CommonData->RBP * 2048) & soundRamMask();
 	state.MDEC_CT = 1;
 	state.dirty = true;
 
@@ -144,9 +178,29 @@ void step()
 		if (!state.stopped)
 			recompile();
 	}
+	// Effect registers accumulate contributions within one DSP sample only.
+	memset(DSPData->EFREG, 0, sizeof(DSPData->EFREG));
+	// Complete a step-127 memory write even if the program was stopped or
+	// replaced before the next sample begins.
+	commitMemoryWrite();
 	if (state.stopped)
+	{
+		// The DSP clock and ring pointer keep running even when every MPRO
+		// instruction is zero; only execution can be skipped.
+		advanceRingCounter();
 		return;
+	}
 	runStep();
+}
+
+void bypassStep()
+{
+	// Disabling DSP effects is an emulator-side output shortcut, not a
+	// hardware clock gate. Preserve sample-boundary state and outstanding
+	// sound-memory timing while omitting microprogram execution.
+	memset(DSPData->EFREG, 0, sizeof(DSPData->EFREG));
+	commitMemoryWrite();
+	advanceRingCounter();
 }
 
 } // namespace aica::dsp

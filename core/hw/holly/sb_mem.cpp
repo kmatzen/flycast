@@ -6,6 +6,7 @@
 */
 #include "sb_mem.h"
 #include "sb.h"
+#include "hw/aica/aica.h"
 #include "hw/aica/aica_if.h"
 #include "hw/flashrom/nvmem.h"
 #include "hw/gdrom/gdrom_if.h"
@@ -124,7 +125,9 @@ T DYNACALL ReadMem_area0(u32 paddr)
 	case 6:
 	case 7:
 		// AICA ram
-		return ReadMemArr<T>(&aica::aica_ram[0], addr & ARAM_MASK);
+		if (!aica::mainCpuSoundMemoryAccessAllowed(aica::CommonData->MRWINH))
+			return 0;
+		return ReadMemArr<T>(&aica::aica_ram[0], addr & aica::soundRamMask());
 
 	default:
 		// G2 Ext area
@@ -242,7 +245,11 @@ void DYNACALL WriteMem_area0(u32 paddr, T data)
 	case 6:
 	case 7:
 		// AICA ram
-		WriteMemArr(&aica::aica_ram[0], addr & ARAM_MASK, data);
+		// MRWINH bit 3 gates the main-CPU path completely. RP is controlled
+		// by ARM7 and independently makes that path read-only.
+		if (aica::mainCpuSoundMemoryAccessAllowed(aica::CommonData->MRWINH)
+				&& !aica::CommonData->RP)
+			WriteMemArr(&aica::aica_ram[0], addr & aica::soundRamMask(), data);
 		return;
 
 	default:

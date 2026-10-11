@@ -100,8 +100,11 @@ class Arm7Compiler : public Xbyak::CodeGenerator
 		Xbyak::Reg32 r;
 		if (!arg.isReg())
 		{
-			if (arg.isNone() || arg.shift_imm)
+			if (arg.isNone() || !arg.isShifted())
 				return Xbyak::Operand();
+			// Shifted PC operands are represented as an immediate architectural
+			// PC value plus shift metadata. Materialize the value so the normal
+			// shifter path below applies both the result and carry semantics.
 			mov(scratch_reg, arg.getImmediate());
 			r = scratch_reg;
 		}
@@ -359,23 +362,25 @@ class Arm7Compiler : public Xbyak::CodeGenerator
 
 		Xbyak::Operand arg0 = getOperand(op.arg[0], r8d);
 		Xbyak::Operand arg1 = getOperand(op.arg[1], r9d);
+		// Rn=R15 is decoded to the architectural PC+8 constant. Materialize
+		// any immediate first operand up front so alias fast paths such as
+		// "orr rd, pc, rd" always operate on a real host register.
+		if (arg0.isNone() && op.arg[0].isImmediate())
+		{
+			mov(r8d, op.arg[0].getImmediate());
+			arg0 = r8d;
+		}
 		Xbyak::Reg32 rd;
 		if (op.rd.isReg())
 			rd = regalloc->map(op.rd.getReg().armreg);
 		if (logical_op_set_flags)
 		{
-			// When an Operand2 constant is used with the instructions MOVS, MVNS, ANDS, ORRS, ORNS, EORS, BICS, TEQ or TST,
-			// the carry flag is updated to bit[31] of the constant,
-			// if the constant is greater than 255 and can be produced by shifting an 8-bit value.
-			if (op.arg[0].isImmediate() && op.arg[0].getImmediate() > 255)
+			// A non-zero immediate rotation sets carry to the result's bit 31.
+			// The decoded value alone cannot reveal whether a rotation occurred.
+			if (op.immediateCarryValid)
 			{
 				set_carry_bit = true;
-				mov(r10d, (op.arg[0].getImmediate() & 0x80000000) >> 31);
-			}
-			else if (op.arg[1].isImmediate() && op.arg[1].getImmediate() > 255)
-			{
-				set_carry_bit = true;
-				mov(r10d, (op.arg[1].getImmediate() & 0x80000000) >> 31);
+				mov(r10d, op.immediateCarry);
 			}
 		}
 
@@ -535,9 +540,12 @@ class Arm7Compiler : public Xbyak::CodeGenerator
 		case ArmOp::SUB:
 			if (arg1 == rd)
 			{
-				sub(arg0, arg1);
-				if (rd != arg0)
-					mov(rd, arg0);
+				// Rd aliases op2, so computing in Rn would corrupt a distinct
+				// architectural source register. Preserve Rn in a scratch.
+				if (arg0 != r8d)
+					mov(r8d, arg0);
+				sub(r8d, arg1);
+				mov(rd, r8d);
 			}
 			else
 			{
@@ -555,21 +563,18 @@ class Arm7Compiler : public Xbyak::CodeGenerator
 			}
 			break;
 		case ArmOp::RSB:
-			if (arg1 == rd)
-				sub(rd, arg0);
-			else
-			{
-				if (rd != arg0)
-					mov(rd, arg0);
-				neg(rd);
-				if (arg1.isNone())
-					add(rd, op.arg[1].getImmediate());
-				else
-					add(rd, arg1);
-			}
+			// rd = op2 - rn. Preserve rn in a scratch register so Rd may
+			// alias either source without changing the subtraction flags.
+			if (arg0 != r8d)
+				mov(r8d, arg0);
+			if (arg1.isNone())
+				mov(rd, op.arg[1].getImmediate());
+			else if (rd != arg1)
+				mov(rd, arg1);
+			sub(rd, r8d);
 			if (set_flags)
 			{
-				setb(r10b);
+				setnb(r10b);
 				set_carry_bit = true;
 			}
 			break;
@@ -626,9 +631,10 @@ class Arm7Compiler : public Xbyak::CodeGenerator
 			cmc();		// on arm, -1 if carry is clear
 			if (arg1 == rd)
 			{
-				sbb(arg0, arg1);
-				if (rd != arg0)
-					mov(rd, arg0);
+				if (arg0 != r8d)
+					mov(r8d, arg0);
+				sbb(r8d, arg1);
+				mov(rd, r8d);
 			}
 			else
 			{
@@ -651,15 +657,18 @@ class Arm7Compiler : public Xbyak::CodeGenerator
 			and_(r11d, C_FLAG);
 			neg(r11d);
 			cmc();		// on arm, -1 if carry is clear
+			// Preserve Rn before materializing op2 into Rd; Rd may alias Rn.
+			if (arg0 != r8d)
+				mov(r8d, arg0);
 			if (arg1 == rd)
-				sbb(rd, arg0);
+				sbb(rd, r8d);
 			else
 			{
 				if (arg1.isNone())
 					mov(rd, op.arg[1].getImmediate());
 				else if (rd != arg1)
 					mov(rd, arg1);
-				sbb(rd, arg0);
+				sbb(rd, r8d);
 			}
 			if (set_flags)
 			{

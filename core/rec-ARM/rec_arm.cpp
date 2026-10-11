@@ -990,6 +990,9 @@ bool Arm32Assembler::readMemImmediate(RuntimeBlockInfo* block, shil_opcode* op, 
 {
 	if (!op->rs1.is_imm())
 		return false;
+	if ((op->rs1._imm & 0x80000000) != 0 || (op->size == 8 && op->rs1._imm == 0x7ffffffc)
+			|| (op->size > 1 && (op->rs1._imm & (op->size - 1)) != 0))
+		return false;
 
 	void *ptr;
 	bool isram;
@@ -1097,6 +1100,9 @@ bool Arm32Assembler::writeMemImmediate(RuntimeBlockInfo* block, shil_opcode* op,
 {
 	if (!op->rs1.is_imm())
 		return false;
+	if ((op->rs1._imm & 0x80000000) != 0 || (op->size == 8 && op->rs1._imm == 0x7ffffffc)
+			|| (op->size > 1 && (op->rs1._imm & (op->size - 1)) != 0))
+		return false;
 
 	void *ptr;
 	bool isram;
@@ -1176,33 +1182,61 @@ bool Arm32Assembler::writeMemImmediate(RuntimeBlockInfo* block, shil_opcode* op,
 
 void Arm32Assembler::genMmuLookup(RuntimeBlockInfo* block, const shil_opcode& op, u32 write, Register& raddr)
 {
-	if (mmu_enabled())
+	if (!mmu_enabled())
 	{
-		Label inCache;
-		Label done;
+		if (!raddr.Is(r0))
+			Mov(r0, raddr);
+		raddr = r0;
 
-		Lsr(r1, raddr, 12);
-		Ldr(r1, MemOperand(r9, r1, LSL, 2));
-		Cmp(r1, 0);
-		B(ne, &inCache);
+		Label lookup;
+		Label done;
+		if (op.size > 1)
+		{
+			Tst(r0, op.size - 1);
+			B(ne, &lookup);
+		}
+		if (op.size == 8)
+		{
+			Add(r1, r0, 4);
+			Tst(r1, 0x80000000);
+			B(ne, &lookup);
+		}
+		Tst(r0, 0x80000000);
+		B(ne, &lookup);
+		B(&done);
+		Bind(&lookup);
+		Mov(r1, write);
+		Mov(r2, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+		Mov(r3, op.size);
+		call((void *)mmuDynarecLookup);
+		Bind(&done);
+		return;
+	}
+	else
+	{
 		if (!raddr.Is(r0))
 			Mov(r0, raddr);
 		Mov(r1, write);
 		Mov(r2, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
+		Mov(r3, op.size);
 		call((void *)mmuDynarecLookup);
-		B(&done);
-		Bind(&inCache);
-		And(r0, raddr, 0xFFF);
-		Orr(r0, r0, r1);
-		Bind(&done);
 		raddr = r0;
 	}
 }
 
-static void interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
+static bool interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 {
 	try {
+		if (ctx->sr.MD == 0 && OpDesc[op]->IsPrivileged(op))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
+			throw SH4ThrownException(pc & ~1, Sh4Ex_FpuDisabled);
+		if (OpDesc[op]->IsIllegalFpuMode(op, ctx->fpscr.PR, ctx->fpscr.SZ))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (OpDesc[op]->ClearsFpuCause(op))
+			ctx->fpscr.full &= ~0x3f000u;
 		oph(ctx, op);
+		return false;
 	} catch (SH4ThrownException& ex) {
 		if (pc & 1)
 		{
@@ -1211,7 +1245,7 @@ static void interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 			pc--;
 		}
 		Do_Exception(pc, ex.expEvn);
-		handleException();
+		return true;
 	}
 }
 
@@ -1236,7 +1270,26 @@ void Arm32Assembler::compileOp(RuntimeBlockInfo* block, shil_opcode* op, bool op
 	switch(op->op)
 	{
 		case shop_readm:
-			if (!readMemImmediate(block, op, optimise))
+			if (op->size == 8 && mmu_enabled())
+			{
+				Register raddr = GenMemAddr(op);
+				if (!raddr.Is(r0))
+					Mov(r0, raddr);
+				Mov(r1, block->vaddr + op->guest_offs - (op->delay_slot ? 2 : 0));
+				call((void *)mmuDynarecRead64);
+				Vmov(d0, r0, r1);
+				if (reg.IsAllocf(op->rd))
+				{
+					Vmov(r0, r1, d0);
+					Vmov(reg.mapFReg(op->rd, 0), r0);
+					Vmov(reg.mapFReg(op->rd, 1), r1);
+				}
+				else
+				{
+					Vstr(d0, MemOperand(r8, op->rd.reg_nofs()));
+				}
+			}
+			else if (!readMemImmediate(block, op, optimise))
 			{
 				mem_op_type optp = memop_type(op);
 				Register raddr = GenMemAddr(op);
@@ -1320,7 +1373,25 @@ void Arm32Assembler::compileOp(RuntimeBlockInfo* block, shil_opcode* op, bool op
 			break;
 
 		case shop_writem:
-			if (!writeMemImmediate(block, op, optimise))
+			if (op->size == 8 && mmu_enabled())
+			{
+				Register raddr = GenMemAddr(op);
+				if (!raddr.Is(r0))
+					Mov(r0, raddr);
+				if (reg.IsAllocf(op->rs2))
+				{
+					Vmov(r1, reg.mapFReg(op->rs2, 0));
+					Vmov(r2, reg.mapFReg(op->rs2, 1));
+				}
+				else
+				{
+					Vldr(d0, MemOperand(r8, op->rs2.reg_nofs()));
+					Vmov(r1, r2, d0);
+				}
+				Mov(r3, block->vaddr + op->guest_offs - (op->delay_slot ? 2 : 0));
+				call((void *)mmuDynarecWrite64);
+			}
+			else if (!writeMemImmediate(block, op, optimise))
 			{
 				mem_op_type optp = memop_type(op);
 
@@ -1540,15 +1611,16 @@ void Arm32Assembler::compileOp(RuntimeBlockInfo* block, shil_opcode* op, bool op
 
 			Sub(r0, r8, sizeof(Sh4Context));
 			Mov(r1, op->rs3._imm);
-			if (!mmu_enabled())
+			Mov(r2, reinterpret_cast<uintptr_t>(*OpDesc[op->rs3._imm]->oph));	// op handler
+			Mov(r3, block->vaddr + op->guest_offs - (op->delay_slot ? 1 : 0));	// pc
+			call((void *)interpreter_fallback);
 			{
-				call((void *)OpPtr[op->rs3._imm]);
-			}
-			else
-			{
-				Mov(r2, reinterpret_cast<uintptr_t>(*OpDesc[op->rs3._imm]->oph));	// op handler
-				Mov(r3, block->vaddr + op->guest_offs - (op->delay_slot ? 1 : 0));	// pc
-				call((void *)interpreter_fallback);
+				Label noException;
+				Cmp(r0, 0);
+				B(eq, &noException);
+				Ldr(r4, MemOperand(r8, ctxOffset(pc)));
+				jump(no_update);
+				Bind(&noException);
 			}
 			break;
 
@@ -2179,7 +2251,7 @@ void Arm32Assembler::compile(RuntimeBlockInfo* block, bool force_checks, bool op
 		u32 addr = block->addr;
 		Mov(r0, addr);
 
-		s32 sz = block->sh4_code_size;
+		s32 sz = block->contiguousCodeSize();
 		while (sz > 0)
 		{
 			if (sz > 2)
@@ -2213,22 +2285,46 @@ void Arm32Assembler::compile(RuntimeBlockInfo* block, bool force_checks, bool op
 				sz -= 2;
 			}
 		}
+		if (block->tail_addr != NullAddress)
+		{
+			u16 *ptr = (u16 *)GetMemPtr(block->tail_addr, sizeof(*ptr));
+			if (ptr != nullptr)
+			{
+				Mov(r2, (u32)ptr);
+				Ldrh(r2, MemOperand(r2));
+				Mov(r1, block->tail_opcode);
+				Cmp(r1, r2);
+				jump(ngen_blockcheckfail, ne);
+			}
+		}
 	}
-	if (mmu_enabled() && block->has_fpu_op)
-	{
-		Mov(r0, block->vaddr);
-		call((void *)checkBlockFpu);
-	}
-
 	//scheduler
 	Ldr(r1, MemOperand(r8, ctxOffset(cycle_counter)));
 	Cmp(r1, 0);
 	Label cyclesRemaining;
-	B(pl, &cyclesRemaining);
+	B(gt, &cyclesRemaining);
 	Mov(r0, block->vaddr);
 	call(intc_sched);
 	Mov(r1, r0);
 	Bind(&cyclesRemaining);
+	Ldr(r0, MemOperand(r8, ctxOffset(interrupt_pend)));
+	Cmp(r0, 0);
+	Label noPendingInterrupt;
+	B(eq, &noPendingInterrupt);
+	Str(r4, MemOperand(r8, ctxOffset(pc)));
+	call((void *)UpdateINTC);
+	Ldr(r4, MemOperand(r8, ctxOffset(pc)));
+	jump(no_update);
+	Bind(&noPendingInterrupt);
+	// Cached FPU blocks can outlive changes to SR.FD and to the FPSCR fields
+	// used while decoding them. Validate both after interrupt recognition.
+	if (block->has_fpu_op)
+	{
+		Mov(r0, block->vaddr);
+		Mov(r2, block->fpu_cfg.full);
+		Mov(r3, block->entry_cycles);
+		call((void *)checkBlockFpu);
+	}
 	const u32 cycles = block->guest_cycles;
 	if (!ImmediateA32::IsImmediateA32(cycles))
 	{
@@ -2386,27 +2482,22 @@ void Arm32Assembler::genMainLoop()
 	unwinder.saveReg(0, r12, 8);
 	unwinder.saveReg(0, lr, 4);
 	Label longjumpLabel;
-	if (!mmu_enabled())
-	{
-		// r8: context
-		Mov(r8, r0);
-	}
-	else
-	{
-		Sub(sp, sp, 4);
-		unwinder.allocStack(0, 8);
-		Push(r0);									// push context
-		unwinder.saveReg(0, r4, 4);
+	// Save a dispatcher stack in every mode. Address/alignment exceptions can
+	// leave generated code even when address translation is disabled.
+	Sub(sp, sp, 4);
+	unwinder.allocStack(0, 8);
+	Push(r0);									// push context
+	unwinder.saveReg(0, r4, 4);
 
-		Mov(r0, reinterpret_cast<uintptr_t>(&jmp_stack));
-		Mov(r1, sp);
-		Str(r1, MemOperand(r0));
+	Mov(r0, reinterpret_cast<uintptr_t>(&jmp_stack));
+	Mov(r1, sp);
+	Str(r1, MemOperand(r0));
 
-		Bind(&longjumpLabel);
+	Bind(&longjumpLabel);
 
-		Ldr(r8, MemOperand(sp));					// r8: context
+	Ldr(r8, MemOperand(sp));					// r8: context
+	if (mmu_enabled())
 		Mov(r9, (uintptr_t)mmuAddressLUT);			// r9: mmu LUT
-	}
 	Ldr(r4, MemOperand(r8, ctxOffset(pc)));			// r4: pc
 	B(&no_updateLabel);								// Go to mainloop !
 	// this code is here for fall-through behavior of do_iter
@@ -2455,8 +2546,7 @@ void Arm32Assembler::genMainLoop()
 
 // cleanup:
 	Bind(&cleanup);
-	if (mmu_enabled())
-		Add(sp, sp, 8);	// pop context & alignment
+	Add(sp, sp, 8);	// pop context & alignment
 	{
 		UseScratchRegisterScope scope(this);
 		scope.ExcludeAll();
@@ -2466,23 +2556,32 @@ void Arm32Assembler::genMainLoop()
 
 	// Exception handler
 	handleException = GetCursorAddress<void (*)()>();
-	if (mmu_enabled())
-	{
-		Mov(r0, reinterpret_cast<uintptr_t>(&jmp_stack));
-		Ldr(r1, MemOperand(r0));
-		Mov(sp, r1);
-		B(&longjumpLabel);
-	}
+	Mov(r0, reinterpret_cast<uintptr_t>(&jmp_stack));
+	Ldr(r1, MemOperand(r0));
+	Mov(sp, r1);
+	B(&longjumpLabel);
 
-	// MMU Check block: SR.FD == 1 (FPU enabled)
-	// r0: vaddr
+	// Block-entry check: FPU enabled and decode-time FPSCR mode unchanged.
+	// r0: vaddr, r2: expected FPSCR, r3: first instruction's issue cycles
 	checkBlockFpu = GetCursorAddress<void (*)()>();
-	loadSh4Reg(r2, reg_sr_status);
-	Tst(r2, 1 << 15);			// test SR.FD bit
-	Bx(eq, lr);					// return if set
+	loadSh4Reg(r12, reg_sr_status);
+	Tst(r12, 1 << 15);			// test SR.FD bit
+	Label fpuEnabled;
+	B(eq, &fpuEnabled);
+	Ldr(r12, MemOperand(r8, ctxOffset(cycle_counter)));
+	Sub(r12, r12, r3);
+	Str(r12, MemOperand(r8, ctxOffset(cycle_counter)));
 	Mov(r1, Sh4Ex_FpuDisabled);	// exception code
 	call((void *)Do_Exception);
 	loadSh4Reg(r4, reg_nextpc);
+	B(&no_updateLabel);
+	Bind(&fpuEnabled);
+	loadSh4Reg(r12, reg_fpscr);
+	Eor(r12, r12, r2);
+	Mov(r3, RuntimeBlockInfo::FpscrDecodeMask);
+	Tst(r12, r3);
+	Bx(eq, lr);
+	Mov(r4, r0);
 	B(&no_updateLabel);
 
 	// MMU Check block: pc == vaddr

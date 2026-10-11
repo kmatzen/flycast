@@ -547,7 +547,8 @@ public:
 				{
 					SERIAL_LOG("Received cmd R");
 					toSend.push_back('0');
-					sh4_sched_request(schedId, SCHED_CYCLES);
+					frameClock.reset();
+					sh4_sched_request(schedId, frameClock.nextCycles());
 				}
 				else
 				{
@@ -607,15 +608,22 @@ public:
 
 	void serialize(Serializer& ser) const override
 	{
+		sh4_sched_serialize(ser, schedId);
 		ser << (u32)toSend.size();
 		for (u8 b : toSend)
 			ser << b;
 		ser << (u32)recvBuffer.size();
 		ser.serialize(recvBuffer.data(), recvBuffer.size());
+		ser << lastPosX << lastPosY << lastButton;
+		ser << frameClock.phase();
 	}
 
 	void deserialize(Deserializer& deser) override
 	{
+		if (deser.version() >= Deserializer::V146)
+			sh4_sched_deserialize(deser, schedId);
+		else
+			sh4_sched_request(schedId, -1);
 		u32 size;
 		deser >> size;
 		toSend.resize(size);
@@ -624,6 +632,20 @@ public:
 		deser >> size;
 		recvBuffer.resize(size);
 		deser.deserialize(recvBuffer.data(), recvBuffer.size());
+		if (deser.version() >= Deserializer::V146)
+			deser >> lastPosX >> lastPosY >> lastButton;
+		else {
+			lastPosX = lastPosY = ~0u;
+			lastButton = false;
+		}
+		if (deser.version() >= Deserializer::V149)
+		{
+			u32 phase;
+			deser >> phase;
+			frameClock.setPhase(phase);
+		}
+		else
+			frameClock.reset();
 	}
 
 private:
@@ -676,8 +698,9 @@ private:
 
 	static int schedCallback(int tag, int cycles, int jitter, void *p)
 	{
-		((Touchscreen *)p)->sendPosition(0);
-		return SCHED_CYCLES;
+		Touchscreen *touchscreen = (Touchscreen *)p;
+		touchscreen->sendPosition(0);
+		return touchscreen->frameClock.nextCycles();
 	}
 
 	SerialPort *port;
@@ -687,8 +710,7 @@ private:
 	u32 lastPosX = ~0;
 	u32 lastPosY = ~0;
 	bool lastButton = false;
-
-	static constexpr u32 SCHED_CYCLES = SH4_MAIN_CLOCK / 60;
+	FixedFrequencyClock<60> frameClock;
 };
 
 u8 SerialPort::readReg(u32 addr)
@@ -1462,22 +1484,28 @@ T SystemSpCart::readMemArea0(u32 addr)
 				else
 				{
 					u8 data = 0;
-					if (ata.bufferIndex < SECTOR_SIZE)
+					if (ata.status.drq && ata.bufferIndex < SECTOR_SIZE)
 					{
 						data = ata.buffer[ata.bufferIndex++];
 						if (ata.bufferIndex == SECTOR_SIZE)
 						{
-							if (ata.sectorCount > 1)
+							if (ata.sectorsRemaining > 0)
+								ata.sectorsRemaining--;
+							ata.sectorCount = ata.sectorsRemaining & 0xff;
+							if (ata.sectorsRemaining != 0)
 							{
 								// read next sector
-								ata.sectorCount--;
 								ata.sectorNumber++;
 								if (ata.sectorNumber == 0)
 									ata.cylinder++;
 								if (ata.cylinder == 0)
 									ata.driveHead.head++;
+								ata.status.drq = 0;
+								ata.status.rdy = 0;
+								ata.status.bsy = 1;
+								ata.pendingCommand = 0x20;
 								readSectors();
-								updateInterrupt(INT_ATA);
+								sh4_sched_request(schedId, 2000); // 10 us inter-sector gap
 							}
 							else
 							{
@@ -1729,7 +1757,9 @@ void SystemSpCart::writeMemArea0(u32 addr, T v)
 					ATA_LOG("systemsp::write(%x) CF ATA cmd: read %d sector(s): c %x h %x s %x", addr, ata.sectorCount, ata.cylinder, ata.driveHead.head, ata.sectorNumber);
 					ata.status.rdy = 0;
 					ata.status.bsy = 1;
-					ata.status.drq = 1; // FIXME should be done in the callback
+					ata.status.drq = 0;
+					ata.pendingCommand = 0x20;
+					ata.sectorsRemaining = ata.sectorCount == 0 ? 256 : ata.sectorCount;
 					sh4_sched_request(schedId, 2000); // 10 us
 					readSectors();
 					break;
@@ -1737,6 +1767,9 @@ void SystemSpCart::writeMemArea0(u32 addr, T v)
 					ATA_LOG("systemsp::write(%x) CF ATA cmd: idle immediate", addr);
 					ata.status.bsy = 1;
 					ata.status.rdy = 0;
+					ata.status.drq = 0;
+					ata.pendingCommand = 0xe1;
+					ata.sectorsRemaining = 0;
 					sh4_sched_request(schedId, 2000); // 10 us
 					break;
 				default:
@@ -1758,7 +1791,10 @@ void SystemSpCart::writeMemArea0(u32 addr, T v)
 				if (ata.devCtrl.srst && !(v & 4))
 				{
 					// software reset
+					sh4_sched_request(schedId, -1);
 					ata.bufferIndex = ~0;
+					ata.pendingCommand = 0;
+					ata.sectorsRemaining = 0;
 					ata.error = 0;
 					ata.status.drq = 0;
 					ata.status.err = 0;
@@ -2462,6 +2498,12 @@ int SystemSpCart::schedCallback(int tag, int sch_cycl, int jitter, void *arg)
 
 int SystemSpCart::schedCallback()
 {
+	if (ata.pendingCommand == 0)
+		return 0;
+
+	if (ata.pendingCommand == 0x20)
+		ata.status.drq = 1;
+	ata.pendingCommand = 0;
 	ata.status.rdy = 1;
 	ata.status.bsy = 0;
 	updateInterrupt(INT_ATA);
@@ -2489,6 +2531,8 @@ void SystemSpCart::Serialize(Serializer& ser) const
 	ser << ata.reg84;
 	ser << ata.buffer;
 	ser << ata.bufferIndex;
+	ser << ata.pendingCommand;
+	ser << ata.sectorsRemaining;
 	ser << flash.cmdState;
 	ser << flash.progAddress;
 	ser << flash.wordCount;
@@ -2516,6 +2560,16 @@ void SystemSpCart::Deserialize(Deserializer& deser)
 	deser >> ata.reg84;
 	deser >> ata.buffer;
 	deser >> ata.bufferIndex;
+	if (deser.version() >= Deserializer::V142)
+		deser >> ata.pendingCommand;
+	else
+		ata.pendingCommand = ata.status.bsy ? (ata.status.drq ? 0x20 : 0xe1) : 0;
+	if (deser.version() >= Deserializer::V143)
+		deser >> ata.sectorsRemaining;
+	else
+		// Preserve the old implementation's zero-count behavior in legacy states.
+		ata.sectorsRemaining = ata.pendingCommand == 0x20 || ata.status.drq
+			? (ata.sectorCount == 0 ? 1 : ata.sectorCount) : 0;
 	deser >> flash.cmdState;
 	deser >> flash.progAddress;
 	deser >> flash.wordCount;

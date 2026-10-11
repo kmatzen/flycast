@@ -176,6 +176,9 @@ static const char *regName(u32 paddr)
 }
 
 //Region P4
+static constexpr u32 ITLB_DATA_ARRAY_MASK = 0x1ffffdda;
+static constexpr u32 UTLB_DATA_ARRAY_MASK = 0x1ffffdff;
+
 //Read P4
 template <class T>
 T DYNACALL ReadMem_P4(u32 addr)
@@ -207,14 +210,21 @@ T DYNACALL ReadMem_P4(u32 addr)
 
 	case 0xF2:
 		{
+			if constexpr (sz != 4)
+				return 0;
 			u32 entry = (addr >> 8) & 3;
-			return ITLB[entry].Address.reg_data | (ITLB[entry].Data.V << 8);
+			return (ITLB[entry].Address.reg_data & 0xfffffcff)
+					| (ITLB[entry].Data.V << 8);
 		}
 
 	case 0xF3:
 		{
+			if constexpr (sz != 4)
+				return 0;
 			u32 entry = (addr >> 8) & 3;
-			return ITLB[entry].Data.reg_data;
+			return addr & 0x800000
+					? ITLB[entry].Assistance.reg_data & 0xf
+					: ITLB[entry].Data.reg_data & ITLB_DATA_ARRAY_MASK;
 		}
 
 	case 0xF4:
@@ -233,8 +243,10 @@ T DYNACALL ReadMem_P4(u32 addr)
 
 	case 0xF6:
 		{
+			if constexpr (sz != 4)
+				return 0;
 			u32 entry = (addr >> 8) & 63;
-			u32 rv = UTLB[entry].Address.reg_data;
+			u32 rv = UTLB[entry].Address.reg_data & 0xfffffcff;
 			rv |= UTLB[entry].Data.D << 9;
 			rv |= UTLB[entry].Data.V << 8;
 			return rv;
@@ -242,8 +254,12 @@ T DYNACALL ReadMem_P4(u32 addr)
 
 	case 0xF7:
 		{
+			if constexpr (sz != 4)
+				return 0;
 			u32 entry = (addr >> 8) & 63;
-			return UTLB[entry].Data.reg_data;
+			return addr & 0x800000
+					? UTLB[entry].Assistance.reg_data & 0xf
+					: UTLB[entry].Data.reg_data & UTLB_DATA_ARRAY_MASK;
 		}
 
 	case 0xFF:
@@ -287,6 +303,8 @@ void DYNACALL WriteMem_P4(u32 addr,T data)
 
 	case 0xF2:
 		{
+			if constexpr (sz != 4)
+				return;
 			u32 entry = (addr >> 8) & 3;
 			ITLB[entry].Address.reg_data = data & 0xFFFFFCFF;
 			ITLB[entry].Data.V = (data >> 8) & 1;
@@ -296,11 +314,13 @@ void DYNACALL WriteMem_P4(u32 addr,T data)
 
 	case 0xF3:
 		{
+			if constexpr (sz != 4)
+				return;
 			u32 entry = (addr >> 8) & 3;
 			if (addr & 0x800000)
 				ITLB[entry].Assistance.reg_data = data & 0xf;
 			else
-				ITLB[entry].Data.reg_data=data;
+				ITLB[entry].Data.reg_data = data & ITLB_DATA_ARRAY_MASK;
 			ITLB_Sync(entry);
 		}
 		return;
@@ -318,21 +338,29 @@ void DYNACALL WriteMem_P4(u32 addr,T data)
 		return;
 
 	case 0xF6:
+		if constexpr (sz != 4)
+			return;
 		if (addr & 0x80)
 		{
 			CCN_PTEH_type t;
 			t.reg_data = data;
 
 			u32 va = t.VPN << 10;
-
+			TLB_Entry *utlbMatch = nullptr;
 			for (std::size_t i = 0; i < std::size(UTLB); i++)
 			{
 				if (mmu_match(va, UTLB[i].Address, UTLB[i].Data))
 				{
-					UTLB[i].Data.V = ((u32)data >> 8) & 1;
-					UTLB[i].Data.D = ((u32)data >> 9) & 1;
-					UTLB_Sync(i);
+					if (utlbMatch != nullptr)
+						mmu_raise_exception(MmuError::TLB_MHIT, va, MMU_TT_DWRITE);
+					utlbMatch = &UTLB[i];
 				}
+			}
+			if (utlbMatch != nullptr)
+			{
+				utlbMatch->Data.V = ((u32)data >> 8) & 1;
+				utlbMatch->Data.D = ((u32)data >> 9) & 1;
+				UTLB_Sync(utlbMatch - UTLB);
 			}
 
 			for (std::size_t i = 0; i < std::size(ITLB); i++)
@@ -340,7 +368,6 @@ void DYNACALL WriteMem_P4(u32 addr,T data)
 				if (mmu_match(va, ITLB[i].Address, ITLB[i].Data))
 				{
 					ITLB[i].Data.V = ((u32)data >> 8) & 1;
-					ITLB[i].Data.D = ((u32)data >> 9) & 1;
 					ITLB_Sync(i);
 				}
 			}
@@ -357,11 +384,13 @@ void DYNACALL WriteMem_P4(u32 addr,T data)
 
 	case 0xF7:
 		{
+			if constexpr (sz != 4)
+				return;
 			u32 entry = (addr >> 8) & 63;
 			if (addr & 0x800000)
 				UTLB[entry].Assistance.reg_data = data & 0xf;
 			else
-				UTLB[entry].Data.reg_data = data;
+				UTLB[entry].Data.reg_data = data & UTLB_DATA_ARRAY_MASK;
 			UTLB_Sync(entry);
 		}
 		return;
@@ -600,18 +629,21 @@ void sh4_mmr_init()
 
 void sh4_mmr_reset(bool hard)
 {
-	OnChipRAM = {};
+	// The operand-cache data array, including the half exposed as on-chip RAM
+	// in CCR.ORA mode, is not initialized by a manual reset.
+	if (hard)
+		OnChipRAM = {};
 	//Reset register values
-	bsc.reset();
-	ccn.reset();
-	cpg.reset();
+	bsc.reset(hard);
+	ccn.reset(hard);
+	cpg.reset(hard);
 	dmac.reset();
 	intc.reset();
-	rtc.reset();
+	rtc.reset(hard);
 	scif.reset(hard);
 	sci.reset();
-	tmu.reset();
-	ubc.reset();
+	tmu.reset(hard);
+	ubc.reset(hard);
 
 	MMU_reset();
 	memset(p_sh4rcb->cntx.sq_buffer, 0, sizeof(p_sh4rcb->cntx.sq_buffer));
@@ -667,6 +699,7 @@ void serialize(Serializer& ser)
 
 	ser << CCN;
 	ser << UBC;
+	ubc.serialize(ser);
 	ser << BSC;
 	ser << DMAC;
 	ser << CPG;
@@ -695,6 +728,7 @@ void deserialize(Deserializer& deser)
 
 	deser >> CCN;
 	deser >> UBC;
+	ubc.deserialize(deser);
 	deser >> BSC;
 	deser >> DMAC;
 	deser >> CPG;
@@ -733,6 +767,11 @@ void serialize2(Serializer& ser)
 {
 	tmu.serialize(ser);
 	mmu_serialize(ser);
+	rtc.serialize(ser);
+	cpg.serialize(ser);
+	sci.serialize(ser);
+	bsc.serialize(ser);
+	dmac.serialize(ser);
 }
 
 void deserialize2(Deserializer& deser)
@@ -746,6 +785,11 @@ void deserialize2(Deserializer& deser)
 
 	tmu.deserialize(deser);
 	mmu_deserialize(deser);
+	rtc.deserialize(deser);
+	cpg.deserialize(deser);
+	sci.deserialize(deser);
+	bsc.deserialize(deser);
+	dmac.deserialize(deser);
 }
 
 } //namespace sh4

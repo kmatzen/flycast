@@ -105,6 +105,12 @@ template<typename T>
 T DYNACALL readt(u32 addr)
 {
 	constexpr u32 sz = sizeof(T);
+	if constexpr (sz == 8)
+	{
+		// SH-4 double-precision transfers are two 32-bit bus accesses. Keep
+		// them separate so mirrors and handler/page boundaries are honored.
+		return (u64)readt<u32>(addr) | ((u64)readt<u32>(addr + 4) << 32);
+	}
 
 	u32 page = addr >> 24;	//1 op, shift/extract
 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page]; //2 ops, insert + read [vmem table will be on reg ]
@@ -149,6 +155,12 @@ template<typename T>
 void DYNACALL writet(u32 addr, T data)
 {
 	constexpr u32 sz = sizeof(T);
+	if constexpr (sz == 8)
+	{
+		writet<u32>(addr, (u32)data);
+		writet<u32>(addr + 4, (u32)((u64)data >> 32));
+		return;
+	}
 
 	u32 page = addr>>24;
 	uintptr_t iirf = (uintptr_t)memInfo_ptr[page];
@@ -427,7 +439,12 @@ void initMappings()
 		// Map the different parts of the memory file into the new memory range we got.
 		const virtmem::Mapping mem_mappings[] = {
 			{0x00000000, 0x00800000,                               0,         0, false},  // Area 0 -> unused
-			{0x00800000, 0x01000000,           MAP_ARAM_START_OFFSET, ARAM_SIZE, false},  // Aica
+			// On 8 MiB systems MEM8MB dynamically selects 2 or 8 MiB address
+			// wrapping, so accesses must use the AICA handler. A 2 MiB install
+			// can stay directly mapped because both modes have the same bound.
+			{0x00800000, 0x01000000,
+				ARAM_SIZE == 2_MB ? MAP_ARAM_START_OFFSET : 0,
+				ARAM_SIZE == 2_MB ? ARAM_SIZE : 0, false},
 			{0x01000000, 0x04000000,                               0,         0, false},  // More unused
 			{0x04000000, 0x05000000,           MAP_VRAM_START_OFFSET, VRAM_SIZE,  true},  // Area 1 (vram, 16MB, wrapped on DC as 2x8MB)
 			{0x05000000, 0x06000000,                               0,         0, false},  // 32 bit path (unused)

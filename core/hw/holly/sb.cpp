@@ -11,6 +11,7 @@
 #include "hw/modem/modem.h"
 #include "hw/naomi/naomi.h"
 #include "hw/pvr/pvr_sb_regs.h"
+#include "cfg/option.h"
 #include "emulator.h"
 #include "hw/bba/bba.h"
 #include "serialize.h"
@@ -213,9 +214,19 @@ static u32 read_SB_FFST(u32 addr)
 	return 0;
 }
 
+static u32 read_SB_TFREM(u32 addr)
+{
+	// TA writes are consumed synchronously in the current FIFO model, so all
+	// eight 32-byte entries are free whenever software can observe this status.
+	return 8;
+}
+
 static void sb_write_SB_SFRES(u32 addr, u32 data)
 {
-	if ((u16)data==0x7611)
+	// Reserved bits participate in the key comparison: the architecture
+	// manual specifies that every value other than exactly 0x00007611 is
+	// ignored.
+	if (data == 0x00007611)
 	{
 		NOTICE_LOG(SH4, "SB/HOLLY: System reset requested");
 		emu.requestReset();
@@ -272,7 +283,7 @@ void HollyRegisters::init()
 	setRW<SB_C2DMAXL_addr, u32, 3>();
 
 	//0x005F6880    SB_TFREM    R   TA FIFO remaining amount
-	setReadOnly<SB_TFREM_addr>();
+	setReadOnly<SB_TFREM_addr>(read_SB_TFREM);
 
 	//0x005F6884    SB_LMMODE0  RW  Via TA texture memory bus select 0
 	setRW<SB_LMMODE0_addr, u32, 1>();
@@ -397,34 +408,34 @@ void HollyRegisters::init()
 	// gdrom, naomi
 
 	//0x005F7480    SB_G1RRC    W   System ROM read access timing
-	setWriteOnly<SB_G1RRC_addr>();
+	setWriteOnly<SB_G1RRC_addr, u32, 0x00001ff7>();
 
 	//0x005F7484    SB_G1RWC    W   System ROM write access timing
-	setWriteOnly<SB_G1RWC_addr>();
+	setWriteOnly<SB_G1RWC_addr, u32, 0x00001ff7>();
 
 	//0x005F7488    SB_G1FRC    W   Flash ROM read access timing
-	setWriteOnly<SB_G1FRC_addr>();
+	setWriteOnly<SB_G1FRC_addr, u32, 0x00001ff7>();
 
 	//0x005F748C    SB_G1FWC    W   Flash ROM write access timing
-	setWriteOnly<SB_G1FWC_addr>();
+	setWriteOnly<SB_G1FWC_addr, u32, 0x00001ff7>();
 
 	//0x005F7490    SB_G1CRC    W   GD PIO read access timing
-	setWriteOnly<SB_G1CRC_addr>();
+	setWriteOnly<SB_G1CRC_addr, u32, 0x00000ff7>();
 
 	//0x005F7494    SB_G1CWC    W   GD PIO write access timing
-	setWriteOnly<SB_G1CWC_addr>();
+	setWriteOnly<SB_G1CWC_addr, u32, 0x00000ff7>();
 
 	//0x005F74A0    SB_G1GDRC   W   GD-DMA read access timing
-	setWriteOnly<SB_G1GDRC_addr>();
+	setWriteOnly<SB_G1GDRC_addr, u32, 0x0000ffff>();
 
 	//0x005F74A4    SB_G1GDWC   W   GD-DMA write access timing
-	setWriteOnly<SB_G1GDWC_addr>();
+	setWriteOnly<SB_G1GDWC_addr, u32, 0x0000ffff>();
 
 	//0x005F74B0    SB_G1SYSM   R   System mode
-	setRW<SB_G1SYSM_addr>();
+	setReadOnly<SB_G1SYSM_addr>();
 
 	//0x005F74B4    SB_G1CRDYC  W   G1IORDY signal control
-	setWriteOnly<SB_G1CRDYC_addr>();
+	setWriteOnly<SB_G1CRDYC_addr, u32, 1>();
 
 	//0x005F74B8    SB_GDAPRO   W   GD-DMA address range
 	setWriteOnly<SB_GDAPRO_addr>();
@@ -537,16 +548,16 @@ void HollyRegisters::init()
 	setReadOnly<SB_G2ID_addr>();
 
 	//0x005F7890    SB_G2DSTO   RW  G2/DS timeout
-	setRW<SB_G2DSTO_addr>();
+	setRW<SB_G2DSTO_addr, u32, 0xfff>();
 
 	//0x005F7894    SB_G2TRTO   RW  G2/TR timeout
-	setRW<SB_G2TRTO_addr>();
+	setRW<SB_G2TRTO_addr, u32, 0xfff>();
 
 	//0x005F7898    SB_G2MDMTO  RW  Modem unit wait timeout
-	setRW<SB_G2MDMTO_addr, u32, 8>();
+	setRW<SB_G2MDMTO_addr, u32, 0xff>();
 
 	//0x005F789C    SB_G2MDMW   RW  Modem unit wait time
-	setRW<SB_G2MDMW_addr, u32, 8>();
+	setRW<SB_G2MDMW_addr, u32, 0xff>();
 
 	//0x005F78BC    SB_G2APRO   W   G2-DMA address range
 	// aica
@@ -663,13 +674,52 @@ void sb_Reset(bool hard)
 
 		SB_SBREV = 0xB;
 		SB_G2ID = 0x12;
-		SB_G1SYSM = ((0 << 4) | 1);
+		if (settings.platform.isConsole())
+		{
+			// G1SYSM reflects HOLLY's console-region input pins, latched at
+			// power-on. Region 3 is "default" and uses the USA value.
+			switch (config::Region.get())
+			{
+			case 0: SB_G1SYSM = 0x00000800; break; // Japan
+			case 2: SB_G1SYSM = 0x00006000; break; // Europe
+			default: SB_G1SYSM = 0x00002000; break; // USA/default
+			}
+		}
+		else
+		{
+			// Preserve the established arcade-board value until its external
+			// pin strapping is known.
+			SB_G1SYSM = 1;
+		}
 		SB_TFREM = 8;
-		SB_PDAPRO = 0x7f00;
-		SB_GDAPRO = 0x7f00;
 	}
+	// System-bus controls return to their documented defaults on both reset
+	// sequences. Address and length registers intentionally remain untouched
+	// on software reset because the hardware leaves them uninitialized.
+	SB_DBREQM = 0;
+	SB_BAVLWC = 0;
+	SB_C2DPRYC = 0;
+	SB_C2DMAXL = 1;
+	SB_LMMODE0 = SB_LMMODE1 = 0;
+	SB_RBSPLT = 0;
+	SB_G2DSTO = SB_G2TRTO = 0x3ff;
+	SB_G2MDMTO = SB_G2MDMW = 0;
+	SB_G1RRC = SB_G1RWC = SB_G1FRC = SB_G1FWC = 0x1ff7;
+	SB_G1CRC = SB_G1CWC = 0x0ff7;
+	SB_G1GDRC = SB_G1GDWC = 0xffff;
+	SB_G1CRDYC = 1;
+	SB_PDAPRO = 0x7f00;
+	SB_GDAPRO = 0x7f00;
 	SB_ISTNRM = 0;
 	SB_ISTNRM1 = 0;
+	SB_ISTERR = 0;
+	// Both power-on and software reset disable every HOLLY interrupt and
+	// interrupt-driven DMA source. External status follows the source devices.
+	SB_IML2NRM = SB_IML4NRM = SB_IML6NRM = 0;
+	SB_IML2EXT = SB_IML4EXT = SB_IML6EXT = 0;
+	SB_IML2ERR = SB_IML4ERR = SB_IML6ERR = 0;
+	SB_PDTNRM = SB_PDTEXT = 0;
+	SB_G2DTNRM = SB_G2DTEXT = 0;
 
 	bba_Reset(hard);
 	ModemReset();
@@ -701,6 +751,7 @@ void sb_serialize(Serializer& ser)
 {
 	ser << sb_regs;
 	ser << SB_ISTNRM1;
+	pvr_sb_Serialize(ser);
 }
 
 void sb_deserialize(Deserializer& deser)
@@ -712,6 +763,7 @@ void sb_deserialize(Deserializer& deser)
 		deser >> SB_ISTNRM1;
 	else
 		SB_ISTNRM1 = 0;
+	pvr_sb_Deserialize(deser);
 	if (deser.version() < Deserializer::V33)
 	{
 		if (deser.version() < Deserializer::V30)
@@ -721,4 +773,5 @@ void sb_deserialize(Deserializer& deser)
 		}
 		deser >> SB_ADST;
 	}
+	asic_reg_PostLoad();
 }

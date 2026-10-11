@@ -107,6 +107,8 @@ static const char *regName(u32 paddr)
 
 u32 pvr_ReadReg(u32 addr)
 {
+	if ((addr & pvr_RegMask) == SPG_STATUS_addr)
+		return spgReadStatus();
 	if ((addr & pvr_RegMask) != SPG_STATUS_addr)
 		DEBUG_LOG(PVR, "read %s.%c == %x", regName(addr),
 				((addr >> 26) & 7) == 2 ? 'b' : (addr & 0x2000000) ? '1' : '0',
@@ -129,12 +131,14 @@ void pvr_WriteReg(u32 paddr,u32 data)
 		return; // read only
 
 	case STARTRENDER_addr:
+		if (SOFTRESET & 2)
+			return;
 		rend_start_render();
 		YUV_init();
 		return;
 
 	case TA_LIST_INIT_addr:
-		if (data >> 31)
+		if ((SOFTRESET & 1) == 0 && data >> 31)
 		{
 			ta_vtx_ListInit(false);
 			TA_NEXT_OPB = TA_NEXT_OPB_INIT;
@@ -143,11 +147,16 @@ void pvr_WriteReg(u32 paddr,u32 data)
 		return;
 
 	case SOFTRESET_addr:
-		if (data & 1)
+		SOFTRESET = data & 7;
+		if (SOFTRESET & 1)
 			ta_vtx_SoftReset();
+		if (SOFTRESET & 2)
+			cancelRenderDone();
 		return;
 
 	case TA_LIST_CONT_addr:
+		if (SOFTRESET & 1)
+			return;
 		//a write of anything works ?
 		ta_vtx_ListInit(true);
 		break;
@@ -208,6 +217,22 @@ void pvr_WriteReg(u32 paddr,u32 data)
 		data &= 0x03FF33FF;
 		if (data != SPG_HBLANK_INT.full) {
 			SPG_HBLANK_INT.full = data;
+			rescheduleSPG(true);
+		}
+		return;
+
+	case SPG_VBLANK_INT_addr:
+		data &= 0x03FF03FF;
+		if (data != SPG_VBLANK_INT.full) {
+			SPG_VBLANK_INT.full = data;
+			rescheduleSPG();
+		}
+		return;
+
+	case SPG_VBLANK_addr:
+		data &= 0x03FF03FF;
+		if (data != SPG_VBLANK.full) {
+			SPG_VBLANK.full = data;
 			rescheduleSPG();
 		}
 		return;

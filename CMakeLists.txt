@@ -1385,6 +1385,12 @@ if(NOT LIBRETRO)
 					shell/apple/emulator-osx/emulator-osx/SDLApplicationDelegate.h
 					shell/apple/emulator-osx/emulator-osx/SDLApplicationDelegate.mm
 					shell/apple/emulator-osx/emulator-osx/osx-main.mm)
+			set_source_files_properties(
+					shell/apple/common/http_client.mm
+					shell/apple/common/util.mm
+					shell/apple/emulator-osx/emulator-osx/SDLApplicationDelegate.mm
+					shell/apple/emulator-osx/emulator-osx/osx-main.mm
+					PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 			set(ASSETS shell/apple/emulator-osx/emulator-osx/Images.xcassets)
 			target_sources(${PROJECT_NAME} PRIVATE ${ASSETS})
 			source_group("Resources" FILES ${ASSETS})

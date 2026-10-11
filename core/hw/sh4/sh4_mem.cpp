@@ -290,6 +290,29 @@ u8* GetMemPtr(u32 addr, u32 size)
 	return nullptr;
 }
 
+static u16 DYNACALL IReadMem16_nommu_checked(u32 address)
+{
+	if (sh4InstructionAddressError(address))
+		mmu_raise_exception(MmuError::BADADDR, address, MMU_TT_IREAD);
+	return addrspace::read16(address);
+}
+
+template<typename T>
+static T DYNACALL ReadMem_nommu_checked(u32 address)
+{
+	if (sh4DataAddressError(address, sizeof(T), false))
+		mmu_raise_exception(MmuError::BADADDR, address, MMU_TT_DREAD);
+	return addrspace::readt<T>(address);
+}
+
+template<typename T>
+static void DYNACALL WriteMem_nommu_checked(u32 address, T data)
+{
+	if (sh4DataAddressError(address, sizeof(T), true))
+		mmu_raise_exception(MmuError::BADADDR, address, MMU_TT_DWRITE);
+	addrspace::writet<T>(address, data);
+}
+
 void SetMemoryHandlers()
 {
 #ifdef STRICT_MODE
@@ -335,15 +358,15 @@ void SetMemoryHandlers()
 	}
 	else
 	{
-		ReadMem8 = &addrspace::read8;
-		ReadMem16 = &addrspace::read16;
-		IReadMem16 = &addrspace::read16;
-		ReadMem32 = &addrspace::read32;
-		ReadMem64 = &addrspace::read64;
+		ReadMem8 = &ReadMem_nommu_checked<u8>;
+		ReadMem16 = &ReadMem_nommu_checked<u16>;
+		IReadMem16 = &IReadMem16_nommu_checked;
+		ReadMem32 = &ReadMem_nommu_checked<u32>;
+		ReadMem64 = &ReadMem_nommu_checked<u64>;
 
-		WriteMem8 = &addrspace::write8;
-		WriteMem16 = &addrspace::write16;
-		WriteMem32 = &addrspace::write32;
-		WriteMem64 = &addrspace::write64;
+		WriteMem8 = &WriteMem_nommu_checked<u8>;
+		WriteMem16 = &WriteMem_nommu_checked<u16>;
+		WriteMem32 = &WriteMem_nommu_checked<u32>;
+		WriteMem64 = &WriteMem_nommu_checked<u64>;
 	}
 }

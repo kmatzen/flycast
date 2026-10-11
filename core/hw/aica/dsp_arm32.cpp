@@ -79,6 +79,14 @@ public:
 
 		for (int step = 0; step < 128; ++step)
 		{
+			if (step != 0 && (step & 1) == 0)
+			{
+				Instruction previous;
+				DecodeInst(&DSPData->MPRO[(step - 1) * 4], &previous);
+				if (previous.MWT)
+					genCallRuntime(commitMemoryWrite);
+			}
+
 			u32 *mpro = &DSPData->MPRO[step * 4];
 			Instruction op;
 			DecodeInst(mpro, &op);
@@ -98,7 +106,7 @@ public:
 				else if (op.IRA <= 0x31)
 				{
 					//INPUTS = DSPData->EXTS[op.IRA - 0x30] << 8;	// EXTS is 16 bits
-					Ldr(INPUTS, dspdata_operand(DSPData->EXTS, op.IRA - 0x30));
+					Ldrsh(INPUTS, dspdata_operand(DSPData->EXTS, op.IRA - 0x30));
 					Lsl(INPUTS, INPUTS, 8);
 				}
 				else
@@ -203,11 +211,15 @@ public:
 				{
 					//SHIFTED = ACC << 1;	// x2 scale
 					Lsl(r2, ACC, 1);
+					Lsl(r2, r2, 8);
+					Asr(r2, r2, 8);
 				}
 				else if (op.SHIFT == 3)
 				{
 					//SHIFTED = ACC;
 					Mov(r2, ACC);
+					Lsl(r2, r2, 8);
+					Asr(r2, r2, 8);
 				}
 				Str(r2, dsp_operand(&DSP->SHIFTED));
 			}
@@ -219,6 +231,9 @@ public:
 			Orr(ACC, r0, Operand(r1, LSL, 20));
 			if (!op.ZERO)
 				Add(ACC, ACC, B);
+			// The accumulator is a non-saturating signed 26-bit register.
+			Lsl(ACC, ACC, 6);
+			Asr(ACC, ACC, 6);
 
 			if (op.TWT)
 			{
@@ -248,24 +263,35 @@ public:
 				const Register& ADDR = r3;
 				if (op.MRD)			// memory only allowed on odd. DoA inserts NOPs on even
 				{
-					//MEMVAL[(step + 2) & 3] = UNPACK(*(u16 *)&aica_ram[ADDR & ARAM_MASK]);
 					calculateADDR(ADDR, op);
 					Mov(r1, getAicaRam());
-					Ldrh(r0, MemOperand(r1, ADDR));
-					genCallRuntime(UNPACK);
+					if (op.NOFL)
+					{
+						Ldrsh(r0, MemOperand(r1, ADDR));
+						Lsl(r0, r0, 8);
+					}
+					else
+					{
+						Ldrh(r0, MemOperand(r1, ADDR));
+						genCallRuntime(UNPACK);
+					}
 					Mov(r2, r0);
 					Str(r2, dsp_operand(DSP->MEMVAL, (step + 2) & 3));
 				}
 				if (op.MWT)
 				{
-					// *(u16 *)&aica_ram[ADDR & ARAM_MASK] = PACK(SHIFTED);
 					Ldr(r0, dsp_operand(&DSP->SHIFTED));
-					genCallRuntime(PACK);
+					if (op.NOFL)
+						Asr(r0, r0, 8);
+					else
+						genCallRuntime(PACK);
 					Mov(r2, r0);
 
 					calculateADDR(ADDR, op);
-					Mov(r1, getAicaRam());
-					Strh(r2, MemOperand(r1, ADDR));
+					Str(ADDR, dsp_operand(&DSP->MWT_ADDR));
+					Str(r2, dsp_operand(&DSP->MWT_DATA));
+					Mov(r1, 1);
+					Str(r1, dsp_operand(&DSP->MWT_PENDING));
 				}
 			}
 
@@ -390,13 +416,13 @@ private:
 		//ADDR += DSP->RBP;			// RBP is already a byte address
 		// RBP is constant for this program
 		Add(ADDR, ADDR, DSP->RBP);
-		// ADDR & ARAM_MASK
-		if (ARAM_SIZE == 2_MB)
+		// Apply the DRAM size selected by MEM8MB.
+		if (soundRamMask() == 2_MB - 1)
 			Bfc(ADDR, 21, 11);
-		else if (ARAM_SIZE == 8_MB)
+		else if (soundRamMask() == 8_MB - 1)
 			Bfc(ADDR, 23, 9);
 		else
-			die("Unsupported ARAM_SIZE");
+			die("Unsupported AICA RAM mask");
 	}
 
 	uintptr_t getAicaRam()

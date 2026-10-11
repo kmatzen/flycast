@@ -87,7 +87,7 @@ int NetDimm::schedCallback()
 	if (nfds > -1)
 	{
 		if (SB_ISTEXT & 8)	// holly_EXP_PCI
-			return POLL_CYCLES;
+			return pollClock.nextCycles();
 
 		timeval tv {};
 		int rc = select(nfds + 1, &readFds, &writeFds, &exceptFds, &tv);
@@ -199,7 +199,7 @@ int NetDimm::schedCallback()
 				}
 			}
 		}
-		return isBusy() ? POLL_CYCLES : SH4_MAIN_CLOCK;
+		return isBusy() ? pollClock.nextCycles() : SH4_MAIN_CLOCK;
 	}
 	if (SB_ISTEXT & 8)	// holly_EXP_PCI
 		return SH4_MAIN_CLOCK;
@@ -275,6 +275,16 @@ int NetDimm::schedCallback()
 	}
 
 	return SH4_MAIN_CLOCK;
+}
+
+void NetDimm::schedulePoll()
+{
+	int busySockets = 0;
+	for (const Socket& socket : sockets)
+		busySockets += socket.isBusy();
+	if (busySockets == 1)
+		pollClock.reset();
+	sh4_sched_request(schedId, pollClock.nextCycles());
 }
 
 void NetDimm::systemCmd(int cmd)
@@ -425,7 +435,7 @@ void NetDimm::netCmd(int cmd)
 					{
 						sockets[sockidx - 1].connecting = true;
 						sockets[sockidx - 1].connectTime = sh4_sched_now64();
-						sh4_sched_request(schedId, POLL_CYCLES);
+						schedulePoll();
 						INFO_LOG(NAOMI, "connect(%d, %x:%d) delayed", sockidx, htonl(a.sin_addr.s_addr), htons(a.sin_port));
 						return;
 					}
@@ -449,7 +459,6 @@ void NetDimm::netCmd(int cmd)
 			char *name = (char *)&dimm_data[buffer[1]];
 			INFO_LOG(NAOMI, "getIpByDns %s", name);
 			//dnsInProgress = true;
-			//sh4_sched_request(schedId, POLL_CYCLES * 10);
 
 			//int len = buffer[2];
 			//u32 dns1 = buffer[3];
@@ -494,7 +503,7 @@ void NetDimm::netCmd(int cmd)
 						sockets[sockidx - 1].recvTime = sh4_sched_now64();
 						sockets[sockidx - 1].recvData = data;
 						sockets[sockidx - 1].recvLen = len;
-						sh4_sched_request(schedId, POLL_CYCLES);
+						schedulePoll();
 						INFO_LOG(NAOMI, "recv(%d, %d) delayed", sockidx, len);
 						return;
 					}
@@ -540,7 +549,7 @@ void NetDimm::netCmd(int cmd)
 						sockets[sockidx - 1].sendTime = sh4_sched_now64();
 						sockets[sockidx - 1].sendData = data;
 						sockets[sockidx - 1].sendLen = len;
-						sh4_sched_request(schedId, POLL_CYCLES);
+						schedulePoll();
 						INFO_LOG(NAOMI, "send(%d, %d) delayed", sockidx, len);
 						return;
 					}

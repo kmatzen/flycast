@@ -174,8 +174,8 @@ void pci_dma_write(PCIDevice *dev, dma_addr_t addr, const void *buf, dma_addr_t 
 #define g_malloc malloc
 #define g_free free
 
-#define PCI_VENDOR_ID_REALTEK            0x10ec
-#define PCI_DEVICE_ID_REALTEK_8139       0x8139
+#define PCI_VENDOR_ID_SEGA               0x11db
+#define PCI_DEVICE_ID_SEGA_BBA            0x1234
 
 #define FMT_PCIBUS                      PRIx64
 
@@ -198,6 +198,19 @@ void pci_dma_write(PCIDevice *dev, dma_addr_t addr, const void *buf, dma_addr_t 
 
 #define PCI_CAPABILITY_LIST	0x34	/* Offset of first capability list entry */
 #define PCI_INTERRUPT_PIN	0x3d	/* 8 bits */
+#define PCI_COMMAND		0x04	/* 16 bits */
+#define PCI_STATUS		0x06	/* 16 bits */
+#define PCI_REVISION_ID		0x08	/* 8 bits */
+#define PCI_CLASS_PROG		0x09	/* 8 bits */
+#define PCI_CLASS_DEVICE	0x0a	/* 16 bits */
+#define PCI_CACHE_LINE_SIZE	0x0c	/* 8 bits */
+#define PCI_LATENCY_TIMER	0x0d	/* 8 bits */
+#define PCI_BIST		0x0f	/* 8 bits */
+#define PCI_INTERRUPT_LINE	0x3c	/* 8 bits */
+#define PCI_MIN_GNT		0x3e	/* 8 bits */
+#define PCI_MAX_LAT		0x3f	/* 8 bits */
+
+#define PCI_CLASS_NETWORK_ETHERNET	0x0200
 
 #define PCI_ROM_ADDRESS1	0x38	/* Same as PCI_ROM_ADDRESS, but for htype 1 */
 

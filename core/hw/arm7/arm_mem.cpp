@@ -1,4 +1,5 @@
 #include "arm_mem.h"
+#include "hw/aica/aica.h"
 #include "hw/aica/aica_mem.h"
 
 namespace aica::arm
@@ -6,6 +7,7 @@ namespace aica::arm
 
 #define REG_L (0x2D00)
 #define REG_M (0x2D04)
+#define REG_ARM_CONTROL (0x2C00)
 
 //Set to true when aica interrupt is pending
 bool aica_interr;
@@ -48,10 +50,19 @@ template <typename T>
 T readReg(u32 addr)
 {
 	addr &= 0x7FFF;
-	if (addr == REG_L)
+	if (addr == REG_ARM_CONTROL
+			|| (addr == REG_ARM_CONTROL + 1 && sizeof(T) == 1))
+		return readAicaReg<T>(addr);
+	else if (addr == REG_L)
 		return (T)e68k_reg_L;
 	else if (addr == REG_M)
-		return (T)e68k_reg_M;	//shouldn't really happen
+	{
+		// M is an interrupt-completion command and RP is a write-only control
+		// bit in its high lane; neither drives the register read bus.
+		return 0;
+	}
+	else if (addr == REG_M + 1)
+		return 0;
 	else if (sizeof(T) == 4)
 		return readRegInternal<u16>(addr);
 	else
@@ -62,7 +73,20 @@ template <typename T>
 void writeReg(u32 addr, T data)
 {
 	addr &= 0x7FFF;
-	if (addr == REG_L)
+	if (addr == REG_ARM_CONTROL)
+	{
+		// ARMRST in the low byte is controlled by the main CPU only. VREG
+		// remains a shared read/write field in bits 9:8.
+		if constexpr (sizeof(T) > 1)
+			writeAicaReg<u8>(REG_ARM_CONTROL + 1, (data >> 8) & 3);
+		return;
+	}
+	else if (addr == REG_ARM_CONTROL + 1)
+	{
+		writeAicaReg<u8>(addr, data & 3);
+		return;
+	}
+	else if (addr == REG_L)
 	{
 		return; // Shouldn't really happen (read only)
 	}
@@ -71,6 +95,13 @@ void writeReg(u32 addr, T data)
 		//accept interrupts
 		if (data & 1)
 			e68k_AcceptInterrupt();
+		if constexpr (sizeof(T) > 1)
+			CommonData->RP = (data >> 8) & 1;
+	}
+	else if (addr == REG_M + 1)
+	{
+		// RP is the only implemented bit in the high byte.
+		CommonData->RP = data & 1;
 	}
 	else
 	{

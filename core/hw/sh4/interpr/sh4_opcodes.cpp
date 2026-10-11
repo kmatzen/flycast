@@ -7,21 +7,76 @@
 #include "hw/sh4/sh4_mmr.h"
 #include "hw/sh4/sh4_core.h"
 #include "hw/sh4/modules/mmu.h"
+#include "hw/sh4/modules/modules.h"
 #include "hw/sh4/sh4_interrupts.h"
+#include "hw/sh4/sh4_cache.h"
+#include "hw/sh4/sh4_interpreter.h"
 #include "debug/gdb_server.h"
 #include "hw/sh4/dyna/decoder.h"
 #include "emulator.h"
 
-#ifdef STRICT_MODE
-#include "hw/sh4/sh4_cache.h"
-#endif
-
 //Read Mem macros
 
-#define ReadMemU32(to,addr) to=ReadMem32(addr)
-#define ReadMemS32(to,addr) to=(s32)ReadMem32(addr)
-#define ReadMemS16(to,addr) to=(u32)(s32)(s16)ReadMem16(addr)
-#define ReadMemS8(to,addr)  to=(u32)(s32)(s8)ReadMem8(addr)
+static inline void checkDataAccess(Sh4Context *ctx, u32 addr, u32 size, bool write)
+{
+	if (sh4DataAddressError(addr, size, write))
+	{
+		CCN_TEA = addr;
+		CCN_PTEH.VPN = addr >> 10;
+		throw SH4ThrownException(ctx->pc - 2,
+				write ? Sh4Ex_AddressErrorWrite : Sh4Ex_AddressErrorRead);
+	}
+}
+
+static inline u8 readMem8Checked(Sh4Context *ctx, u32 addr)
+{
+	checkDataAccess(ctx, addr, 1, false);
+	const u8 data = ReadMem8(addr);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(addr, 1, false, data);
+	return data;
+}
+
+static inline u16 readMem16Checked(Sh4Context *ctx, u32 addr)
+{
+	checkDataAccess(ctx, addr, 2, false);
+	const u16 data = ReadMem16(addr);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(addr, 2, false, data);
+	return data;
+}
+
+static inline u32 readMem32Checked(Sh4Context *ctx, u32 addr)
+{
+	checkDataAccess(ctx, addr, 4, false);
+	const u32 data = ReadMem32(addr);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(addr, 4, false, data);
+	return data;
+}
+
+static inline void writeMem16Checked(Sh4Context *ctx, u32 addr, u16 data)
+{
+	checkDataAccess(ctx, addr, 2, true);
+	WriteMem16(addr, data);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(addr, 2, true, data);
+}
+
+static inline void writeMem32Checked(Sh4Context *ctx, u32 addr, u32 data)
+{
+	checkDataAccess(ctx, addr, 4, true);
+	WriteMem32(addr, data);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(addr, 4, true, data);
+}
+
+static inline void writeMem8Checked(Sh4Context *ctx, u32 addr, u8 data)
+{
+	checkDataAccess(ctx, addr, 1, true);
+	WriteMem8(addr, data);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(addr, 1, true, data);
+}
+
+#define ReadMemU32(to,addr) to=readMem32Checked(ctx, addr)
+#define ReadMemS32(to,addr) to=(s32)readMem32Checked(ctx, addr)
+#define ReadMemS16(to,addr) to=(u32)(s32)(s16)readMem16Checked(ctx, addr)
+#define ReadMemS8(to,addr)  to=(u32)(s32)(s8)readMem8Checked(ctx, addr)
 
 //Base,offset format
 #define ReadMemBOU32(to,addr,offset)    ReadMemU32(to,addr+offset)
@@ -29,9 +84,9 @@
 #define ReadMemBOS8(to,addr,offset)     ReadMemS8(to,addr+offset)
 
 //Write Mem Macros
-#define WriteMemU32(addr,data)          WriteMem32(addr,(u32)data)
-#define WriteMemU16(addr,data)          WriteMem16(addr,(u16)data)
-#define WriteMemU8(addr,data)           WriteMem8(addr,(u8)data)
+#define WriteMemU32(addr,data)          writeMem32Checked(ctx,addr,(u32)data)
+#define WriteMemU16(addr,data)          writeMem16Checked(ctx,addr,(u16)data)
+#define WriteMemU8(addr,data)           writeMem8Checked(ctx,addr,(u8)data)
 
 //Base,offset format
 #define WriteMemBOU32(addr,offset,data) WriteMemU32(addr+offset,data)
@@ -787,8 +842,8 @@ sh4op(i1110_nnnn_iiii_iiii)
 sh4op(i0000_nnnn_1100_0011)
 {
 	u32 n = GetN(op);
-	WriteMemU32(ctx->r[n], ctx->r[0]);
-	// TODO ocache
+	ocache.Movca(ctx->r[n], ctx->r[0]);
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(ctx->r[n], 4, true, ctx->r[0]);
 }
 
 //clrmac
@@ -801,11 +856,15 @@ static void executeDelaySlot() {
 	Sh4Interpreter::Instance->ExecuteDelayslot();
 }
 
+static void executeCallDelaySlot(u32 delayedPr) {
+	Sh4Interpreter::Instance->ExecuteDelayslot(delayedPr);
+}
+
 //braf <REG_N>
 sh4op(i0000_nnnn_0010_0011)
 {
 	u32 n = GetN(op);
-	u32 newpc = ctx->r[n] + ctx->pc + 2;
+	u32 newpc = (ctx->r[n] + ctx->pc + 2) & ~1u;
 	executeDelaySlot();	//WARN : r[n] can change here
 	ctx->pc = newpc;
 }
@@ -814,12 +873,11 @@ sh4op(i0000_nnnn_0010_0011)
 sh4op(i0000_nnnn_0000_0011)
 {
 	u32 n = GetN(op);
-	u32 newpc = ctx->r[n] + ctx->pc +2;
+	u32 newpc = (ctx->r[n] + ctx->pc + 2) & ~1u;
 	u32 newpr = ctx->pc + 2;
 	
-	executeDelaySlot(); //WARN : pr and r[n] can change here
-	
-	ctx->pr = newpr;
+	executeCallDelaySlot(newpr);
+
 	ctx->pc = newpc;
 	debugger::subroutineCall();
 }
@@ -828,11 +886,10 @@ sh4op(i0000_nnnn_0000_0011)
  //rte
 sh4op(i0000_0000_0010_1011)
 {
-	u32 newpc = ctx->spc;
+	u32 newpc = ctx->spc & ~1u;
 	Sh4Interpreter::Instance->ExecuteDelayslot_RTE();
 	ctx->pc = newpc;
-	if (UpdateSR())
-		UpdateINTC();
+	UpdateSR();
 	debugger::subroutineReturn();
 }
 
@@ -840,7 +897,7 @@ sh4op(i0000_0000_0010_1011)
 //rts
 sh4op(i0000_0000_0000_1011)
 {
-	u32 newpc = ctx->pr;
+	u32 newpc = ctx->pr & ~1u;
 	executeDelaySlot(); //WARN : pr can change here
 	ctx->pc = newpc;
 	debugger::subroutineReturn();
@@ -865,13 +922,11 @@ sh4op(i1000_1011_iiii_iiii)
 // bf.s <bdisp8>
 sh4op(i1000_1111_iiii_iiii)
 {
-	if (ctx->sr.T == 0)
-	{
-		//delay 1 instruction
-		u32 newpc = branch_target_s8(ctx, op);
-		executeDelaySlot();
+	const bool taken = ctx->sr.T == 0;
+	u32 newpc = branch_target_s8(ctx, op);
+	executeDelaySlot();
+	if (taken)
 		ctx->pc = newpc;
-	}
 }
 
 
@@ -889,13 +944,11 @@ sh4op(i1000_1001_iiii_iiii)
 // bt.s <bdisp8>
 sh4op(i1000_1101_iiii_iiii)
 {
-	if (ctx->sr.T != 0)
-	{
-		//delay 1 instruction
-		u32 newpc = branch_target_s8(ctx, op);
-		executeDelaySlot();
+	const bool taken = ctx->sr.T != 0;
+	u32 newpc = branch_target_s8(ctx, op);
+	executeDelaySlot();
+	if (taken)
 		ctx->pc = newpc;
-	}
 }
 
 static u32 branch_target_s12(Sh4Context *ctx, u32 op)
@@ -916,9 +969,8 @@ sh4op(i1011_iiii_iiii_iiii)
 {
 	u32 newpr = ctx->pc + 2; //return after delayslot
 	u32 newpc = branch_target_s12(ctx, op);
-	executeDelaySlot();
+	executeCallDelaySlot(newpr);
 
-	ctx->pr = newpr;
 	ctx->pc = newpc;
 	debugger::subroutineCall();
 }
@@ -929,7 +981,7 @@ sh4op(i1100_0011_iiii_iiii)
 	WARN_LOG(INTERPRETER, "TRAP #%X", GetImm8(op));
 	debugger::debugTrap(Sh4Ex_Trap);
 	CCN_TRA = (GetImm8(op) << 2);
-	Do_Exception(ctx->pc, Sh4Ex_Trap);
+	throw SH4ThrownException(ctx->pc, Sh4Ex_Trap);
 }
 
 //jmp @<REG_N>
@@ -937,7 +989,7 @@ sh4op(i0100_nnnn_0010_1011)
 {
 	u32 n = GetN(op);
 
-	u32 newpc = ctx->r[n];
+	u32 newpc = ctx->r[n] & ~1u;
 	executeDelaySlot(); //r[n] can change here
 	ctx->pc = newpc;
 }
@@ -948,10 +1000,9 @@ sh4op(i0100_nnnn_0000_1011)
 	u32 n = GetN(op);
 
 	u32 newpr = ctx->pc + 2;   //return after delayslot
-	u32 newpc = ctx->r[n];
-	executeDelaySlot(); //r[n]/pr can change here
+	u32 newpc = ctx->r[n] & ~1u;
+	executeCallDelaySlot(newpr);
 
-	ctx->pr = newpr;
 	ctx->pc = newpc;
 	debugger::subroutineCall();
 }
@@ -959,10 +1010,16 @@ sh4op(i0100_nnnn_0000_1011)
 //sleep
 sh4op(i0000_0000_0001_1011)
 {
+	// STBCR.STBY selects full standby, except when STBCR2.DSLP selects deep
+	// sleep instead. Full standby initializes the TMU start register even for
+	// channels driven by RTCCLK; ordinary and deep sleep leave it untouched.
+	if ((CPG_STBCR & 0x80) != 0 && (CPG_STBCR2 & 0x80) == 0)
+		TMU_EnterStandby();
+
 	//just wait for an Interrupt
 	int i = 0, s = 1;
 
-	while (!UpdateSystem_INTC())//448
+	while (!UpdateSystem_INTC_Sleep())
 	{
 		if (i++>1000)
 		{
@@ -1121,25 +1178,24 @@ sh4op(i0000_0000_0011_1000)
 //ocbi @<REG_N>
 sh4op(i0000_nnnn_1001_0011)
 {
-#ifdef STRICT_MODE
 	ocache.WriteBack(ctx->r[GetN(op)], false, true);
-#endif
+	// The UBC classifies OCBI as a longword write even though the instruction
+	// only invalidates a cache line and carries no data value.
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(ctx->r[GetN(op)], 4, true, 0, false);
 }
 
 //ocbp @<REG_N>
 sh4op(i0000_nnnn_1010_0011)
 {
-#ifdef STRICT_MODE
 	ocache.WriteBack(ctx->r[GetN(op)], true, true);
-#endif
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(ctx->r[GetN(op)], 4, false, 0, false);
 }
 
 //ocbwb @<REG_N>
 sh4op(i0000_nnnn_1011_0011)
 {
-#ifdef STRICT_MODE
 	ocache.WriteBack(ctx->r[GetN(op)], true, false);
-#endif
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(ctx->r[GetN(op)], 4, false, 0, false);
 }
 
 //pref @<REG_N>
@@ -1154,10 +1210,9 @@ sh4op(i0000_nnnn_1000_0011)
 	}
 	else
 	{
-#ifdef STRICT_MODE
 		ocache.Prefetch(Dest);
-#endif
 	}
+	Sh4Interpreter::RecordUbcOperandAccessIfActive(Dest, 4, false, 0, false);
 }
 
 
@@ -1368,22 +1423,32 @@ sh4op(i0100_nnnn_mmmm_1111)
 {
 	u32 n = GetN(op);
 	u32 m = GetM(op);
-	if (ctx->sr.S != 0)
-	{
-		die("mac.w @<REG_M>+,@<REG_N>+ : S=1");
-	}
+	s32 rn = (s32)(s16)readMem16Checked(ctx, ctx->r[n]);
+	s32 rm = (s32)(s16)readMem16Checked(ctx, ctx->r[m] + (n == m ? 2 : 0));
+
+	ctx->r[n] += 2;
+	ctx->r[m] += 2;
+
+	s32 mul = rm * rn;
+	if (ctx->sr.S == 0)
+		ctx->mac.full += (s64)mul;
 	else
 	{
-		s32 rm,rn;
-
-		rn = (s32)(s16)ReadMem16(ctx->r[n]);
-		rm = (s32)(s16)ReadMem16(ctx->r[m] + (n == m ? 2 : 0));
-
-		ctx->r[n] += 2;
-		ctx->r[m] += 2;
-
-		s32 mul = rm * rn;
-		ctx->mac.full += (s64)mul;
+		const s64 result = (s64)(s32)ctx->mac.l + mul;
+		if (result > 0x7fffffffll)
+		{
+			ctx->mac.l = 0x7fffffff;
+			ctx->mac.h = 1;
+		}
+		else if (result < -0x80000000ll)
+		{
+			ctx->mac.l = 0x80000000;
+			ctx->mac.h = 1;
+		}
+		else
+		{
+			ctx->mac.l = (u32)result;
+		}
 	}
 }
 //mac.l @<REG_M>+,@<REG_N>+
@@ -1393,14 +1458,30 @@ sh4op(i0000_nnnn_mmmm_1111)
 	u32 m = GetM(op);
 	s32 rm, rn;
 
-	verify(ctx->sr.S == 0);
-
-	ReadMemS32(rm, ctx->r[m]);
-	ReadMemS32(rn, ctx->r[n] + (n == m ? 4 : 0));
-	ctx->r[m] += 4;
+	ReadMemS32(rn, ctx->r[n]);
+	ReadMemS32(rm, ctx->r[m] + (n == m ? 4 : 0));
 	ctx->r[n] += 4;
+	ctx->r[m] += 4;
 
-	ctx->mac.full += (s64)rm * (s64)rn;
+	const s64 product = (s64)rm * (s64)rn;
+	if (ctx->sr.S == 0)
+		ctx->mac.full += product;
+	else
+	{
+		// In saturation mode the accumulator is the signed low 48 bits.
+		const u64 low48 = ctx->mac.full & 0x0000ffffffffffffull;
+		s64 result = (s64)(low48 & 0x00007fffffffffffull)
+				- (s64)(low48 & 0x0000800000000000ull);
+		result += product;
+		if (result > 0x7fffffffffffll)
+			result = 0x7fffffffffffll;
+		else if (result < -0x800000000000ll)
+			result = -0x800000000000ll;
+
+		// MACH[31:16] is unchanged in 48-bit saturation mode.
+		ctx->mac.full = (ctx->mac.full & 0xffff000000000000ull)
+				| ((u64)result & 0x0000ffffffffffffull);
+	}
 }
 
 //mul.l <REG_M>,<REG_N>
@@ -1408,7 +1489,7 @@ sh4op(i0000_nnnn_mmmm_0111)
 {
 	u32 n = GetN(op);
 	u32 m = GetM(op);
-	ctx->mac.l = (u32)((((s32)ctx->r[n]) * ((s32)ctx->r[m])));
+	ctx->mac.l = (u32)((s64)(s32)ctx->r[n] * (s64)(s32)ctx->r[m]);
 }
 //************************ Div ! ************************
 //div0u
@@ -1503,14 +1584,8 @@ sh4op(i0011_nnnn_mmmm_1111)
 	//Retail game "Twinkle Star Sprites" "uses" this opcode.
 	u32 n = GetN(op);
 	u32 m = GetM(op);
-	s64 br = (s64)(s32)ctx->r[n] + (s64)(s32)ctx->r[m];
-
-	if (br >=0x80000000)
-		ctx->sr.T = 1;
-	else if (br < (s64)0xFFFFFFFF80000000u)
-		ctx->sr.T = 1;
-	else
-		ctx->sr.T = 0;
+	const s64 result = (s64)(s32)ctx->r[n] + (s64)(s32)ctx->r[m];
+	ctx->sr.T = result > 0x7fffffffll || result < -0x80000000ll;
 
 	ctx->r[n] += ctx->r[m];
 }
@@ -1540,14 +1615,8 @@ sh4op(i0011_nnnn_mmmm_1011)
 	//Retail game "Twinkle Star Sprites" "uses" this opcode.
 	u32 n = GetN(op);
 	u32 m = GetM(op);
-	s64 br = (s64)(s32)ctx->r[n] - (s64)(s32)ctx->r[m];
-
-	if (br >= 0x80000000)
-		ctx->sr.T = 1;
-	else if (br < (s64) (0xFFFFFFFF80000000u))
-		ctx->sr.T = 1;
-	else
-		ctx->sr.T = 0;
+	const s64 result = (s64)(s32)ctx->r[n] - (s64)(s32)ctx->r[m];
+	ctx->sr.T = result > 0x7fffffffll || result < -0x80000000ll;
 
 	ctx->r[n] -= ctx->r[m];
 }
@@ -1615,7 +1684,7 @@ sh4op(i0100_nnnn_0010_0000)
 {
 	u32 n = GetN(op);
 	ctx->sr.T = ctx->r[n] >> 31;
-	ctx->r[n] = ((s32)ctx->r[n]) << 1;
+	ctx->r[n] <<= 1;
 }
 
 
@@ -1633,7 +1702,7 @@ sh4op(i0100_nnnn_0010_0001)
 	u32 n = GetN(op);
 
 	ctx->sr.T = ctx->r[n] & 1;
-	ctx->r[n] = ((s32)ctx->r[n]) >> 1;
+	ctx->r[n] = (ctx->r[n] >> 1) | (ctx->r[n] & 0x80000000);
 }
 
 //shad <REG_M>,<REG_N>
@@ -1645,9 +1714,13 @@ sh4op(i0100_nnnn_mmmm_1100)
 	if (sgn == 0)
 		ctx->r[n] <<= ctx->r[m] & 0x1F;
 	else if ((ctx->r[m] & 0x1F) == 0)
-		ctx->r[n] = (s32)ctx->r[n] >> 31;
+		ctx->r[n] = (ctx->r[n] & 0x80000000) ? 0xffffffff : 0;
 	else
-		ctx->r[n] = (s32)ctx->r[n] >> ((~ctx->r[m] & 0x1F) + 1);
+	{
+		const u32 shift = (~ctx->r[m] & 0x1f) + 1;
+		ctx->r[n] = (ctx->r[n] >> shift)
+				| ((ctx->r[n] & 0x80000000) ? (~0u << (32 - shift)) : 0);
+	}
 }
 
 
@@ -1786,7 +1859,7 @@ sh4op(i1100_1100_iiii_iiii)
 	//Retail game "Twinkle Star Sprites" "uses" this opcode.
 	u32 imm = GetImm8(op);
 
-	u32 temp = (u8)ReadMem8(ctx->gbr + ctx->r[0]);
+	u32 temp = readMem8Checked(ctx, ctx->gbr + ctx->r[0]);
 
 	temp &= imm;
 
@@ -1800,40 +1873,40 @@ sh4op(i1100_1100_iiii_iiii)
 //and.b #<imm>,@(R0,GBR)
 sh4op(i1100_1101_iiii_iiii)
 {
-	u8 temp = (u8)ReadMem8(ctx->gbr + ctx->r[0]);
+	u8 temp = readMem8Checked(ctx, ctx->gbr + ctx->r[0]);
 
 	temp &= GetImm8(op);
 
-	WriteMem8(ctx->gbr + ctx->r[0], temp);
+	writeMem8Checked(ctx, ctx->gbr + ctx->r[0], temp);
 }
 
 
 //xor.b #<imm>,@(R0,GBR)
 sh4op(i1100_1110_iiii_iiii)
 {
-	u8 temp = (u8)ReadMem8(ctx->gbr + ctx->r[0]);
+	u8 temp = readMem8Checked(ctx, ctx->gbr + ctx->r[0]);
 
 	temp ^= GetImm8(op);
 
-	WriteMem8(ctx->gbr + ctx->r[0], temp);
+	writeMem8Checked(ctx, ctx->gbr + ctx->r[0], temp);
 }
 
 
 //or.b #<imm>,@(R0,GBR)
 sh4op(i1100_1111_iiii_iiii)
 {
-	u8 temp = (u8)ReadMem8(ctx->gbr + ctx->r[0]);
+	u8 temp = readMem8Checked(ctx, ctx->gbr + ctx->r[0]);
 
 	temp |= GetImm8(op);
 
-	WriteMem8(ctx->gbr + ctx->r[0], temp);
+	writeMem8Checked(ctx, ctx->gbr + ctx->r[0], temp);
 }
 
 //tas.b @<REG_N>
 sh4op(i0100_nnnn_0001_1011)
 {
 	u32 n = GetN(op);
-	u8 val = (u8)ReadMem8(ctx->r[n]);
+	u8 val = readMem8Checked(ctx, ctx->r[n]);
 
 	u32 srT;
 	if (val == 0)
@@ -1843,7 +1916,7 @@ sh4op(i0100_nnnn_0001_1011)
 
 	val |= 0x80;
 
-	WriteMem8(ctx->r[n], val);
+	writeMem8Checked(ctx, ctx->r[n], val);
 
 	ctx->sr.T = srT;
 }
@@ -1899,8 +1972,7 @@ sh4op(i0100_nnnn_0000_0111)
 
 	ctx->sr.setFull(sr_t);
 	ctx->r[n] += 4;
-	if (UpdateSR())
-		UpdateINTC();
+	UpdateSR();
 }
 
 //lds <REG_N>,FPSCR
@@ -1916,8 +1988,7 @@ sh4op(i0100_nnnn_0000_1110)
 {
 	u32 n = GetN(op);
 	ctx->sr.setFull(ctx->r[n]);
-	if (UpdateSR())
-		UpdateINTC();
+	UpdateSR();
 }
 
 sh4op(iNotImplemented)
@@ -1927,4 +1998,3 @@ sh4op(iNotImplemented)
 
 	throw SH4ThrownException(ctx->pc - 2, Sh4Ex_IllegalInstr);
 }
-

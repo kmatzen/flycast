@@ -38,6 +38,14 @@ static void makePowerOf2Size(int width, int height, int& wpo2, int& hpo2)
 	}
 }
 
+static bool usesRttBuffer(const rend_context& rendCtx)
+{
+	// The software renderer has no host-side RTT texture cache: its render
+	// target is always committed to Dreamcast VRAM.
+	return rendCtx.isRTT
+			&& (config::RenderToTextureBuffer || isSoftware(config::RendererType));
+}
+
 void getPvrFramebufferSize(const rend_context& rendCtx, int& width, int& height)
 {
 	if (!rendCtx.isRTT)
@@ -63,7 +71,7 @@ void getPvrFramebufferSize(const rend_context& rendCtx, int& width, int& height)
 	else
 	{
 		// Render to texture
-		if (config::RenderToTextureBuffer) {
+		if (usesRttBuffer(rendCtx)) {
 			width = rendCtx.tileClip.bottomRight().x + 1;
 			height = rendCtx.tileClip.bottomRight().y + 1;
 		}
@@ -158,7 +166,7 @@ Rect TransformMatrix::getBaseScissor() const
 	glm::vec4 origin;
 	glm::vec4 size;
 	if ((!renderingContext->isRTT && config::EmulateFramebuffer)
-			|| (renderingContext->isRTT && config::RenderToTextureBuffer))
+			|| usesRttBuffer(*renderingContext))
 	{
 		// Region tile clipping only
 		origin = glm::vec4(renderingContext->tileClip.origin, 0, 1);
@@ -194,7 +202,7 @@ void TransformMatrix::getScissorScaling(float& scale_x, float& scale_y) const
 	scale_y = 1.f;
 
 	if ((!renderingContext->isRTT && !config::EmulateFramebuffer)
-			|| (renderingContext->isRTT && !config::RenderToTextureBuffer))
+			|| (renderingContext->isRTT && !usesRttBuffer(*renderingContext)))
 	{
 		if (renderingContext->scaler_ctl.vscalefactor < 1024 || renderingContext->scaler_ctl.vscalefactor > 1025)
 			scale_y *= renderingContext->scaler_ctl.vscalefactor / 1024.f;
@@ -227,21 +235,18 @@ TileClipping TransformMatrix::getTileClip(u32 val, Rect& clipRect)
 	csy = csy * 32;
 	cey = (cey + 1) * 32;
 
-	if (csx == 0 && csy == 0 && cex >= renderingContext->globClip.x && cey >= renderingContext->globClip.y)
+	// A full-screen rectangle is a no-op only when its inside is valid
+	// (User_Clip=2). With outside-valid clipping (User_Clip=3), the same
+	// rectangle rejects the entire globally valid drawing area.
+	if (tileClippingMode == TileClipping::Outside
+			&& csx == 0 && csy == 0
+			&& cex >= renderingContext->globClip.x && cey >= renderingContext->globClip.y)
 		return TileClipping::Off;
 
 	glm::vec4 clip_start(csx, csy, 0, 1);
 	glm::vec4 clip_end(cex, cey, 0, 1);
 	clip_start = viewportMatrix * clip_start;
 	clip_end = viewportMatrix * clip_end;
-	clipRect = { clip_start.xy(), clip_end.xy() - clip_start.xy() };
-	clipRect.size.x++;
-	clipRect.size.y = std::abs(clipRect.size.y) + 1;
-	if (tileClippingMode == TileClipping::Outside)
-	{
-		Rect base = getBaseScissor();
-		clipRect = intersect(clipRect, base);
-	}
 	csx = clip_start[0];
 	csy = clip_start[1];
 	cey = clip_end[1];
@@ -250,6 +255,8 @@ TileClipping TransformMatrix::getTileClip(u32 val, Rect& clipRect)
 		glm::ivec2(std::max(0, (int)std::round(csx)), std::max(0, (int)std::round(std::min(csy, cey)))),
 		glm::ivec2(std::max(0, (int)std::round(cex - csx)), std::max(0, (int)std::round(std::abs(cey - csy))))
 	};
+	if (tileClippingMode == TileClipping::Outside)
+		clipRect = intersect(clipRect, getBaseScissor());
 	return tileClippingMode;
 }
 
@@ -281,7 +288,7 @@ void getScaledFramebufferSize(const rend_context& rendCtx, int& width, int& heig
 	else
 	{
 		// Render to texture
-		if (!config::RenderToTextureBuffer)
+		if (!usesRttBuffer(rendCtx))
 		{
 			if (!config::EmulateFramebuffer)
 			{
@@ -294,11 +301,16 @@ void getScaledFramebufferSize(const rend_context& rendCtx, int& width, int& heig
 		}
 		else
 		{
-			// We currently ignore vert and horiz scaling so we need to increase the framebuffer size accordingly
-			if (rendCtx.scaler_ctl.vscalefactor < 1024 || rendCtx.scaler_ctl.vscalefactor > 1025)
-				height = height * 1024 / rendCtx.scaler_ctl.vscalefactor;
-			if (rendCtx.scaler_ctl.hscale == 1)
-				width /= 2;
+			// Host renderers currently apply the scaler by changing their target
+			// size. Software keeps the PVR accumulation resolution and performs
+			// the documented transfer filtering when committing the RTT to VRAM.
+			if (!isSoftware(config::RendererType))
+			{
+				if (rendCtx.scaler_ctl.vscalefactor < 1024 || rendCtx.scaler_ctl.vscalefactor > 1025)
+					height = height * 1024 / rendCtx.scaler_ctl.vscalefactor;
+				if (rendCtx.scaler_ctl.hscale == 1)
+					width /= 2;
+			}
 		}
 	}
 }

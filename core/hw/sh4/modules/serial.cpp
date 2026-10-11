@@ -50,16 +50,26 @@ int SCIFSerialPort::schedCallback(int tag, int cycles, int lag, void *arg)
 	SCIFSerialPort& scif = *(SCIFSerialPort *)arg;
 	if (tag == 0)
 	{
-		bool reschedule = scif.txDone();
-		scif.rxSched();
-		if (reschedule || scif.pipe != nullptr)
-			return scif.frameSize * scif.cyclesPerBit;
-		else
-			return 0;
+		int remainingLag = std::max(0, lag);
+		for (;;)
+		{
+			bool reschedule = scif.txDone();
+			scif.rxSched();
+			if (!reschedule && scif.pipe == nullptr)
+				return 0;
+
+			const int frameCycles = scif.frameSize * scif.cyclesPerBit;
+			if (frameCycles > remainingLag)
+				return std::max(0, lag) + frameCycles - remainingLag;
+			remainingLag -= frameCycles;
+		}
 	}
 	else
 	{
-		scif.sendBreak();
+		if (tag == 1)
+			scif.sendBreak();
+		else
+			scif.rxTimeout();
 		return 0;
 	}
 }
@@ -73,20 +83,36 @@ bool SCIFSerialPort::isRDF() const {
 	return rxFifo.size() >= trigLevels[SCIF_SCFCR2.RTRG];
 }
 
+void SCIFSerialPort::setPipe(Pipe *newPipe)
+{
+	pipe = newPipe;
+	if (schedId < 0)
+		return;
+	if (pipe != nullptr) {
+		if (!sh4_sched_is_scheduled(schedId))
+			sh4_sched_request(schedId, frameSize * cyclesPerBit);
+	}
+	else if (!transmitting) {
+		sh4_sched_request(schedId, -1);
+	}
+}
+
 bool SCIFSerialPort::txDone()
 {
 	if (!transmitting || SCIF_SCFCR2.TFRST == 1)
 		return false;
+	if (txShiftDataPending && pipe != nullptr)
+		pipe->write(txShiftData);
+	txShiftDataPending = false;
 	if (txFifo.empty())
 	{
 		setStatusBit(TEND);
 		transmitting = false;
 		return false; // don't reschedule
 	}
-	u8 v = txFifo.front();
+	txShiftData = txFifo.front();
 	txFifo.pop_front();
-	if (pipe != nullptr)
-		pipe->write(v);
+	txShiftDataPending = true;
 	if (isTDFE()) {
 		setStatusBit(TDFE);
 		updateInterrupts();
@@ -116,25 +142,51 @@ void SCIFSerialPort::rxSched()
 			rxFifo.push_back(v);
 			if (isRDF()) {
 				setStatusBit(RDF);
+				sh4_sched_request(rxTimeoutSchedId, -1);
 				updateInterrupts();
+			}
+			else {
+				// DR is an idle indication, asserted 15 elementary time
+				// units after the stop bit of the last received byte.
+				sh4_sched_request(rxTimeoutSchedId, 15 * cyclesPerBit);
 			}
 		}
 	}
-	else if (!rxFifo.empty())
-	{
+}
+
+void SCIFSerialPort::rxTimeout()
+{
+	if (!rxFifo.empty() && !isRDF()) {
 		setStatusBit(DR);
 		updateInterrupts();
 	}
 }
 
-void SCIFSerialPort::updateBaudRate()
+void SCIFSerialPort::updateBaudRate(bool reschedule)
 {
 	// 1 start bit, 7 or 8 data bits, optional parity bit, 1 or 2 stop bits
 	frameSize = 1 + 8 - SCIF_SCSMR2.CHR + SCIF_SCSMR2.PE + 1 + SCIF_SCSMR2.STOP;
-	int bauds = SH4_MAIN_CLOCK / 4 / (SCIF_SCBRR2 + 1) / 32 / (1 << (SCIF_SCSMR2.CKS * 2));
-	cyclesPerBit = SH4_MAIN_CLOCK / bauds;
+	cyclesPerBit = scifCyclesPerBit(SCIF_SCBRR2, SCIF_SCSMR2.CKS);
+	const int bauds = SH4_MAIN_CLOCK / cyclesPerBit;
 	INFO_LOG(SH4, "SCIF: Frame size %d cycles/bit %d (%d bauds) pipe %p", frameSize, cyclesPerBit, bauds, pipe);
+	if (reschedule)
+		sh4_sched_request(schedId, frameSize * cyclesPerBit);
+}
+
+void SCIFSerialPort::startTransmission()
+{
+	if (transmitting || txFifo.empty() || SCIF_SCSCR2.TE == 0
+			|| SCIF_SCFCR2.TFRST == 1)
+		return;
+	txShiftData = txFifo.front();
+	txFifo.pop_front();
+	txShiftDataPending = true;
+	transmitting = true;
+	SCIF_SCFSR2.TEND = 0;
 	sh4_sched_request(schedId, frameSize * cyclesPerBit);
+	if (isTDFE())
+		setStatusBit(TDFE);
+	updateInterrupts();
 }
 
 // SCIF SCFTDR2 - Transmit FIFO Data Register
@@ -145,18 +197,9 @@ void SCIFSerialPort::SCFTDR2_write(u8 data)
 		return;
 	if (SCIF_SCSMR2.CHR == 1)
 		data &= 0x7f;
-	if (txFifo.empty() && !transmitting && SCIF_SCSCR2.TE == 1)
-	{
-		if (pipe != nullptr)
-			pipe->write(data);
-		transmitting = true;
-		// Need to reschedule so it doesn't happen too early (f355)
-		sh4_sched_request(schedId, frameSize * cyclesPerBit);
-		setStatusBit(TDFE); // immediately transfer SCFTDR2 into the shift register
-		updateInterrupts();
-	}
-	else if (txFifo.size() < 16) {
+	if (txFifo.size() < 16) {
 		txFifo.push_back(data);
+		startTransmission();
 	}
 }
 
@@ -255,6 +298,7 @@ void SCIFSerialPort::SCSCR2_write(u16 data)
 	}
 	else {
 		setBreak(false);
+		startTransmission();
 	}
 	updateInterrupts();
 	SCIF_LOG("SCIF_SCSCR2= %s%s%s%s%s",
@@ -326,9 +370,12 @@ void SCIFSerialPort::SCFCR2_write(u16 data)
 		if (pipe == nullptr)
 			sh4_sched_request(schedId, -1);
 		transmitting = false;
+		txShiftDataPending = false;
 	}
-	if (SCIF_SCFCR2.RFRST == 1)
+	if (SCIF_SCFCR2.RFRST == 1) {
 		rxFifo.clear();
+		sh4_sched_request(rxTimeoutSchedId, -1);
+	}
 	SCIF_LOG("SCIF_SCFCR2= %s%s%sTTRG %d RTRG %d",
 			SCIF_SCFCR2.RFRST ? "RFRST " : "",
 			SCIF_SCFCR2.TFRST ? "TFRST " : "",
@@ -371,6 +418,8 @@ void SCIFSerialPort::init()
 		schedId = sh4_sched_register(0, schedCallback, this);
 	if (brkSchedId == -1)
 		brkSchedId = sh4_sched_register(1, schedCallback, this);
+	if (rxTimeoutSchedId == -1)
+		rxTimeoutSchedId = sh4_sched_register(2, schedCallback, this);
 }
 
 void SCIFSerialPort::term()
@@ -383,12 +432,19 @@ void SCIFSerialPort::term()
 		sh4_sched_unregister(brkSchedId);
 		brkSchedId = -1;
 	}
+	if (rxTimeoutSchedId != -1) {
+		sh4_sched_unregister(rxTimeoutSchedId);
+		rxTimeoutSchedId = -1;
+	}
 }
 
 void SCIFSerialPort::reset()
 {
 	sh4_sched_request(brkSchedId, -1);
+	sh4_sched_request(rxTimeoutSchedId, -1);
 	transmitting = false;
+	txShiftData = 0;
+	txShiftDataPending = false;
 	statusLastRead = 0;
 	txFifo.clear();
 	rxFifo.clear();
@@ -399,6 +455,7 @@ void SCIFSerialPort::serialize(Serializer& ser)
 {
 	sh4_sched_serialize(ser, schedId);
 	sh4_sched_serialize(ser, brkSchedId);
+	sh4_sched_serialize(ser, rxTimeoutSchedId);
 	ser << statusLastRead;
 	ser << (int)txFifo.size();
 	for (u8 b : txFifo)
@@ -407,6 +464,7 @@ void SCIFSerialPort::serialize(Serializer& ser)
 	for (u8 b : rxFifo)
 		ser << b;
 	ser << transmitting;
+	ser << txShiftData << txShiftDataPending;
 }
 
 void SCIFSerialPort::deserialize(Deserializer& deser)
@@ -417,6 +475,10 @@ void SCIFSerialPort::deserialize(Deserializer& deser)
 	{
 		sh4_sched_deserialize(deser, schedId);
 		sh4_sched_deserialize(deser, brkSchedId);
+		if (deser.version() >= Deserializer::V115)
+			sh4_sched_deserialize(deser, rxTimeoutSchedId);
+		else
+			sh4_sched_request(rxTimeoutSchedId, -1);
 		deser >> statusLastRead;
 		int size;
 		deser >> size;
@@ -434,11 +496,20 @@ void SCIFSerialPort::deserialize(Deserializer& deser)
 			rxFifo.push_back(b);
 		}
 		deser >> transmitting;
+		if (deser.version() >= Deserializer::V113)
+			deser >> txShiftData >> txShiftDataPending;
+		else {
+			txShiftData = 0;
+			// Older states delivered the in-flight byte at transfer start.
+			txShiftDataPending = false;
+		}
 	}
 	else
 	{
 		statusLastRead = 0;
 		transmitting = false;
+		txShiftData = 0;
+		txShiftDataPending = false;
 	}
 	SCIF_SCBRR2 &= 0xff;	// work around previous issues with dynarecs
 }
@@ -636,16 +707,102 @@ void SCIFRegisters::term()
 	super::term();
 }
 
+static int sciSchedId = -1;
+static bool sciTransmitting;
+
+static void updateSciInterrupts()
+{
+	InterruptPend(sh4_SCI1_TXI, (SCI_SCSSR1 & 0x80) != 0 && (SCI_SCSCR1 & 0x80) != 0);
+	InterruptPend(sh4_SCI1_RXI, (SCI_SCSSR1 & 0x40) != 0 && (SCI_SCSCR1 & 0x40) != 0);
+	InterruptPend(sh4_SCI1_ERI, (SCI_SCSSR1 & 0x38) != 0 && (SCI_SCSCR1 & 0x40) != 0);
+	InterruptPend(sh4_SCI1_TEI, (SCI_SCSSR1 & 0x04) != 0 && (SCI_SCSCR1 & 0x04) != 0);
+}
+
+static u32 sciCyclesPerBit()
+{
+	const u32 clockScale = 1u << ((SCI_SCSMR1 & 3) * 2);
+	// Pphi is one quarter of the SH-4 clock. Asynchronous mode divides by
+	// 32; synchronous mode divides by 4.
+	const u32 serialDivider = (SCI_SCSMR1 & 0x80) != 0 ? 4 : 32;
+	return 4u * serialDivider * (SCI_SCBRR1 + 1u) * clockScale;
+}
+
+static u32 sciFrameCycles()
+{
+	if ((SCI_SCSMR1 & 0x80) != 0)
+		return 8 * sciCyclesPerBit();
+	const u32 dataBits = (SCI_SCSMR1 & 0x40) != 0 ? 7 : 8;
+	const u32 parityBits = (SCI_SCSMR1 & 0x20) != 0 ? 1 : 0;
+	const u32 stopBits = (SCI_SCSMR1 & 0x08) != 0 ? 2 : 1;
+	return (1 + dataBits + parityBits + stopBits) * sciCyclesPerBit();
+}
+
+static void startSciTransfer()
+{
+	if (sciTransmitting || (SCI_SCSCR1 & 0x22) != 0x20 || (SCI_SCSSR1 & 0x80) != 0)
+		return;
+	SCI_SCSSR1 |= 0x80;
+	SCI_SCSSR1 &= ~0x04;
+	sciTransmitting = true;
+	sh4_sched_request(sciSchedId, sciFrameCycles());
+	updateSciInterrupts();
+}
+
+static int sciCallback(int, int, int jitter, void *)
+{
+	if ((SCI_SCSCR1 & 0x22) != 0x20) {
+		sciTransmitting = false;
+		return 0;
+	}
+	if ((SCI_SCSSR1 & 0x80) == 0) {
+		SCI_SCSSR1 |= 0x80;
+		SCI_SCSSR1 &= ~0x04;
+		updateSciInterrupts();
+		const int nextFrameCycles = sciFrameCycles();
+		if (jitter < nextFrameCycles)
+			return nextFrameCycles;
+		// There is only one transmit data register behind the shift register,
+		// so a late callback can cross at most this one additional frame.
+	}
+	SCI_SCSSR1 |= 0x04;
+	sciTransmitting = false;
+	updateSciInterrupts();
+	return 0;
+}
+
+static void writeSciControl(u32, u8 data)
+{
+	const bool wasEnabled = (SCI_SCSCR1 & 0x20) != 0;
+	SCI_SCSCR1 = data;
+	if ((SCI_SCSCR1 & 0x22) != 0x20) {
+		sh4_sched_request(sciSchedId, -1);
+		sciTransmitting = false;
+		SCI_SCSSR1 |= 0x04;
+	}
+	else if (!wasEnabled)
+		startSciTransfer();
+	updateSciInterrupts();
+}
+
+static void writeSciStatus(u32, u8 data)
+{
+	// Status flags are cleared by writing zero. MPBT (bit 0) is writable.
+	SCI_SCSSR1 = (SCI_SCSSR1 & data & 0xf8) | (data & 1) | (SCI_SCSSR1 & 0x06);
+	startSciTransfer();
+	updateSciInterrupts();
+}
+
 void SCIRegisters::init()
 {
 	super::init();
+	sciSchedId = sh4_sched_register(0, sciCallback);
 
 	// Serial Communication Interface
 	setRW<SCI_SCSMR1_addr, u8>();
 	setRW<SCI_SCBRR1_addr, u8>();
-	setRW<SCI_SCSCR1_addr, u8>();
+	setWriteHandler<SCI_SCSCR1_addr, u8>(writeSciControl);
 	setRW<SCI_SCTDR1_addr, u8>();
-	setRW<SCI_SCSSR1_addr, u8, 0xf9>();
+	setWriteHandler<SCI_SCSSR1_addr, u8>(writeSciStatus);
 	setReadOnly<SCI_SCRDR1_addr, u8>();
 	setRW<SCI_SCSPTR1_addr, u8, 0x8f>();
 
@@ -659,4 +816,33 @@ void SCIRegisters::reset()
 	SCI_SCBRR1 = 0xff;
 	SCI_SCTDR1 = 0xff;
 	SCI_SCSSR1 = 0x84;
+	sciTransmitting = false;
+	sh4_sched_request(sciSchedId, -1);
+	updateSciInterrupts();
+}
+
+void SCIRegisters::term()
+{
+	sh4_sched_unregister(sciSchedId);
+	sciSchedId = -1;
+	super::term();
+}
+
+void SCIRegisters::serialize(Serializer& ser)
+{
+	ser << sciTransmitting;
+	sh4_sched_serialize(ser, sciSchedId);
+}
+
+void SCIRegisters::deserialize(Deserializer& deser)
+{
+	if (deser.version() >= Deserializer::V72) {
+		deser >> sciTransmitting;
+		sh4_sched_deserialize(deser, sciSchedId);
+	}
+	else {
+		sciTransmitting = false;
+		sh4_sched_request(sciSchedId, -1);
+	}
+	updateSciInterrupts();
 }

@@ -27,6 +27,7 @@
 #include "hw/sh4/modules/mmu.h"
 #include "hw/sh4/sh4_if.h"
 #include "hw/sh4/sh4_mem.h"
+#include "hw/sh4/sh4_mmr.h"
 #include "hw/sh4/sh4_sched.h"
 #include "hw/flashrom/nvmem.h"
 #include "cheats.h"
@@ -442,8 +443,13 @@ void Emulator::dc_reset(bool hard)
 	sh4_sched_reset(hard);
 	pvr::reset(hard);
 	aica::reset(hard);
-	getSh4Executor()->Reset(true);
+	// Manual reset retains SH-4 cache tags, valid/dirty state, data, and LRU
+	// state. Only a power-on reset performs the executor's hard reset.
+	getSh4Executor()->Reset(hard);
 	mem_Reset(hard);
+	// SH7750 reset exceptions enter at the fixed vector and publish the reset
+	// type through EXPEVT.  A manual reset is not the H'000 power-on event.
+	CCN_EXPEVT = hard ? 0 : Sh4Ex_ManualReset;
 }
 
 static void setPlatform(int platform)
@@ -724,13 +730,14 @@ void Emulator::runInternal()
 		{
 			do {
 				resetRequested = false;
+				powerOnResetRequested = false;
 
 				getSh4Executor()->Run();
 
 				if (resetRequested)
 				{
 					nvmem::saveFiles();
-					dc_reset(false);
+					dc_reset(powerOnResetRequested);
 					if (!restartCpu())
 						resetRequested = false;
 				}
@@ -841,10 +848,12 @@ void Emulator::stop()
 	}
 }
 
-// Called on the emulator thread for soft reset
-void Emulator::requestReset()
+// Called on the emulator thread for an internally generated reset.
+void Emulator::requestReset(bool powerOn)
 {
 	resetRequested = true;
+	// A power-on request wins if multiple reset sources arrive together.
+	powerOnResetRequested |= powerOn;
 	if (config::GGPOEnable)
 		NetworkHandshake::term();
 	getSh4Executor()->Stop();

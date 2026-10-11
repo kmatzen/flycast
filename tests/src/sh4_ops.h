@@ -73,8 +73,8 @@ protected:
 	u32& r(u32 regNum) { checkedRegs.insert(&ctx->r[regNum]); return ctx->r[regNum]; }
 	u32& gbr() { checkedRegs.insert(&ctx->gbr); return ctx->gbr; }
 	u64& mac() { return ctx->mac.full; }
-	u32& mach() { return ctx->mac.l; }
-	u32& macl() { return ctx->mac.h; }
+	u32& mach() { return ctx->mac.h; }
+	u32& macl() { return ctx->mac.l; }
 	sr_t& sr() { return ctx->sr; }
 	f32& fr(int regNum) { checkedRegs.insert((u32 *)&ctx->fr[regNum]); return ctx->fr[regNum]; }
 	double getDr(int regNum) {
@@ -806,6 +806,37 @@ protected:
 		ASSERT_EQ(sr().T, 0u);
 		AssertState();
 	}
+	void ShiftTest()
+	{
+		ClearRegs();
+		r(1) = 0x80000001;
+		PrepareOp(0x4120); // shal r1
+		RunOp();
+		ASSERT_EQ(r(1), 2u);
+		ASSERT_EQ(sr().T, 1u);
+
+		ClearRegs();
+		r(1) = 0x80000001;
+		PrepareOp(0x4121); // shar r1
+		RunOp();
+		ASSERT_EQ(r(1), 0xc0000000u);
+		ASSERT_EQ(sr().T, 1u);
+
+		ClearRegs();
+		r(1) = 0x80000000;
+		r(2) = -4;
+		PrepareOp(0x412c | Rm(2)); // shad r2,r1
+		RunOp();
+		ASSERT_EQ(r(1), 0xf8000000u);
+
+		ClearRegs();
+		r(1) = 0x80000000;
+		r(2) = -32;
+		RunOp();
+		ASSERT_EQ(r(1), 0xffffffffu);
+		AssertState();
+	}
+
 	void MulDivTest()
 	{
 		ClearRegs();
@@ -930,6 +961,85 @@ protected:
 		ASSERT_EQ(mac(), 14ull);
 		ASSERT_EQ(r(7), 0xAC001004u);
 		ASSERT_EQ(r(8), 0xAC002004u);
+		AssertState();
+
+		// MAC.W saturation is signed 32-bit and only sets MACH on overflow.
+		ClearRegs();
+		sr().S = 1;
+		mac() = 0x123456787ffffff0ull;
+		r(7) = 0xAC001000;
+		addrspace::write16(r(7), 0x7fff);
+		r(8) = 0xAC002000;
+		addrspace::write16(r(8), 1);
+		PrepareOp(0x400f | Rn(7) | Rm(8));
+		RunOp();
+		ASSERT_EQ(mac(), 0x000000017fffffffull);
+
+		ClearRegs();
+		sr().S = 1;
+		mac() = 0x1234567880000010ull;
+		r(7) = 0xAC001000;
+		addrspace::write16(r(7), (u16)-0x7fff);
+		r(8) = 0xAC002000;
+		addrspace::write16(r(8), 1);
+		RunOp();
+		ASSERT_EQ(mac(), 0x0000000180000000ull);
+
+		ClearRegs();
+		sr().S = 1;
+		mac() = 0x1234567800000005ull;
+		r(7) = 0xAC001000;
+		addrspace::write16(r(7), 3);
+		r(8) = 0xAC002000;
+		addrspace::write16(r(8), 2);
+		RunOp();
+		ASSERT_EQ(mac(), 0x123456780000000bull);
+
+		// An exact limit is not overflow, so MACH remains unchanged.
+		ClearRegs();
+		sr().S = 1;
+		mac() = 0x89abcdef7ffffffeull;
+		r(7) = 0xAC001000;
+		addrspace::write16(r(7), 1);
+		r(8) = 0xAC002000;
+		addrspace::write16(r(8), 1);
+		PrepareOp(0x400f | Rn(7) | Rm(8));
+		RunOp();
+		ASSERT_EQ(mac(), 0x89abcdef7fffffffull);
+
+		// When Rm == Rn, MAC.W reads consecutive words and increments the
+		// shared address register twice.
+		ClearRegs();
+		r(7) = 0xAC001000;
+		addrspace::write16(r(7), (u16)-3);
+		addrspace::write16(r(7) + 2, 5);
+		PrepareOp(0x400f | Rn(7) | Rm(7));
+		RunOp();
+		ASSERT_EQ(mac(), (u64)-15ll);
+		ASSERT_EQ(r(7), 0xAC001004u);
+
+		// MAC.L saturation uses a signed 48-bit accumulator and preserves
+		// the upper half of MACH.
+		ClearRegs();
+		sr().S = 1;
+		mac() = 0xabcd7ffffffffffeull;
+		r(7) = 0xAC001000;
+		addrspace::write32(r(7), 2);
+		r(8) = 0xAC002000;
+		addrspace::write32(r(8), 2);
+		PrepareOp(0x000f | Rn(7) | Rm(8));
+		RunOp();
+		ASSERT_EQ(mac(), 0xabcd7fffffffffffull);
+
+		ClearRegs();
+		sr().S = 1;
+		mac() = 0xabcd800000000001ull;
+		r(7) = 0xAC001000;
+		addrspace::write32(r(7), -2);
+		r(8) = 0xAC002000;
+		addrspace::write32(r(8), 2);
+		RunOp();
+		ASSERT_EQ(mac(), 0xabcd800000000000ull);
 		AssertState();
 	}
 	void CmpTest()
@@ -1455,6 +1565,18 @@ protected:
 		RunOp();
 		ASSERT_EQ(ctx->fpul, 100u);
 		AssertState();
+		setDr(1, 2147483648.0);
+		RunOp();
+		ASSERT_EQ(ctx->fpul, 0x7fffffffu);
+		setDr(1, -2147483649.0);
+		RunOp();
+		ASSERT_EQ(ctx->fpul, 0x80000000u);
+		setDr(1, std::numeric_limits<double>::infinity());
+		RunOp();
+		ASSERT_EQ(ctx->fpul, 0x7fffffffu);
+		setDr(1, std::numeric_limits<double>::quiet_NaN());
+		RunOp();
+		ASSERT_EQ(ctx->fpul, 0x80000000u);
 
 		ClearRegs();
 		*(float *)&ctx->fpul = 0.5f;

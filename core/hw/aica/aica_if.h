@@ -24,10 +24,20 @@ void resetRtc(bool hard);
 void termRtc();
 
 void setMidiReceiver(void (*handler)(u8 data));
+void deliverMidiByte(u8 data);
 void midiSend(u8 data);
+bool midiRead(u8& data);
+void midiOutWrite(u8 data);
+bool midiOutTransmitByte();
+void refreshMidiOutputStatus();
+void serializeMidiOutput(Serializer& ser);
+void deserializeMidiOutput(Deserializer& deser);
+extern int midiOutSchedId;
 
 void sbInit();
 void sbReset(bool hard);
 void sbTerm();
+// Deliver a rising edge on HOLLY's masked G2-DMA trigger line.
+void sbInterrupt();
 
 }

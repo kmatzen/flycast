@@ -23,17 +23,32 @@
 #include <memory>
 #include <array>
 #include <iomanip>
+#include <sstream>
 
 asio::error_code sendMsg(const MapleMsg& msg, asio::ip::tcp::iostream& stream)
 {
-	static char buffer[1024 * 3 + 2];
+	char buffer[sizeof(MapleMsg) * 3 + 2];
 	char *p = buffer;
-	p += sprintf(p, "%02X %02X %02X %02X", msg.command, msg.destAP, msg.originAP, msg.size);
+	size_t remaining = sizeof(buffer);
+	int written = std::snprintf(p, remaining, "%02X %02X %02X %02X",
+			msg.command, msg.destAP, msg.originAP, msg.size);
+	if (written < 0 || (size_t)written >= remaining)
+		return asio::error::message_size;
+	p += written;
+	remaining -= written;
 	const u32 sz = msg.getDataSize();
 	for (u32 i = 0; i < sz; i++)
-		p += sprintf(p, " %02X", msg.data[i]);
-	strcpy(p, "\r\n");
-	p += 2;
+	{
+		written = std::snprintf(p, remaining, " %02X", msg.data[i]);
+		if (written < 0 || (size_t)written >= remaining)
+			return asio::error::message_size;
+		p += written;
+		remaining -= written;
+	}
+	if (remaining < 3)
+		return asio::error::message_size;
+	*p++ = '\r';
+	*p++ = '\n';
 	asio::ip::tcp::socket& sock = static_cast<asio::ip::tcp::socket&>(stream.socket());
 	asio::error_code ec;
 	asio::write(sock, asio::buffer(buffer, p - buffer), ec);
@@ -45,12 +60,30 @@ bool receiveMsg(MapleMsg& msg, std::istream& stream)
 	std::string response;
 	if (!std::getline(stream, response))
 		return false;
-	sscanf(response.c_str(), "%hhx %hhx %hhx %hhx", &msg.command, &msg.destAP, &msg.originAP, &msg.size);
-	if ((msg.getDataSize() - 1) * 3 + 13 >= response.length())
+
+	std::istringstream parser(response);
+	parser >> std::hex;
+	unsigned command;
+	unsigned destAP;
+	unsigned originAP;
+	unsigned size;
+	if (!(parser >> command >> destAP >> originAP >> size)
+			|| command > 0xff || destAP > 0xff || originAP > 0xff || size > 0xff)
 		return false;
-	for (unsigned i = 0; i < msg.getDataSize(); i++)
-		sscanf(&response[i * 3 + 12], "%hhx", &msg.data[i]);
-	return !stream.fail();
+
+	msg.command = command;
+	msg.destAP = destAP;
+	msg.originAP = originAP;
+	msg.size = size;
+	for (u32 i = 0; i < msg.getDataSize(); i++)
+	{
+		unsigned byte;
+		if (!(parser >> byte) || byte > 0xff)
+			return false;
+		msg.data[i] = byte;
+	}
+	parser >> std::ws;
+	return parser.eof();
 }
 
 namespace dreampotato
@@ -146,6 +179,13 @@ void DreamPotato::connect()
 	if (!sendReceive(txMsg, rxMsg))
 		// error has been logged and disconnect() called
 		return;
+	if (rxMsg.command != MDRS_DeviceStatus || rxMsg.size != 28
+			|| rxMsg.destAP != txMsg.originAP || rxMsg.originAP != txMsg.destAP)
+	{
+		WARN_LOG(INPUT, "Invalid device-info response from DreamPotato[%d]", bus);
+		disconnect();
+		return;
+	}
 	const u32 fnCode = rxMsg.readData<u32>();
 	if ((fnCode & MFID_1_Storage) == 0)
 	{

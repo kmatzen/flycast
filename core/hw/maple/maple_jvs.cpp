@@ -1281,13 +1281,16 @@ private:
 void BaseMIE::reply(u8 code, u8 sizew)
 {
 	w8(code);
-	w8(0x00);
-	w8(0x20);
+	w8(replyDestAP);
+	w8(replyOriginAP);
 	w8(sizew);
 }
 
 u32 BaseMIE::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
 {
+	if (buffer_in_len < sizeof(u32) || buffer_in_len > sizeof(MapleMsg)
+			|| (buffer_in_len & 3) != 0)
+		return 0;
 #ifdef DUMP_JVS
 	printf("JVS IN: ");
 	u8 *p = (u8*)buffer_in;
@@ -1303,15 +1306,23 @@ u32 BaseMIE::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
 	dma_count_in = buffer_in_len - 4;
 
 	const u32 cmd = *(u8*)buffer_in;
+	const u32 sender = (buffer_in[0] >> 16) & 0xff;
+	const u32 origin = (bus_id << 6) | (bus_port == 5 ? 0x20 : 1u << bus_port);
+	replyDestAP = sender;
+	replyOriginAP = origin;
+	if (cmd >= MDC_DeviceRequest && cmd <= MDC_DeviceKill
+			&& buffer_in_len != sizeof(u32))
+	{
+		buffer_out[0] = MDRE_TransmitAgain | (sender << 8) | (origin << 16);
+		return sizeof(u32);
+	}
 
 	// delegate to subclass first
 	dma_buffer_out += 4;
 	u32 resp = dma(cmd);
 	if (resp != MDRE_UnknownCmd)
 	{
-		const u32 reci = (buffer_in[0] >> 8) & 0xFF;
-		const u32 sender = (buffer_in[0] >> 16) & 0xFF;
-		buffer_out[0] = (resp << 0 ) | (sender << 8) | (reci << 16) | ((out_len / 4) << 24);
+		buffer_out[0] = (resp << 0 ) | (sender << 8) | (origin << 16) | ((out_len / 4) << 24);
 		return out_len + 4;
 	}
 	else {
@@ -1327,6 +1338,11 @@ u32 BaseMIE::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
 
 		case MDC_JVSUploadFirmware:
 		{
+			if (dma_count_in < 2)
+			{
+				reply(MDRE_TransmitAgain);
+				break;
+			}
 			static u8 *ram;
 
 			if (ram == nullptr)
@@ -1368,7 +1384,17 @@ u32 BaseMIE::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
 				xfer_bytes = 0x1C;
 			else
 				xfer_bytes = 0x18;
+			if (dma_count_in < 0x1c)
+			{
+				reply(MDRE_TransmitAgain);
+				break;
+			}
 			u16 addr = (dma_buffer_in[2] << 8) + dma_buffer_in[3];
+			if (addr + xfer_bytes > 0x10000)
+			{
+				reply(MDRE_TransmitAgain);
+				break;
+			}
 			memcpy(ram + addr, &dma_buffer_in[4], xfer_bytes);
 			u8 sum = 0;
 			for (int i = 0; i < 0x1C; i++)
@@ -1435,6 +1461,11 @@ u32 BaseMIE::dma(u32 cmd)
 
 void BaseMIE::handle_86_subcommand()
 {
+	if (dma_count_in == 0)
+	{
+		reply(MDRE_TransmitAgain);
+		return;
+	}
 	INFO_LOG(JVS, "BaseMIE: Unhandled JVS command (0x86) subcode %x", dma_buffer_in[0]);
 	reply(MDRE_UnknownCmd);
 }
@@ -1640,6 +1671,8 @@ MIEImpl::MIEImpl()
 
 void MIEImpl::send_jvs_message(u32 node_id, u32 channel, u32 length, const u8 *data)
 {
+	if (channel >= std::size(jvs_receive_length) || data == nullptr || length == 0)
+		return;
 	if (node_id - 1 < io_boards.size())
 	{
 		u8 temp_buffer[256];
@@ -1672,6 +1705,8 @@ void MIEImpl::send_jvs_message(u32 node_id, u32 channel, u32 length, const u8 *d
 void MIEImpl::send_jvs_messages(u32 node_id, u32 channel, bool use_repeat, u32 length, const u8 *data, bool repeat_first)
 {
 	u8 temp_buffer[256];
+	if (channel >= std::size(jvs_receive_length) || length > sizeof(temp_buffer))
+		return;
 	if (data)
 	{
 		memcpy(temp_buffer, data, length);
@@ -1686,6 +1721,8 @@ void MIEImpl::send_jvs_messages(u32 node_id, u32 channel, bool use_repeat, u32 l
 		u32 repeat_len = jvs_repeat_request[node_id - 1][0];
 		if (use_repeat && repeat_len > 0)
 		{
+			if (repeat_len > sizeof(temp_buffer) - length)
+				return;
 			if (repeat_first)
 			{
 				memmove(temp_buffer + repeat_len, temp_buffer, length);
@@ -1703,6 +1740,11 @@ void MIEImpl::send_jvs_messages(u32 node_id, u32 channel, bool use_repeat, u32 l
 
 bool MIEImpl::receive_jvs_messages(u32 channel)
 {
+	if (channel >= std::size(jvs_receive_length))
+	{
+		reply(MDRE_TransmitAgain);
+		return false;
+	}
 	constexpr u32 headerLength = sizeof(u32) * 5 + 3;
 	u32 dword_length = (jvs_receive_length[channel] + headerLength - 1) / 4 + 1;
 
@@ -1746,9 +1788,10 @@ bool MIEImpl::receive_jvs_messages(u32 channel)
 void MIEImpl::handle_86_subcommand()
 {
 	if (dma_count_in == 0) {
-		reply(MDRS_JVSReply);
+		reply(MDRE_TransmitAgain);
 		return;
 	}
+	auto malformed = [this]() { reply(MDRE_TransmitAgain); };
 	u32 subcode = dma_buffer_in[0];
 
 	// CT fw uses 13 as a 17, and 17 as 13 and also uses 19
@@ -1784,10 +1827,33 @@ void MIEImpl::handle_86_subcommand()
 			cmd = &dma_buffer_in[3];
 		}
 	}
+	auto validTransfer = [&]() {
+		if (subcode == 0x13)
+			return dma_count_in >= 3 && 3u + len <= dma_count_in;
+		return dma_count_in >= 8 && channel < std::size(jvs_receive_length)
+				&& 8u + len <= dma_count_in;
+	};
+	auto validCommandList = [&]() {
+		if (dma_count_in < 7)
+			return false;
+		u32 idx = 7;
+		for (u32 i = 0; i < dma_buffer_in[6]; i++)
+		{
+			if (idx + 2 > dma_count_in || idx + 2u + dma_buffer_in[idx + 1] > dma_count_in)
+				return false;
+			idx += dma_buffer_in[idx + 1] + 2;
+		}
+		return true;
+	};
 
 	switch (subcode)
 	{
 		case 0x13:	// Store repeated request
+			if (!validTransfer())
+			{
+				malformed();
+				break;
+			}
 			if (len > 0 && node_id > 0 && node_id <= 0x1f)
 			{
 				INFO_LOG(MAPLE, "JVS node %d: Storing %d cmd bytes", node_id, len);
@@ -1802,6 +1868,11 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x15:	// Receive JVS data
+			if (dma_count_in < 2 || dma_buffer_in[1] >= std::size(jvs_receive_length))
+			{
+				malformed();
+				break;
+			}
 			receive_jvs_messages(dma_buffer_in[1]);
 			if (hotd2p)
 			{
@@ -1815,6 +1886,11 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x17:	// Transmit without repeat
+			if (!validTransfer())
+			{
+				malformed();
+				break;
+			}
 			jvs_receive_length[channel] = 0;
 			send_jvs_messages(node_id, channel, false, len, cmd, false);
 			reply(MDRS_JVSReply, 1);
@@ -1825,6 +1901,11 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x19:	// Transmit with repeat
+			if (!validTransfer())
+			{
+				malformed();
+				break;
+			}
 			jvs_receive_length[channel] = 0;
 			send_jvs_messages(node_id, channel, true, len, cmd, true);
 			reply(MDRS_JVSReply, 1);
@@ -1835,6 +1916,11 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x21:	// Transmit with repeat
+			if (!validTransfer())
+			{
+				malformed();
+				break;
+			}
 			jvs_receive_length[channel] = 0;
 			send_jvs_messages(node_id, channel, true, len, cmd, false);
 			reply(MDRS_JVSReply, 1);
@@ -1845,15 +1931,27 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x35:	// Receive then transmit with repeat (15 then 27)
+			if (!validCommandList())
+			{
+				malformed();
+				break;
+			}
+			channel = dma_buffer_in[5] & 0x1f;
 			receive_jvs_messages(channel);
 			[[fallthrough]];
 
 		case 0x27:	// Transmit with repeat
 			{
-				jvs_receive_length[channel] = 0;
-
+				if (!validCommandList())
+				{
+					malformed();
+					break;
+				}
+				channel = dma_buffer_in[5] & 0x1f;
 				u32 cmd_count = dma_buffer_in[6];
 				u32 idx = 7;
+				jvs_receive_length[channel] = 0;
+
 				for (u32 i = 0; i < cmd_count; i++)
 				{
 					node_id = dma_buffer_in[idx];
@@ -1873,6 +1971,11 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x33:	// Receive then transmit with repeat (15 then 21)
+			if (!validTransfer())
+			{
+				malformed();
+				break;
+			}
 			receive_jvs_messages(channel);
 			send_jvs_messages(node_id, channel, true, len, cmd, false);
 			reply(MDRS_JVSReply, 1);
@@ -1884,6 +1987,11 @@ void MIEImpl::handle_86_subcommand()
 
 		case 0x0B:	//EEPROM write
 		{
+			if (dma_count_in < 4 || 4u + dma_buffer_in[2] > dma_count_in)
+			{
+				malformed();
+				break;
+			}
 			int address = dma_buffer_in[1];
 			int size = dma_buffer_in[2];
 			DEBUG_LOG(MAPLE, "EEprom write %08x %08x", address, size);
@@ -1916,6 +2024,11 @@ void MIEImpl::handle_86_subcommand()
 
 		case 0x3:	//EEPROM read
 		{
+			if (dma_count_in < 2)
+			{
+				malformed();
+				break;
+			}
 			//printf("EEprom READ\n");
 			int address = dma_buffer_in[1] % sizeof(eeprom);
 			//printState(Command,buffer_in,buffer_in_len);
@@ -1972,6 +2085,11 @@ void MIEImpl::handle_86_subcommand()
 			break;
 
 		case 0x47: // send data
+			if (dma_count_in < 5)
+			{
+				malformed();
+				break;
+			}
 			DEBUG_LOG(MAPLE, "JVS: RS422 send %02x", dma_buffer_in[4]);
 			if (serialPipe != nullptr)
 				serialPipe->write(dma_buffer_in[4]);
@@ -2069,6 +2187,8 @@ u16 jvs_io_board::read_analog_axis(int player_num, int player_axis, bool inverte
 
 u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buffer_out)
 {
+	if (length_in == 0)
+		return 0;
 	u8 jvs_cmd = buffer_in[0];
 	if (jvs_cmd == 0xF0)		// JVS reset
 		// Nothing to do
@@ -2172,6 +2292,8 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
 		break;
 
 	case 0x70:
+		if (length_in < 5)
+			return 0;
 		LOGJVS("JVS 0x70: %02x %02x %02x %02x", buffer_in[1], buffer_in[2], buffer_in[3], buffer_in[4]);
 		init_in_progress = true;
 		JVS_STATUS1();
@@ -2195,6 +2317,80 @@ u32 jvs_io_board::handle_jvs_message(const u8 *buffer_in, u32 length_in, u8 *buf
 	default:
 		if ((jvs_cmd >= 0x20 && jvs_cmd <= 0x38) || jvs_cmd == 0x74) // Read inputs and more
 		{
+			// Validate the complete command list before changing coin counters,
+			// outputs, printer state, or relative-input accumulators. A malformed
+			// JVS packet is ignored by real boards rather than partially applied.
+			u32 estimatedReplyLength = 4; // header, length, and status
+			for (u32 cmdi = 0; cmdi < length_in; )
+			{
+				u32 commandLength;
+				u32 replyLength = 1; // report byte
+				switch (buffer_in[cmdi])
+				{
+				case 0x20:
+					if (cmdi + 3 > length_in || buffer_in[cmdi + 1] > 4
+							|| (buffer_in[cmdi + 2] != 1 && buffer_in[cmdi + 2] != 2))
+						return 0;
+					commandLength = 3;
+					replyLength += 1 + buffer_in[cmdi + 1] * buffer_in[cmdi + 2];
+					break;
+				case 0x21:
+					if (cmdi + 2 > length_in || buffer_in[cmdi + 1] > std::size(coin_count)
+							|| first_player + buffer_in[cmdi + 1] > std::size(old_coin_chute))
+						return 0;
+					commandLength = 2;
+					replyLength += 2 * buffer_in[cmdi + 1];
+					break;
+				case 0x22:
+					if (cmdi + 2 > length_in)
+						return 0;
+					commandLength = 2;
+					replyLength += 2 * buffer_in[cmdi + 1];
+					break;
+				case 0x23:
+					if (cmdi + 2 > length_in)
+						return 0;
+					commandLength = 2;
+					replyLength += 2 * buffer_in[cmdi + 1];
+					break;
+				case 0x25:
+					if (cmdi + 2 > length_in || buffer_in[cmdi + 1] == 0
+							|| first_player + buffer_in[cmdi + 1] > std::size(mapleInputState))
+						return 0;
+					commandLength = 2;
+					replyLength += 4;
+					break;
+				case 0x32:
+				case 0x33:
+					if (cmdi + 2 > length_in)
+						return 0;
+					if (buffer_in[cmdi + 1] == 0)
+						return 0;
+					commandLength = 2u + buffer_in[cmdi + 1];
+					if (cmdi + commandLength > length_in)
+						return 0;
+					break;
+				case 0x74:
+					if (cmdi + 2 > length_in)
+						return 0;
+					commandLength = 2u + buffer_in[cmdi + 1];
+					if (cmdi + commandLength > length_in)
+						return 0;
+					break;
+				case 0x30:
+					commandLength = 4;
+					if (cmdi + commandLength > length_in)
+						return 0;
+					break;
+				default:
+					commandLength = length_in - cmdi;
+					break;
+				}
+				estimatedReplyLength += replyLength;
+				if (estimatedReplyLength + 1 > 256) // trailing checksum
+					return 0;
+				cmdi += commandLength;
+			}
 			LOGJVS("JVS Node %d: ", node_id);
 			u32 buttons[4] {};
 #ifdef LIBRETRO
@@ -2553,6 +2749,8 @@ u32 RFIDReaderWriterImpl::getStatus() const
 u32 RFIDReaderWriterImpl::RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out)
 {
 	const u32 len = BaseMIE::RawDma(buffer_in, buffer_in_len, buffer_out);
+	if (len < sizeof(u32))
+		return len;
 	const u8 reply = *(u8 *)buffer_out;
 	if (reply == 0xfe)
 		std::swap(*((u8 *)buffer_out + 1), *((u8 *)buffer_out + 2));
@@ -2590,6 +2788,11 @@ u32 RFIDReaderWriterImpl::dma(u32 cmd)
 		return cmd == MDC_DeviceRequest ? MDRS_DeviceStatus : MDRS_DeviceStatusAll;
 
 	case MDCF_GetCondition:
+		{
+			MapleDeviceRV validation = validateFunction(0x00100000, 4);
+			if (validation != MDRS_JVSNone)
+				return validation;
+		}
 		w32(0x00100000); // custom function
 		return MDRS_DataTransfer;
 
@@ -2663,18 +2866,27 @@ u32 RFIDReaderWriterImpl::dma(u32 cmd)
 
 	case 0xB1:	// write to card
 		{
+			if (dma_count_in < 4)
+				return MDRE_TransmitAgain;
+			u32 offset = dma_buffer_in[0] * 4;
+			u32 size = dma_buffer_in[1] * 4;
+			if (dma_count_in != 4 + size || offset > sizeof(cardData)
+					|| size > sizeof(cardData) - offset)
+				return MDRE_TransmitAgain;
 			w32(getStatus());
-			u32 offset = r8() * 4;
-			size_t size = r8() * 4;
+			r8();
+			r8();
 			skip(2);
 			DEBUG_LOG(JVS, "RFID card write: offset 0x%x len %d", offset, (int)size);
-			rptr(cardData + offset, std::min(size, sizeof(cardData) - offset));
+			rptr(cardData + offset, size);
 			saveCard();
 			return (MapleDeviceRV)0xfe;
 		}
 
 	case 0xD1:	// decrement counter
 		{
+			if (dma_count_in < 1)
+				return MDRE_TransmitAgain;
 			int counter = r8();
 			switch (counter) {
 			case 0x03:

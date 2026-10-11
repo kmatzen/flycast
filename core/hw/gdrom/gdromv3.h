@@ -17,6 +17,7 @@ enum gd_states
 	gds_readsector_pio,
 	gds_readsector_dma,
 	gds_process_set_mode,
+	gds_open_wait,
 };
 
 //Structs & unions
@@ -129,6 +130,10 @@ struct read_params_t
 	u32 start_sector;
 	u32 remaining_sectors;
 	u32 sector_type;
+	u32 sector_offset;
+	u32 expected_type;
+	u32 next_sector;
+	u32 data_select;
 };
 
 struct packet_cmd_t
@@ -182,7 +187,7 @@ public:
 	}
 
 	// Fill the cache with up to NSECT sectors if empty, using the passed read parameters
-	void fill(read_params_t& params);
+	bool fill(read_params_t& params);
 	// Return a pointer to the cache and advance the index by len bytes. len *must* be <= getSize()
 	const u8 *read(u32 len);
 	void serialize(Serializer& ser) const;
@@ -210,7 +215,10 @@ public:
 	}
 	// in bytes
 	u32 getSize() const {
-		return size * sizeof(u16);
+		return size;
+	}
+	u32 getRemaining() const {
+		return size - index;
 	}
 	void clear()
 	{
@@ -219,23 +227,30 @@ public:
 		index = 0;
 	}
 	u16 read() {
-		return _data[index++];
+		u16 value = 0;
+		const u32 count = std::min<u32>(sizeof(value), getRemaining());
+		memcpy(&value, &_data[index], count);
+		index += count;
+		return value;
 	}
-	const u16 *data() const {
+	const u8 *data() const {
 		return _data;
 	}
 	void write(u16 v) {
-		_data[index++] = v;
+		const u32 count = std::min<u32>(sizeof(v), getRemaining());
+		memcpy(&_data[index], &v, count);
+		index += count;
 	}
 	// Returns a pointer to fill the buffer and sets its size. Index is reset.
-	u16 *fill(u32 size) {
+	u8 *fill(u32 size) {
 		resetSize(size);
 		return &_data[0];
 	}
 	// Sets the buffer capacity and resets the index.
 	void resetSize(u32 size) {
+		verify(size <= Capacity);
 		this->index = 0;
-		this->size = size / sizeof(u16);
+		this->size = size;
 	}
 	void serialize(Serializer& ser) const;
 	void deserialize(Deserializer& deser);
@@ -246,12 +261,13 @@ public:
 private:
 	u32 index;
 	u32 size;
-	u16 _data[Capacity / 2] {};
+	u8 _data[Capacity] {};
 };
 
 struct cdda_t
 {
-	enum { NoInfo, Playing, Paused, Terminated } status;
+	// Values through Failed are persisted verbatim in save states.
+	enum { NoInfo, Playing, Paused, Terminated, Scanning, Failed, Seeked } status;
 	u32 repeats;
 	union
 	{
@@ -293,6 +309,31 @@ struct GD_HardwareInfo_t
   char system_date[6];
 };
 extern GD_HardwareInfo_t GD_HardwareInfo;
+
+constexpr u32 gdromReadRate(u8 speed)
+{
+	constexpr u32 BaseRate = 150_KB;
+	switch (speed)
+	{
+	case 1: return BaseRate;
+	case 2: return BaseRate * 2;
+	case 3: return BaseRate * 4;
+	case 4: return BaseRate * 6;
+	case 5: return BaseRate * 8;
+	case 6: return BaseRate * 10;
+	case 0: // Maximum speed.
+	case 7:
+	default:
+		return BaseRate * 12;
+	}
+}
+
+constexpr u32 gdromDmaBusLength(u32 byteLength)
+{
+	// GD-DMA is programmed in bytes but its root-bus transaction and debug
+	// counters advance in 32-byte units.
+	return (byteLength + 31) & ~31u;
+}
 
 extern int sns_asc;
 extern int sns_ascq;

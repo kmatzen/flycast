@@ -67,6 +67,14 @@ public:
 
 		for (int step = 0; step < 128; ++step)
 		{
+			if (step != 0 && (step & 1) == 0)
+			{
+				Instruction previous;
+				DecodeInst(&DSPData->MPRO[(step - 1) * 4], &previous);
+				if (previous.MWT)
+					call((const void *)commitMemoryWrite);
+			}
+
 			u32 *mpro = &DSPData->MPRO[step * 4];
 			Instruction op;
 			DecodeInst(mpro, &op);
@@ -86,7 +94,7 @@ public:
 				else if (op.IRA <= 0x31)
 				{
 					//INPUTS = DSPData->EXTS[op.IRA - 0x30] << 8;	// EXTS is 16 bits
-					mov(INPUTS, dword[&DSPData->EXTS[op.IRA - 0x30]]);
+					movsx(INPUTS, word[&DSPData->EXTS[op.IRA - 0x30]]);
 					shl(INPUTS, 8);
 				}
 				else
@@ -206,11 +214,15 @@ public:
 					//SHIFTED = ACC << 1;	// x2 scale
 					mov(ecx, ACC);
 					shl(ecx, 1);
+					shl(ecx, 8);
+					sar(ecx, 8);
 				}
 				else if (op.SHIFT == 3)
 				{
 					//SHIFTED = ACC;
 					mov(ecx, ACC);
+					shl(ecx, 8);
+					sar(ecx, 8);
 				}
 				// ecx contains SHIFTED
 			}
@@ -225,6 +237,9 @@ public:
 			mov(ACC, eax);
 			if (!op.ZERO)
 				add(ACC, dword[&DSP->B]);
+			// The accumulator is a non-saturating signed 26-bit register.
+			shl(ACC, 6);
+			sar(ACC, 6);
 
 			if (op.TWT)
 			{
@@ -256,24 +271,40 @@ public:
 						push(ecx);
 				}
 				const Xbyak::Reg32 ADDR = Y;
-				if (op.MWT)
-				{
-					// *(u16 *)&aica_ram[ADDR & ARAM_MASK] = PACK(SHIFTED);
-					// SHIFTED is in ecx
-					call((const void *)PACK);
-
-					CalculateADDR(ADDR, op);
-					mov(ecx, (uintptr_t)&aica_ram[0]);
-					mov(word[ecx + ADDR], ax);
-				}
+				if (op.MRD && op.MWT)
+					push(ecx); // MRD calls and address generation clobber SHIFTED
 				if (op.MRD)			// memory only allowed on odd. DoA inserts NOPs on even
 				{
-					//MEMVAL[(step + 2) & 3] = UNPACK(*(u16 *)&aica_ram[ADDR & ARAM_MASK]);
 					CalculateADDR(ADDR, op);
 					mov(ecx, (uintptr_t)&aica_ram[0]);
-					movzx(ecx, word[ecx + ADDR]);
-					call((const void *)UNPACK);
+					if (op.NOFL)
+					{
+						movsx(eax, word[ecx + ADDR]);
+						shl(eax, 8);
+					}
+					else
+					{
+						movzx(ecx, word[ecx + ADDR]);
+						call((const void *)UNPACK);
+					}
 					mov(dword[&DSP->MEMVAL[(step + 2) & 3]], eax);
+				}
+				if (op.MRD && op.MWT)
+					pop(ecx);
+				if (op.MWT)
+				{
+					if (op.NOFL)
+					{
+						mov(eax, ecx);
+						sar(eax, 8);
+					}
+					else
+						call((const void *)PACK); // SHIFTED is in ecx
+
+					CalculateADDR(ADDR, op);
+					mov(dword[&DSP->MWT_ADDR], ADDR);
+					mov(dword[&DSP->MWT_DATA], eax);
+					mov(dword[&DSP->MWT_PENDING], 1);
 				}
 				if (op.MRD || op.MWT)
 				{
@@ -359,8 +390,8 @@ private:
 		//ADDR += DSP->RBP;			// RBP is already a byte address
 		// RBP is constant for this program
 		add(ADDR, DSP->RBP);
-		// ADDR & ARAM_MASK
-		and_(ADDR, ARAM_MASK);
+		// Apply the DRAM size selected by MEM8MB.
+		and_(ADDR, soundRamMask());
 	}
 
 	DSPState *DSP = nullptr;

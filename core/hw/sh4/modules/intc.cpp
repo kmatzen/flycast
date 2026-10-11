@@ -47,13 +47,21 @@ static u16 read_INTC_IPRD(u32 addr)
 	return 0;
 }
 
+static void write_INTC_ICR(u32, u16 data)
+{
+	// NMIL reflects the external pin and is read-only. The other implemented
+	// fields are MAI, NMIB, NMIE, and IRLM.
+	INTC_ICR.reg_data = (INTC_ICR.reg_data & 0x8000) | (data & 0x4380);
+	SRdecode();
+}
+
 //Init/Res/Term
 void INTCRegisters::init()
 {
 	super::init();
 
 	//INTC ICR 0xFFD00000 0x1FD00000 16 0x0000 0x0000 Held Held Pclk
-	setRW<INTC_ICR_addr, u16, 0x4380>();
+	setWriteHandler<INTC_ICR_addr>(write_INTC_ICR);
 
 	//INTC IPRA 0xFFD00004 0x1FD00004 16 0x0000 0x0000 Held Held Pclk
 	setWriteHandler<INTC_IPRA_addr>(write_INTC_IPRA);
@@ -83,4 +91,3 @@ void INTCRegisters::term()
 	super::term();
 	interrupts_term();
 }
-

@@ -121,8 +121,6 @@ protected:
 
 	void div32s(u32 n1, u32 n2, u32 n3)
 	{
-		const long long int dividend = (long long)n3 << 32 | n1;
-		//printf("%lld / %d = ", dividend, n2);
 		int r1s = n1;
 		int r2 = n2;
 		int r3s = n3;
@@ -137,8 +135,6 @@ protected:
 
 	void div32u(u32 n1, u32 n2, u32 n3)
 	{
-		const long long int dividend = (long long)n3 << 32 | n1;
-		//printf("%lld / %d = ", dividend, n2);
 		int r1s = n1;
 		int r2 = n2;
 		int r3s = n3;
@@ -150,6 +146,55 @@ protected:
 		ASSERT_EQ(r3s, r3f);
 	}
 };
+
+TEST_F(Div32Test, Div1CanonicalMatchesInterpreterStateMachine)
+{
+	constexpr u32 dividends[] = {
+		0, 1, 0x7fffffff, 0x80000000, 0xffffffff, 0xb1e12951
+	};
+	constexpr u32 divisors[] = {
+		0, 1, 0x7fffffff, 0x80000000, 0xffffffff, 0x13579bdf
+	};
+
+	for (u32 dividend : dividends)
+		for (u32 divisor : divisors)
+			for (u32 q = 0; q <= 1; q++)
+				for (u32 m = 0; m <= 1; m++)
+					for (u32 t = 0; t <= 1; t++)
+					{
+						Sh4cntx.sr.Q = q;
+						Sh4cntx.sr.M = m;
+						Sh4cntx.sr.T = t;
+						u32 expected = dividend;
+						div1(expected, divisor);
+						const u32 expectedQ = Sh4cntx.sr.Q;
+						const u32 expectedT = Sh4cntx.sr.T;
+
+						Sh4cntx.sr.Q = q;
+						Sh4cntx.sr.M = m;
+						Sh4cntx.sr.T = t;
+						const u64 actual = shil_opcl_div1::f1::impl(
+								dividend, (s32)divisor, t, &Sh4cntx);
+						ASSERT_EQ((u32)actual, expected);
+						ASSERT_EQ((u32)(actual >> 32), expectedT);
+						ASSERT_EQ(Sh4cntx.sr.Q, expectedQ);
+					}
+}
+
+TEST_F(Div32Test, CanonicalIntegerEdgesWrapLikeSh4)
+{
+	ASSERT_EQ(shil_opcl_ror::f1::impl(0x81234567, 0), 0x81234567u);
+	ASSERT_EQ(shil_opcl_ror::f1::impl(0x81234567, 32), 0x81234567u);
+	ASSERT_EQ(shil_opcl_sar::f1::impl(0x81234567, 0), 0x81234567u);
+	ASSERT_EQ(shil_opcl_sar::f1::impl(0x80000000, 31), 0xffffffffu);
+	ASSERT_EQ(shil_opcl_sar::f1::impl(0x7fffffff, 31), 0u);
+	ASSERT_EQ(shil_opcl_shad::f1::impl((s32)0x80000000, 1), 0u);
+	ASSERT_EQ(shil_opcl_shad::f1::impl((s32)0x40000001, 1), 0x80000002u);
+	ASSERT_EQ(shil_opcl_shad::f1::impl((s32)0x80000000, 0xffffffff),
+			0xc0000000u);
+	ASSERT_EQ(shil_opcl_mul_i32::f1::impl(0xffffffff, 0xffffffff), 1u);
+	ASSERT_EQ(shil_opcl_mul_i32::f1::impl(0x80000000, 2), 0u);
+}
 
 TEST_F(Div32Test, Div32sTest)
 {
@@ -189,6 +234,10 @@ TEST_F(Div32Test, Div32sTest)
 
 	div32s(-64, -8, -1);
 	div32s(-72, -8, -1);
+	div32s(0, 0x80000000u, 0);
+	div32s(0x80000000u, 0x80000000u, -1);
+	div32s(0xffffffffu, 0x80000000u, 0x7fffffff);
+	div32s(0, -1, 0x80000000u);
 
 	div32s(217781009, -45, 0);
 	div32s(1858552, -8, 0);
@@ -220,4 +269,3 @@ TEST_F(Div32Test, Div32uTest)
 
 	div32u(0x80000000u, 0x80000000u, 0);
 }
-

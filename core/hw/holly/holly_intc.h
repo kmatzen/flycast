@@ -53,8 +53,8 @@ enum HollyInterruptID
 		holly_MATR_NOMEM = holly_err | 0x03,	//bit 3 = TA : Object List Pointer Overflow
 		//bit 4 = TA : Illegal Parameter
 		//bit 5 = TA : FIFO Overflow
-		//bit 6 = PVRIF : Illegal Address set
-		//bit 7 = PVRIF : DMA over run
+		holly_PVR_ILLADDR = holly_err | 0x06,	//bit 6 = PVRIF : Illegal Address set
+		holly_PVR_OVERRUN = holly_err | 0x07,	//bit 7 = PVRIF : DMA over run
 		holly_MAPLE_ILLADDR = holly_err | 0x08,  //bit 8 = MAPLE : Illegal Address set
 		holly_MAPLE_OVERRUN = holly_err | 0x09,  //bit 9 = MAPLE : DMA over run
 		holly_MAPLE_FIFO = holly_err | 0x0a,     //bit 10 = MAPLE : Write FIFO overflow
@@ -75,6 +75,7 @@ enum HollyInterruptID
 		//bit 25 = G2 : Ext-DMA2 Time out
 		//bit 26 = G2 : Dev-DMA Time out
 		//bit 27 = G2 : Time out in CPU accessing
+		holly_SORT_DMA_ERROR = holly_err | 0x1c, //bit 28 = PVRIF : Sort-DMA parameter error
 };
 
 void asic_RaiseInterrupt(HollyInterruptID inter);
@@ -85,3 +86,4 @@ void asic_RaiseInterruptBothCLX(HollyInterruptID inter);
 void asic_reg_Init();
 void asic_reg_Term();
 void asic_reg_Reset(bool hard);
+void asic_reg_PostLoad();

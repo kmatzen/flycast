@@ -45,6 +45,7 @@ enum SectorFormat
 	SECFMT_2352,				//full sector
 	SECFMT_2048_MODE1,			//2048 user byte, form1 sector
 	SECFMT_2048_MODE2_FORM1,	//2048 user bytes, form2m1 sector
+	SECFMT_2324_MODE2_FORM2,	//2324 user bytes, form2m2 sector
 	SECFMT_2336_MODE2,			//2336 user bytes, 
 	SECFMT_2448_MODE2,			//2048 user bytes, ? SYNC (12) | HEAD (4) | sub-head (8) | data (2048) | edc (4) | ecc (276) + subcodes (96) ?
 };
@@ -114,8 +115,9 @@ struct Disc
 {
 	std::vector<Session> sessions;	// info for sessions
 	std::vector<Track> tracks;		// info for tracks
+	u8 firstTrack = 1;				// Native number of tracks[0] (normally 1).
 	Track LeadOut;					// info for lead out track (can't read from here)
-	u32 EndFAD = 0;					// Last valid disc sector
+	u32 EndFAD = 0;					// First lead-out FAD (one past the last readable sector)
 	DiscType type = CdRom;
 	std::string catalog;
 
@@ -129,6 +131,7 @@ struct Disc
 
 	void FillGDSession()
 	{
+		firstTrack = 1;
 		Session ses;
 
 		//session 1 : start @ track 1, and its fad
@@ -218,31 +221,22 @@ struct RawTrackFile : TrackFile
 	hostfs::File *file;
 	s32 offset;
 	u32 fmt;
+	SectorFormat sectorFormat;
 
-	RawTrackFile(hostfs::File *file, u32 file_offs, u32 first_fad, u32 secfmt)
+	RawTrackFile(hostfs::File *file, u32 file_offs, u32 first_fad, u32 secfmt,
+			SectorFormat sectorFormat)
 	{
 		verify(file != nullptr);
 		this->file = file;
 		this->offset = file_offs - first_fad * secfmt;
 		this->fmt = secfmt;
+		this->sectorFormat = sectorFormat;
 	}
 
 	bool Read(u32 FAD,u8* dst,SectorFormat* sector_type,u8* subcode,SubcodeFormat* subcode_type) override
 	{
 		//for now hackish
-		if (fmt==2352)
-			*sector_type=SECFMT_2352;
-		else if (fmt==2048)
-			*sector_type=SECFMT_2048_MODE2_FORM1;
-		else if (fmt==2336)
-			*sector_type=SECFMT_2336_MODE2;
-		else if (fmt==2448)
-			*sector_type=SECFMT_2448_MODE2;
-		else
-		{
-			WARN_LOG(GDROM, "Unsupported sector size %d", fmt);
-			return false;
-		}
+		*sector_type = sectorFormat;
 
 		file->seek(offset + FAD * fmt, SEEK_SET);
 		if (file->read(dst, 1, fmt) != fmt)
@@ -263,7 +257,7 @@ DiscType GuessDiscType(bool m1, bool m2, bool da);
 
 //IO
 u32 libGDR_ReadSector(u8 * buff, u32 StartSector, u32 SectorCount, u32 secsz, bool stopOnMiss = false);
-void libGDR_ReadSubChannel(u8 * buff, u32 len);
+void libGDR_ReadSubChannel(u8 *buff, u32 len, u32 fad);
 void libGDR_GetToc(u32 *toc, DiskArea area);
 u32 libGDR_GetDiscType();
 void libGDR_GetSessionInfo(u8* pout,u8 session);
@@ -272,6 +266,7 @@ bool libGDR_GetTrack(u32 track_num, u32& start_fad, u32& end_fad);
 std::string libGDR_GetDiskCatalog();
 std::string libGDR_GetTrackIsrc(u32 trackNum);
 void libGDR_GetTrackAdrAndControl(u32 trackNum, u8& adr, u8& ctrl);
+void libGDR_GetTrackAdrAndControlAtFad(u32 fad, u8& adr, u8& ctrl);
 void libGDR_init();
 void libGDR_term();
 void libGDR_serialize(Serializer& ser);

@@ -6,8 +6,8 @@
 
 static Disc* load_gdi(const char* file, std::vector<u8> *digest)
 {
-	hostfs::File *t = hostfs::storage().openFile(file, "rb");
-	if (t == nullptr)
+	std::unique_ptr<hostfs::File> descriptor(hostfs::storage().openFile(file, "rb"));
+	if (descriptor == nullptr)
 	{
 		WARN_LOG(COMMON, "Cannot open file '%s' errno %d", file, errno);
 		throw FlycastException(strprintf(i18n::T("Cannot open GDI file %s"), file));
@@ -20,13 +20,11 @@ static Disc* load_gdi(const char* file, std::vector<u8> *digest)
 
 	if (gdi_len >= sizeof(gdi_data))
 	{
-		delete t;
 		throw FlycastException(i18n::Ts("GDI file too big"));
 	}
 
-	if (t->read(gdi_data, 1, gdi_len) != gdi_len)
-		WARN_LOG(GDROM, "Failed or truncated read of gdi file '%s'", file);
-	delete t;
+	if (descriptor->read(gdi_data, 1, gdi_len) != gdi_len)
+		throw FlycastException(i18n::Ts("Invalid GDI file: truncated descriptor"));
 
 	std::istringstream gdi(gdi_data);
 	gdi.imbue(std::locale::classic());
@@ -52,10 +50,8 @@ static Disc* load_gdi(const char* file, std::vector<u8> *digest)
 		u32 TRACK = 0, FADS = 0, CTRL = 0, SSIZE = 0;
 		s32 OFFSET = 0;
 		//TRACK FADS CTRL SSIZE file OFFSET
-		gdi >> TRACK;
-		gdi >> FADS;
-		gdi >> CTRL;
-		gdi >> SSIZE;
+		if (!(gdi >> TRACK >> FADS >> CTRL >> SSIZE))
+			throw FlycastException(i18n::T("Invalid GDI file"));
 
 		char last;
 		do {
@@ -80,9 +76,10 @@ static Disc* load_gdi(const char* file, std::vector<u8> *digest)
 			gdi >> track_filename;
 			track_filename = last + track_filename;
 		}
-		gdi >> OFFSET;
+		if (!(gdi >> OFFSET))
+			throw FlycastException(i18n::T("Invalid GDI file"));
 
-		if (TRACK < 1 || TRACK > trackCount) {
+		if (TRACK != i + 1) {
 			WARN_LOG(GDROM, "Track number out of bounds: %d", TRACK);
 			throw FlycastException(i18n::Ts("Invalid GDI file"));
 		}
@@ -121,6 +118,10 @@ static Disc* load_gdi(const char* file, std::vector<u8> *digest)
 			WARN_LOG(GDROM, "Unsupported sector size: %d", SSIZE);
 			throw FlycastException(i18n::Ts("Invalid GDI file"));
 		}
+		if (OFFSET < 0)
+			throw FlycastException(i18n::Ts("Invalid GDI file: negative track offset"));
+		if (FADS > 0xffffff - 150)
+			throw FlycastException(i18n::Ts("Invalid GDI file: track address overflow"));
 
 		DEBUG_LOG(GDROM, "file[%d] \"%s\": FAD:%d, CTRL:%d, SSIZE:%d, OFFSET:%d", TRACK, track_filename.c_str(), FADS, CTRL, SSIZE, OFFSET);
 
@@ -129,16 +130,30 @@ static Disc* load_gdi(const char* file, std::vector<u8> *digest)
 		t.CTRL = CTRL;
 
 		std::string path = hostfs::storage().getSubPath(basepath, track_filename);
-		hostfs::File *file = hostfs::storage().openFile(path, "rb");
-		if (file == nullptr)
+		std::unique_ptr<hostfs::File> trackFile(hostfs::storage().openFile(path, "rb"));
+		if (trackFile == nullptr)
 			throw FlycastException(strprintf(i18n::T("GDI file: Cannot open track %s"), path.c_str()));
 		if (digest != nullptr)
-			md5.add(file);
-		t.file = new RawTrackFile(file, OFFSET, t.StartFAD, SSIZE);
+			md5.add(trackFile.get());
 		hostfs::FileInfo fileInfo = hostfs::storage().getFileInfo(path);
+		if ((u64)OFFSET > fileInfo.size)
+			throw FlycastException(i18n::Ts("Invalid GDI file: track offset exceeds file size"));
+		if (fileInfo.size - OFFSET < SSIZE)
+			throw FlycastException(i18n::Ts("Invalid GDI file: empty track"));
 		if ((fileInfo.size - OFFSET) % SSIZE != 0)
 			WARN_LOG(GDROM, "Warning: Size of track %s is not multiple of sector size %d", track_filename.c_str(), SSIZE);
-		t.EndFAD = t.StartFAD + (u32)(fileInfo.size - OFFSET) / SSIZE - 1;
+		const u64 sectorCount = (fileInfo.size - OFFSET) / SSIZE;
+		if (sectorCount > std::numeric_limits<u32>::max() - t.StartFAD)
+			throw FlycastException(i18n::Ts("Invalid GDI file: track range overflow"));
+		t.EndFAD = t.StartFAD + (u32)sectorCount - 1;
+		if (!disc->tracks.empty())
+		{
+			if (t.StartFAD <= disc->tracks.back().StartFAD)
+				throw FlycastException(i18n::Ts("Invalid GDI file: tracks are not ordered"));
+			disc->tracks.back().EndFAD = std::min(disc->tracks.back().EndFAD, t.StartFAD - 1);
+		}
+		t.file = new RawTrackFile(trackFile.release(), OFFSET, t.StartFAD, SSIZE,
+				SSIZE == 2048 ? SECFMT_2048_MODE1 : SECFMT_2352);
 		disc->tracks.push_back(t);
 	}
 

@@ -18,6 +18,7 @@
 #include "oslib/oslib.h"
 #include "stdclass.h"
 #include "oslib/storage.h"
+#include "hw/sh4/sh4_sched.h"
 
 bool MemChip::Load(const std::string& file)
 {
@@ -78,27 +79,261 @@ void MemChip::digest(u8 md5Digest[16])
 			.getDigest(md5Digest);
 }
 
+void DCFlashChip::get_sector(u32 addr, u32& offset, u32& length) const
+{
+	addr &= mask;
+	if (type == Type::Macronix29L001MC)
+	{
+		length = 64_KB;
+		offset = addr & ~(length - 1);
+		return;
+	}
+
+	// The Dreamcast maps the upper half of an MBM29LV002TC. Its top-boot
+	// sectors therefore appear as 64K, 32K, 8K, 8K and 16K locally.
+	if (addr < 0x10000)
+	{
+		offset = 0;
+		length = 64_KB;
+	}
+	else if (addr < 0x18000)
+	{
+		offset = 0x10000;
+		length = 32_KB;
+	}
+	else if (addr < 0x1c000)
+	{
+		offset = addr & ~0x1fff;
+		length = 8_KB;
+	}
+	else
+	{
+		offset = 0x1c000;
+		length = 16_KB;
+	}
+}
+
+u8 DCFlashChip::get_sector_mask(u32 addr) const
+{
+	addr &= mask;
+	if (type == Type::Macronix29L001MC)
+		return 1 << (addr / 64_KB);
+	if (addr < 0x10000)
+		return 1 << 0;
+	if (addr < 0x18000)
+		return 1 << 1;
+	if (addr < 0x1a000)
+		return 1 << 2;
+	if (addr < 0x1c000)
+		return 1 << 3;
+	return 1 << 4;
+}
+
+bool DCFlashChip::is_sector_protected(u32 offset, u32 length) const
+{
+	if (offset < write_protect_size)
+		return true;
+	return type == Type::DreamcastSystem
+			&& offset < 0x1c000 && offset + length > 0x1a000;
+}
+
+bool DCFlashChip::is_unlock1_address(u32 addr)
+{
+	return (addr & 0x7ff) == 0x555 || (addr & 0xfff) == 0xaaa;
+}
+
+bool DCFlashChip::is_unlock2_address(u32 addr)
+{
+	return (addr & 0x7ff) == 0x2aa || (addr & 0xfff) == 0x555;
+}
+
+bool DCFlashChip::is_selected_sector(u32 addr) const
+{
+	return operation_length == 0 || (erase_mask & get_sector_mask(addr)) != 0;
+}
+
+void DCFlashChip::suspend_erase()
+{
+	const u64 now = current_cycle();
+	if (state == FS_ErasePending)
+	{
+		erase_remaining = operation_end > now ? operation_end - now : 0;
+		erase_remaining += operation_protected ? 150_sh4us : SH4_MAIN_CLOCK - 50_sh4us;
+	}
+	else
+	{
+		erase_remaining = operation_end > now ? operation_end - now : 0;
+	}
+	erase_suspended = true;
+	status_toggle = false;
+	state = FS_EraseSuspended;
+}
+
+void DCFlashChip::resume_erase()
+{
+	operation_end = current_cycle() + erase_remaining;
+	erase_remaining = 0;
+	erase_suspended = false;
+	status_toggle = false;
+	state = FS_EraseBusy;
+}
+
+u64 DCFlashChip::current_cycle() const
+{
+	return sh4_sched_now64();
+}
+
+void DCFlashChip::finish_operation()
+{
+	if (state != FS_ProgramBusy && state != FS_ErasePending && state != FS_EraseBusy)
+		return;
+	if (current_cycle() < operation_end)
+		return;
+	if (state == FS_ErasePending)
+	{
+		state = FS_EraseBusy;
+		// The erase duration includes the 50 us sector-selection window.
+		operation_end += operation_protected ? 150_sh4us : SH4_MAIN_CLOCK - 50_sh4us;
+		if (current_cycle() < operation_end)
+			return;
+	}
+	if (state == FS_ProgramBusy)
+	{
+		if (!program_protected)
+			data[program_address] &= program_data;
+	}
+	else if (!operation_protected)
+	{
+		for (u32 sector = 0; sector < size; )
+		{
+			u32 offset;
+			u32 length;
+			get_sector(sector, offset, length);
+			if ((operation_length == 0 || (erase_mask & get_sector_mask(offset)) != 0)
+					&& !is_sector_protected(offset, length))
+				memset(data + offset, 0xff, length);
+			sector = offset + length;
+		}
+	}
+	state = idle_state();
+	operation_end = 0;
+}
+
+u8 DCFlashChip::read_status(u32 addr)
+{
+	status_toggle = !status_toggle;
+	if (state == FS_ProgramBusy)
+	{
+		u8 status = (~program_data) & 0x80;
+		if (status_toggle)
+			status |= 0x40;
+		return status;
+	}
+
+	u8 status = state == FS_EraseBusy ? 0x08 : 0;
+	if (status_toggle)
+	{
+		status |= 0x40;
+		if (operation_length == 0 || (erase_mask & get_sector_mask(addr)) != 0)
+			status |= 0x04;
+	}
+	return status;
+}
+
+u8 DCFlashChip::Read8(u32 addr)
+{
+	addr &= mask;
+	finish_operation();
+	if (state == FS_ProgramBusy || state == FS_ErasePending || state == FS_EraseBusy)
+		return read_status(addr);
+	if (state == FS_SelectMode)
+	{
+		switch (addr & 3)
+		{
+		case 0:	// manufacturer's code
+			return type == Type::Macronix29L001MC ? 0xc2 : 0x04;
+		case 1:	// device code
+			return type == Type::Macronix29L001MC ? 0x51 : 0x40;
+		case 2:	// sector protection verification
+			DEBUG_LOG(FLASHROM, "Sector protection address %x", addr);
+			return is_protected(addr) ? 1 : 0;
+		default:
+			WARN_LOG(FLASHROM, "SelectMode unknown address %x", addr);
+			return 0;
+		}
+	}
+	if (erase_suspended && is_selected_sector(addr))
+	{
+		status_toggle = !status_toggle;
+		return 0x80 | (status_toggle ? 0x04 : 0);
+	}
+	return MemChip::Read8(addr);
+}
+
 void DCFlashChip::Write(u32 addr,u32 val,u32 sz)
 {
 	if (sz != 1)
 	{
-		INFO_LOG(FLASHROM, "invalid access size %d addr %x", sz, addr);
+		if (sz == 2 || sz == 4)
+		{
+			// The flash is byte-wide. Wider SH-4 accesses are split by the bus
+			// into consecutive little-endian byte transactions.
+			for (u32 i = 0; i < sz; i++)
+				Write(addr + i, val >> (i * 8), 1);
+			return;
+		}
+		WARN_LOG(FLASHROM, "invalid access size %d addr %x", sz, addr);
 		return;
 	}
 
 	addr &= mask;
+	val &= 0xff;
+	finish_operation();
+	if ((state == FS_ErasePending || state == FS_EraseBusy)
+			&& operation_length != 0 && val == 0xb0)
+	{
+		suspend_erase();
+		return;
+	}
+	if (state == FS_ErasePending && val == 0x30)
+	{
+		u32 offset;
+		u32 length;
+		get_sector(addr, offset, length);
+		erase_mask |= get_sector_mask(addr);
+		operation_protected = operation_protected && is_sector_protected(offset, length);
+		return;
+	}
+	if (state == FS_ProgramBusy || state == FS_ErasePending || state == FS_EraseBusy)
+		return;
+	if (state == FS_EraseSuspended && val == 0x30)
+	{
+		resume_erase();
+		return;
+	}
+	if (state == FS_FastReset && val == 0xf0)
+	{
+		fast_mode = false;
+		state = FS_Normal;
+		return;
+	}
+
+	// The reset/read-array command is accepted from every software command
+	// state except while an embedded program/erase algorithm is active.
+	if (val == 0xf0 || val == 0xff)
+	{
+		state = idle_state();
+		return;
+	}
 
 	switch(state)
 	{
 	case FS_Normal:
-		switch (val & 0xff)
+	case FS_EraseSuspended:
+		switch (val)
 		{
-		case 0xf0:
-		case 0xff:  // reset chip mode
-			state = FS_Normal;
-			break;
 		case 0xaa:  // AMD ID select part 1
-			if ((addr & 0xfff) == 0x555 || (addr & 0xfff) == 0xaaa)
+			if (is_unlock1_address(addr))
 				state = FS_ReadAMDID1;
 			break;
 		default:
@@ -106,136 +341,121 @@ void DCFlashChip::Write(u32 addr,u32 val,u32 sz)
 			break;
 		}
 		break;
+	case FS_FastMode:
+		if (val == 0xa0)
+			state = FS_ByteProgram;
+		else if (val == 0x90)
+			state = FS_FastReset;
+		break;
+	case FS_FastReset:
+		break;
 
 	case FS_ReadAMDID1:
-		if ((addr & 0xffff) == 0x02aa && (val & 0xff) == 0x55)
-			state = FS_ReadAMDID2;
-		else if ((addr & 0xffff) == 0x2aaa && (val & 0xff) == 0x55)
-			state = FS_ReadAMDID2;
-		else if ((addr & 0xfff) == 0x555 && (val & 0xff) == 0x55)
+		if (is_unlock2_address(addr) && val == 0x55)
 			state = FS_ReadAMDID2;
 		else
 		{
 			if (val != 0xf0)
 				WARN_LOG(FLASHROM, "FlashRom: ReadAMDID1 unexpected write @ %x: %x", addr, val);
-			state = FS_Normal;
+			state = idle_state();
 		}
 		break;
 
 	case FS_ReadAMDID2:
-		if ((addr & 0xffff) == 0x0555 && (val & 0xff) == 0x80)
+		if (is_unlock1_address(addr) && val == 0x80 && !erase_suspended)
 			state = FS_EraseAMD1;
-		else if ((addr & 0xffff) == 0x5555 && (val & 0xff) == 0x80)
-			state = FS_EraseAMD1;
-		else if ((addr & 0xfff) == 0xaaa && (val & 0xff) == 0x80)
-			state = FS_EraseAMD1;
-		else if ((addr & 0xffff) == 0x0555 && (val & 0xff) == 0xa0)
+		else if (is_unlock1_address(addr) && val == 0xa0)
 			state = FS_ByteProgram;
-		else if ((addr & 0xffff) == 0x5555 && (val & 0xff) == 0xa0)
-			state = FS_ByteProgram;
-		else if ((addr & 0xfff) == 0xaaa && (val & 0xff) == 0xa0)
-			state = FS_ByteProgram;
-		else if ((addr & 0xffff) == 0x5555 && (val & 0xff) == 0x90)
+		else if (is_unlock1_address(addr) && val == 0x90)
 			state = FS_SelectMode;
+		else if (is_unlock1_address(addr) && val == 0x20
+				&& type == Type::DreamcastSystem && !erase_suspended)
+		{
+			fast_mode = true;
+			state = FS_FastMode;
+		}
 		else
 		{
 			if (val != 0xf0)
 				WARN_LOG(FLASHROM, "FlashRom: ReadAMDID2 unexpected write @ %x: %x", addr, val);
-			state = FS_Normal;
+			state = idle_state();
 		}
 		break;
 	case FS_ByteProgram:
-		if ((addr & 0x1e000) != 0x1a000 && addr >= write_protect_size)
-			data[addr] &= val;
-		state = FS_Normal;
+		if (erase_suspended && is_selected_sector(addr))
+		{
+			state = FS_EraseSuspended;
+			break;
+		}
+		program_address = addr;
+		program_data = val;
+		program_protected = is_protected(addr);
+		operation_end = current_cycle() + (program_protected ? 2_sh4us : 8_sh4us);
+		status_toggle = false;
+		state = FS_ProgramBusy;
 		break;
 
 	case FS_EraseAMD1:
-		if ((addr & 0xfff) == 0x555 && (val & 0xff) == 0xaa)
-			state = FS_EraseAMD2;
-		else if ((addr & 0xfff) == 0xaaa && (val & 0xff) == 0xaa)
+		if (is_unlock1_address(addr) && val == 0xaa)
 			state = FS_EraseAMD2;
 		else
 		{
 			if (val != 0xf0)
 				WARN_LOG(FLASHROM, "FlashRom: EraseAMD1 unexpected write @ %x: %x", addr, val);
-			state = FS_Normal;
+			state = idle_state();
 		}
 		break;
 
 	case FS_EraseAMD2:
-		if ((addr & 0xffff) == 0x02aa && (val & 0xff) == 0x55)
-			state = FS_EraseAMD3;
-		else if ((addr & 0xffff) == 0x2aaa && (val & 0xff) == 0x55)
-			state = FS_EraseAMD3;
-		else if ((addr & 0xfff) == 0x555 && (val & 0xff) == 0x55)
+		if (is_unlock2_address(addr) && val == 0x55)
 			state = FS_EraseAMD3;
 		else
 		{
 			if (val != 0xf0)
 				WARN_LOG(FLASHROM, "FlashRom: EraseAMD2 unexpected write @ %x: %x", addr, val);
-			state = FS_Normal;
+			state = idle_state();
 		}
 		break;
 
 	case FS_EraseAMD3:
-		if (((addr & 0xfff) == 0x555 && (val & 0xff) == 0x10)
-			|| ((addr & 0xfff) == 0xaaa && (val & 0xff) == 0x10))
+		if (is_unlock1_address(addr) && val == 0x10)
 		{
 			// chip erase
 			INFO_LOG(FLASHROM, "Erasing Chip!");
-			u8 save[0x2000];
-			// this area is write-protected
-			memcpy(save, data + 0x1a000, 0x2000);
-			memset(data + write_protect_size, 0xff, size - write_protect_size);
-			memcpy(data + 0x1a000, save, 0x2000);
+			operation_address = 0;
+			operation_length = 0;
+			erase_mask = 0xff;
+			operation_protected = false;
+			operation_end = current_cycle() + 31 * (u64)SH4_MAIN_CLOCK / 10;
+			status_toggle = false;
+			state = FS_EraseBusy;
 		}
 		else if ((val & 0xff) == 0x30)
 		{
 			// sector erase
-			if (addr >= write_protect_size)
-			{
-				void *start;
-				u32 len;
-				switch (addr & ~0x1FFF)
-				{
-				case 0x00000:	// SA0
-					start = &data[0];
-					len = 0x10000;
-					break;
-				case 0x10000:	// SA1
-					start = &data[0x10000];
-					len = 0x8000;
-					break;
-				case 0x18000:	// SA2
-					start = &data[0x18000];
-					len = 0x2000;
-					break;
-				case 0x1a000:	// SA3
-					start = nullptr;
-					len = 0;
-					break;
-				case 0x1c000:	// SA4
-					start = &data[0x1c000];
-					len = 0x4000;
-					break;
-				default:
-					start = nullptr;
-					len = 0;
-					break;
-				}
-				INFO_LOG(FLASHROM, "Erase Sector %08X!", addr);
-				if (start != nullptr)
-					memset(start, 0xFF, len);
-			}
+			u32 offset;
+			u32 length;
+			get_sector(addr, offset, length);
+			INFO_LOG(FLASHROM, "Erase Sector %08X!", addr);
+			operation_address = offset;
+			operation_length = length;
+			erase_mask = get_sector_mask(addr);
+			operation_protected = is_sector_protected(offset, length);
+			operation_end = current_cycle() + 50_sh4us;
+			status_toggle = false;
+			state = FS_ErasePending;
 		}
 		else if (val != 0xf0)
 			WARN_LOG(FLASHROM, "FlashRom: EraseAMD3 unexpected write @ %x: %x", addr, val);
-		state = FS_Normal;
+		if (state == FS_EraseAMD3)
+			state = idle_state();
+		break;
+	case FS_SelectMode:
+		// Only reset/read-array is valid in autoselect mode (handled above).
 		break;
 	default:
 		WARN_LOG(FLASHROM, "FlashRom: invalid state. write @ %x: %x", addr, val);
-		state = FS_Normal;
+		state = idle_state();
 		break;
 	}
 }

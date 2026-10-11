@@ -87,6 +87,11 @@ inline static void InterruptMask(InterruptID intr, bool v)
 }
 
 int UpdateINTC();
+int UpdateINTC_Sleep();
+void SetNmiLevel(bool high);
+int sh4InterruptDecisionCycles(Sh4ExceptionCode event);
+int sh4InterruptEntryCycles(Sh4ExceptionCode event);
+int sh4ExceptionEntryCycles(Sh4ExceptionCode event);
 
 void Do_Exception(u32 epc, Sh4ExceptionCode expEvn);
 

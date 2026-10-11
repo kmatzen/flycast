@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 class BaseTextureCacheData;
@@ -170,12 +171,20 @@ struct RenderPass {
 	bool autosort;
 	bool z_clear;
 	bool mv_op_tr_shared;	// Use opaque modvols geometry for translucent modvols
+	// Physical pass number in the region array. This can differ from the
+	// render_passes vector index when an empty continuation pass is omitted.
+	u32 region_array_pass = 0;
 	u32 op_count;
 	u32 mvo_count;
 	u32 pt_count;
 	u32 tr_count;
 	u32 mvo_tr_count;
 	u32 sorted_tr_count;
+};
+
+struct RegionArrayEntry
+{
+	std::array<u32, 6> words {};
 };
 
 struct N2Matrix
@@ -256,12 +265,28 @@ struct rend_context
 	u32 fb_W_LINESTRIDE;
 	u32 fb_W_SOF1;
 	FB_W_CTRL_type fb_W_CTRL;
+	FB_R_CTRL_type fb_R_CTRL;
+	u32 y_coeff;
 	u32 framebufferWidth;
 	u32 framebufferHeight;
 	int swapInterval;
 	
 	RGBAColor fog_clamp_min;
 	RGBAColor fog_clamp_max;
+	RGBColor fog_col_ram;
+	RGBColor fog_col_vert;
+	FOG_DENSITY_type fog_density;
+	u32 fog_table[128];
+	u32 pt_alpha_ref;
+	u32 half_offset;
+	f32 fpu_cull_val;
+	FPU_SHAD_SCALE_type fpu_shad_scale;
+	u32 region_base;
+	u32 fpu_param_cfg;
+	u32 isp_feed_cfg;
+	VO_BORDER_COL_type vo_border_col;
+	u32 region_tile_size;
+	std::vector<RegionArrayEntry> region_array;
 
 	std::vector<Vertex> verts;
 	std::vector<u32> idx;
@@ -415,6 +440,9 @@ u32 ta_get_list_type();
 void ta_set_list_type(u32 listType);
 void ta_parse_reset();
 void getRegionTileAddrAndSize(u32& address, u32& size);
+void getRegionTileAddrAndSize(u32& address, u32& size, u32 regionBase,
+		u32 fpuParamCfg);
+void snapshotRegionArray(rend_context& context);
 void setTileClipping(rend_context& ctx);
 
 void sortTriangles(rend_context& ctx, RenderPass& pass, const RenderPass& previousPass);

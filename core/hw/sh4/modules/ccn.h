@@ -13,5 +13,6 @@ class CCNRegisters : public RegisterBank<CCN, 18>
 
 public:
 	void init();
+	void reset(bool hard);
 };
 extern CCNRegisters ccn;

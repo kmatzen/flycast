@@ -437,7 +437,7 @@ void SSAOptimizer::ConstPropPass()
 		if (op.op != shop_fmac && op.op != shop_adc)
 			ConstPropOperand(op.rs3);
 
-		if (op.op == shop_ifb)
+		if (op.op == shop_ifb || op.op == shop_ubc_exec)
 		{
 			constprop_values.clear();
 		}
@@ -491,7 +491,8 @@ void SSAOptimizer::ConstPropPass()
 				if (op.op == shop_readm  && block->read_only
 						&& (op.rs1._imm >> 12) >= (block->vaddr >> 12)
 						&& (op.rs1._imm >> 12) <= ((block->vaddr + block->sh4_code_size - 1) >> 12)
-						&& op.size <= 4)
+						&& op.size <= 4
+						&& (op.rs1._imm & (op.size - 1)) == 0)
 				{
 					void *ptr;
 					bool isRam;
@@ -595,10 +596,13 @@ void SSAOptimizer::DeadCodeRemovalPass()
 		shil_opcode& op = block->oplist[opnum];
 		bool dead_code = false;
 
-		if (op.op == shop_ifb || (mmu_enabled() && (op.op == shop_readm || op.op == shop_writem)))
+		if (op.op == shop_ifb || op.op == shop_ubc_exec
+				|| ((op.op == shop_readm || op.op == shop_writem)
+						&& (mmu_enabled() || op.size > 1 || !op.rs1.is_imm()
+								|| !op.rs3.is_null() || (op.rs1._imm & 0x80000000) != 0)))
 		{
-			// if mmu enabled, mem accesses can throw an exception
-			// so last_versions must be reset so the regs are correctly saved beforehand
+			// MMU, alignment, and privilege checks can throw exceptions,
+			// so registers must describe the state before the access.
 			memset(last_versions, -1, sizeof(last_versions));
 			continue;
 		}
@@ -838,7 +842,7 @@ void SSAOptimizer::DeadRegisterPass()
 					aliasdef = opnum;
 				else if (DefinesHigherVersion(op->rd2, alias.second))
 					aliasdef = opnum;
-				else if (op->op == shop_ifb)
+				else if (op->op == shop_ifb || op->op == shop_ubc_exec)
 					aliasdef = opnum;
 			}
 

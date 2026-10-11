@@ -195,6 +195,24 @@ shil_opc(ifb)
 shil_recimp()
 shil_opc_end()
 
+// Execute one instruction through the precise UBC-aware boundary path and
+// return its architectural successor (normal, branch, or exception handler).
+shil_opc(ubc_exec)
+shil_canonical
+(
+u32, f1, (Sh4Context *ctx, u32 op, u32 pc),
+	return Sh4Interpreter::ExecuteUbcFallback(ctx, (u16)op, pc);
+)
+shil_compile
+(
+	shil_cf_arg_u32(rs2);
+	shil_cf_arg_u32(rs1);
+	shil_cf_arg_sh4ctx();
+	shil_cf(f1);
+	shil_cf_rv_u32(rd);
+)
+shil_opc_end()
+
 //mem io
 shil_opc(readm)	
 shil_recimp()
@@ -277,7 +295,22 @@ shil_opc_end()
 
 //shop_sar
 shil_opc(sar)
-BIN_OP_I2(s32,>>)
+shil_canonical
+(
+u32,f1,(u32 r1,u32 amount),
+	amount &= 31;
+	if (amount == 0)
+		return r1;
+	return (r1 >> amount)
+			| ((r1 & 0x80000000) ? (~0u << (32 - amount)) : 0);
+)
+shil_compile
+(
+	shil_cf_arg_u32(rs2);
+	shil_cf_arg_u32(rs1);
+	shil_cf(f1);
+	shil_cf_rv_u32(rd);
+)
 shil_opc_end()
 
 //shop_adc	//add with carry
@@ -358,6 +391,9 @@ shil_opc(ror)
 shil_canonical
 (
 u32,f1,(u32 r1,u32 amt),
+	amt &= 31;
+	if (amt == 0)
+		return r1;
 	return (r1>>amt)|(r1<<(32-amt));
 )
 
@@ -461,15 +497,22 @@ shil_opc(shad)
 shil_canonical
 (
 u32,f1,(s32 r1,u32 r2),
+	const u32 value = (u32)r1;
 	u32 sgn = r2 & 0x80000000;
 	if (sgn == 0)
-		return r1 << (r2 & 0x1F);
+		// SHAD wraps the left shift to 32 bits. Do not left-shift a signed
+		// negative value or overflow a signed positive value in the host.
+		return value << (r2 & 0x1F);
 	else if ((r2 & 0x1F) == 0)
 	{
-		return r1>>31;
+		return (value & 0x80000000) ? 0xffffffff : 0;
 	}
 	else
-		return r1 >> ((~r2 & 0x1F) + 1);
+	{
+		const u32 shift = (~r2 & 0x1f) + 1;
+		return (value >> shift)
+				| ((value & 0x80000000) ? (~0u << (32 - shift)) : 0);
+	}
 )
 
 shil_compile
@@ -531,7 +574,7 @@ shil_opc_end()
 //32 bis are used !
 //shop_mul_i32
 shil_opc(mul_i32)
-BIN_OP_I4(s32,*,u32,u32)
+BIN_OP_I4(u32,*,u32,u32)
 shil_opc_end()
 
 //shop_mul_u64
@@ -585,17 +628,20 @@ shil_opc(div32s)
 shil_canonical
 (
 u64,f1,(u32 r1, s32 r2, s32 r3),
-	s64 dividend = ((s64)r3 << 32) | r1;
+	// Form the signed 64-bit dividend through unsigned shifts; left-shifting a
+	// negative signed high word is undefined in C++.
+	s64 dividend = (s64)(((u64)(u32)r3 << 32) | r1);
 	// 1's complement -> 2's complement
 	if (dividend < 0)
 		dividend++;
 
-	s32 quo = (s32)(r2 ? dividend / r2 : 0);
-	s32 rem = dividend - quo * r2;
+	const s64 quotient = r2 ? dividend / r2 : 0;
+	u32 quo = (u32)quotient;
+	s32 rem = (s32)(dividend - quotient * (s64)r2);
 	u32 negative = (r3 ^ r2) & 0x80000000;
 	// 2's complement -> 1's complement
 	if (negative)
-		quo--;
+		quo--; // modulo 2^32
 	else if (r3 < 0)
 		rem--;
 
@@ -621,22 +667,24 @@ shil_opc(div32p2)
 shil_canonical
 (
 u32,f1,(s32 a,s32 b,u32 T),
+	u32 result = (u32)a;
+	const u32 divisor = (u32)b;
 	// the sign of the quotient is stored in bit 31 of T
 	if (!(T & 0x80000000))
 	{
 		if (!(T & 1))
-			a -= b;
+			result -= divisor;
 	}
 	else
 	{
 		// 2's complement -> 1's complement
 		if (b > 0)
-			a--;
+			result--;
 		if (T & 1)
-			a += b;
+			result += divisor;
 	}
 
-	return a;
+	return result;
 )
 
 shil_compile
@@ -661,7 +709,12 @@ u64,f1,(u32 a, s32 b, u32 T, Sh4Context *ctx),
 	a = (a << 1) | T;
 
 	u32 oldA = a;
-	a += (qxm ? 1 : -1) * b; 	// b if sr.Q != sr.M, -b otherwise
+	// DIV1 arithmetic wraps modulo 2^32. Avoid signed -INT_MIN undefined
+	// behavior when the divisor has bit 31 set.
+	if (qxm)
+		a += (u32)b;
+	else
+		a -= (u32)b;
 	sr.Q ^= sr.M ^ (qxm ? a < oldA : a > oldA);
 	T = !(sr.Q ^ sr.M);
 
@@ -715,39 +768,15 @@ shil_opc_end()
 //shop_cvt_f2i_t	//float to integer : truncate
 shil_opc(cvt_f2i_t)
 
-#if HOST_CPU == CPU_X86 || HOST_CPU == CPU_X64
 shil_canonical
 (
 u32,f1,(f32 f1),
-	s32 res;
-	if (f1 > 2147483520.0f) { // IEEE 754: 0x4effffff
-		res = 0x7fffffff;
-	}
-	else {
-		res = (s32)f1;
-		// Fix result sign for Intel CPUs
-		if ((u32)res == 0x80000000 && f1 > 0)
-			res = 0x7fffffff;
-	}
-	return res;
+	if (std::isnan(f1) || f1 <= -2147483648.0f)
+		return 0x80000000u;
+	if (f1 >= 2147483648.0f)
+		return 0x7fffffffu;
+	return (u32)(s32)f1;
 )
-#elif HOST_CPU == CPU_ARM || HOST_CPU == CPU_ARM64
-shil_canonical
-(
-u32,f1,(f32 f1),
-	s32 res;
-	if (f1 > 2147483520.0f) { // IEEE 754: 0x4effffff
-		res = 0x7fffffff;
-	}
-	else {
-		res = (s32)f1;
-		// conversion of NaN returns 0 on ARM
-		if (std::isnan(f1))
-			res = 0x80000000;
-	}
-	return res;
-)
-#endif
 
 shil_compile
 (

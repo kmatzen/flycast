@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include "hw/aica/aica.h"
 #include "hw/aica/aica_if.h"
 
 namespace aica::arm
@@ -14,7 +15,7 @@ static inline T DYNACALL readMem(u32 addr)
 	addr &= 0x00FFFFFF;
 	if (addr < 0x800000)
 	{
-		T rv = *(T *)&aica_ram[addr & (ARAM_MASK - (sizeof(T) - 1))];
+		T rv = *(T *)&aica_ram[addr & (soundRamMask() & ~(sizeof(T) - 1))];
 		
 		if (unlikely(sizeof(T) == 4 && (addr & 3) != 0))
 		{
@@ -26,7 +27,16 @@ static inline T DYNACALL readMem(u32 addr)
 	}
 	else
 	{
-		return readReg<T>(addr);
+		if constexpr (sizeof(T) == 4)
+		{
+			u32 rv = readReg<u32>(addr & ~3u);
+			u32 shift = (addr & 3) * 8;
+			return shift == 0 ? rv : (rv >> shift) | (rv << (32 - shift));
+		}
+		else
+		{
+			return readReg<T>(addr);
+		}
 	}
 }
 
@@ -36,11 +46,14 @@ static inline void DYNACALL writeMem(u32 addr, T data)
 	addr &= 0x00FFFFFF;
 	if (addr < 0x800000)
 	{
-		*(T *)&aica_ram[addr & (ARAM_MASK - (sizeof(T) - 1))] = data;
+		*(T *)&aica_ram[addr & (soundRamMask() & ~(sizeof(T) - 1))] = data;
 	}
 	else
 	{
-		writeReg(addr, data);
+		if constexpr (sizeof(T) == 4)
+			writeReg(addr & ~3u, data);
+		else
+			writeReg(addr, data);
 	}
 }
 

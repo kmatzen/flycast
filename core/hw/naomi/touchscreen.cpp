@@ -60,7 +60,7 @@ public:
 		}
 		if (!schedulerStarted)
 		{
-			sh4_sched_request(schedId, FRAME_CYCLES);
+			sh4_sched_request(schedId, frameClock.nextCycles());
 			schedulerStarted = true;
 		}
 	}
@@ -83,6 +83,8 @@ public:
 		ser << (int)toSend.size();
 		for (u8 b : toSend)
 			ser << b;
+		ser << touch;
+		ser << frameClock.phase();
 	}
 
 	void deserialize(Deserializer& deser)
@@ -94,6 +96,18 @@ public:
 		toSend.resize(size);
 		for (int i = 0; i < size; i++)
 			deser >> toSend[i];
+		if (deser.version() >= Deserializer::V146)
+			deser >> touch;
+		else
+			std::fill(std::begin(touch), std::end(touch), false);
+		if (deser.version() >= Deserializer::V148)
+		{
+			u32 phase;
+			deser >> phase;
+			frameClock.setPhase(phase);
+		}
+		else
+			frameClock.reset();
 	}
 
 private:
@@ -142,15 +156,14 @@ private:
 				u8(pack[1] >> 16), u8(pack[1] >> 8), u8(pack[1]) };
 		instance->send(msg, sizeof(msg));
 
-		return FRAME_CYCLES;
+		return instance->frameClock.nextCycles();
 	}
 
 	std::deque<u8> toSend;
 	int schedId = -1;
 	bool schedulerStarted = false;
 	bool touch[2] {};
-
-	static constexpr int FRAME_CYCLES = SH4_MAIN_CLOCK / 60;
+	FixedFrequencyClock<60> frameClock;
 };
 
 std::unique_ptr<TouchscreenPipe> touchscreen;

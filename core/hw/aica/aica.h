@@ -5,6 +5,58 @@
 namespace aica
 {
 
+inline constexpr size_t MidiFifoSize = 4;
+inline constexpr u32 MidiBaudRate = 31250;
+inline constexpr u32 MidiFrameBits = 10; // start, eight data, stop
+inline constexpr u32 MidiByteCycles = SH4_MAIN_CLOCK * MidiFrameBits / MidiBaudRate;
+static_assert((u64)SH4_MAIN_CLOCK * MidiFrameBits % MidiBaudRate == 0);
+
+struct MidiRestoreState
+{
+	size_t retained;
+	bool overflow;
+};
+
+constexpr MidiRestoreState midiRestoreState(size_t serializedSize)
+{
+	return { serializedSize < MidiFifoSize ? serializedSize : MidiFifoSize,
+			serializedSize > MidiFifoSize };
+}
+
+class SampleClock
+{
+public:
+	static constexpr u32 SampleRate = 44100;
+	static constexpr u32 BaseCycles = SH4_MAIN_CLOCK / SampleRate;
+	static constexpr u32 CycleRemainder = SH4_MAIN_CLOCK % SampleRate;
+	static constexpr u32 InitialPhase = CycleRemainder == 0
+			? 0 : SampleRate - CycleRemainder;
+
+	int nextCycles()
+	{
+		remainder += CycleRemainder;
+		if (remainder >= SampleRate)
+		{
+			remainder -= SampleRate;
+			return BaseCycles + 1;
+		}
+		return BaseCycles;
+	}
+
+	void reset() { remainder = InitialPhase; }
+	u32 phase() const { return remainder; }
+	void setPhase(u32 phase) { remainder = phase % SampleRate; }
+
+private:
+	u32 remainder = InitialPhase;
+};
+
+u32 sampleClockPhase();
+void setSampleClockPhase(u32 phase);
+extern int internalDmaSchedId;
+void serializeInternalDma(Serializer& ser);
+void deserializeInternalDma(Deserializer& deser);
+
 #define SCIEB_addr 0x289C
 #define SCIPD_addr (0x289C+4)
 #define SCIRE_addr (0x289C+8)
@@ -43,7 +95,7 @@ struct CommonData_struct
 	u32 :16;
 	//+8
 	u32 MIBUF:8;
-	u32 MIEMP:1;
+	u32 MIEMP :1;
 	u32 MIFUL :1;
 	u32 MIOVF :1;
 	u32 MOEMP :1;
@@ -319,10 +371,81 @@ extern InterruptInfo * const SCIEB;
 extern InterruptInfo * const SCIPD;
 extern InterruptInfo * const SCIRE;
 extern std::deque<u8> midiSendBuffer;
+extern std::deque<u8> midiOutputBuffer;
 
 extern CommonData_struct * const CommonData;
 extern DSPData_struct * const DSPData;
 extern const DSP_OUT_VOL_REG * const dsp_out_vol;
+
+constexpr u32 selectedSoundRamMask(u32 installedMask, bool mem8Mb)
+{
+	return installedMask & (mem8Mb ? 8_MB - 1 : 2_MB - 1);
+}
+
+inline u32 soundRamMask()
+{
+	// MEM8MB selects the AICA's 16-Mbit or 64-Mbit DRAM addressing mode.
+	// Never expose addresses beyond the memory installed by the platform.
+	return selectedSoundRamMask(ARAM_MASK, CommonData->MEM8MB);
+}
+
+struct DmaControlWrite
+{
+	u16 value;
+	bool start;
+};
+
+constexpr DmaControlWrite mergeDmaControlWrite(u16 current, u16 data, u16 writeMask)
+{
+	constexpr u16 implementedBits = 0xfffd; // DDIR, DLG[14:2], DEXE
+	// DEXE is a write-one command rather than ordinary storage: writing zero
+	// has no effect, and writes that do not select bit 0 must not start DMA.
+	const bool start = (writeMask & data & 1) != 0;
+	u16 value = ((current & ~writeMask) | (data & writeMask)) & implementedBits;
+	if (!start)
+		value = (value & ~1u) | (current & 1u);
+	return { value, start };
+}
+
+struct InternalDmaGeometry
+{
+	u32 soundAddress;
+	u32 registerAddress;
+	u32 transfers;
+	u32 transfersToRamEnd;
+};
+
+constexpr InternalDmaGeometry internalDmaGeometry(u32 dmeaHi, u32 dmeaLo,
+		u32 drga, u32 dlg, u32 ramMask)
+{
+	const u32 soundAddress = ((dmeaHi << 16) | (dmeaLo << 2)) & ramMask;
+	return {
+		soundAddress,
+		drga << 2,
+		dlg,
+		(ramMask + 1 - soundAddress) / 4
+	};
+}
+
+constexpr bool isInternalDmaParameterRegister(u32 address)
+{
+	address &= 0x7fff;
+	return address >= 0x2880 && address <= 0x288c && (address & 3) == 0;
+}
+
+constexpr bool soundCpuAccessAllowed(u32 mrwinh)
+{
+	// MRWINH bit 2 removes the ARM7 from sound RAM. Since both its code and
+	// data live there, the processor stalls until the main CPU clears the bit.
+	return (mrwinh & 4) == 0;
+}
+
+constexpr bool mainCpuSoundMemoryAccessAllowed(u32 mrwinh)
+{
+	// MRWINH bit 3 removes the SH4/G2 master from sound RAM for both reads
+	// and writes. This is independent of RP, which only protects writes.
+	return (mrwinh & 8) == 0;
+}
 
 template<typename T>
 void writeTimerAndIntReg(u32 reg, T data);
@@ -359,14 +482,15 @@ public:
 
 	void StepTimer(u32 samples)
 	{
-		do
+		while (samples-- != 0)
 		{
-			c_step--;
-			if (c_step==0)
+			if (--c_step == 0)
 			{
 				c_step=m_step;
 				data->count++;
-				if (data->count==0)
+				// AICA requests the timer interrupt on the all-ones to
+				// all-zeroes transition.
+				if (data->count == 0)
 				{
 					if (id==0)
 					{
@@ -385,17 +509,13 @@ public:
 					}
 				}
 			}
-		} while(--samples);
+		}
 	}
 
 	void RegisterWrite()
 	{
-		u32 n_step=1<<(data->md);
-		if (n_step!=m_step)
-		{
-			m_step=n_step;
-			c_step=m_step;
-		}
+		m_step=1<<(data->md);
+		c_step=m_step;
 	}
 };
 

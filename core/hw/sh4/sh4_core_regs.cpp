@@ -5,6 +5,8 @@
 #include "types.h"
 #include "sh4_core.h"
 #include "sh4_interrupts.h"
+#include "modules/mmu.h"
+#include "dyna/blockmanager.h"
 #if defined(__ANDROID__) && HOST_CPU == CPU_ARM
 #include <fenv.h>
 #endif
@@ -20,6 +22,7 @@ static void ChangeGPR()
 //returns true if interrupt pending
 bool UpdateSR()
 {
+	const bool privilegeModeChanged = Sh4cntx.old_sr.MD != Sh4cntx.sr.MD;
 	if (Sh4cntx.sr.MD)
 	{
 		if (Sh4cntx.old_sr.RB != Sh4cntx.sr.RB)
@@ -33,6 +36,13 @@ bool UpdateSR()
 
 	Sh4cntx.old_sr.status = Sh4cntx.sr.status;
 	Sh4cntx.old_sr.RB &= Sh4cntx.sr.MD;
+
+#ifdef FAST_MMU
+	if (privilegeModeChanged && mmu_enabled())
+		mmuAddressLUTFlush(true);
+#endif
+	if (privilegeModeChanged && !mmu_enabled())
+		bm_ResetLinks();
 
 	return SRdecode();
 }
@@ -131,9 +141,8 @@ static void setHostRoundingMode(u32 roundingMode, u32 denorm2zero)
 //called when fpscr is changed and we must check for reg banks etc..
 void DYNACALL Sh4Context::UpdateFPSCR(Sh4Context *ctx)
 {
-	// The FPU exception cause field is cleared by the next FPU instruction on real hardware.
-	// FPU instructions don't update it here, so a cause bit written by the guest would stick forever.
-	ctx->fpscr.full &= ~0x3f000u;
+	// FPSCR[31:22] are reserved and always read as zero.
+	ctx->fpscr.full &= 0x003fffff;
 	if (ctx->fpscr.FR != ctx->old_fpscr.FR)
 		// FPU bank change
 		std::swap(ctx->xf, ctx->fr);

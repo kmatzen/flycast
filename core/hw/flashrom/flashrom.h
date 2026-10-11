@@ -229,7 +229,17 @@ static_assert(sizeof(flash_user_block) == 64);
 // AtomisWave uses a custom 29L001mc model
 struct DCFlashChip : WritableChip
 {
-	DCFlashChip(u32 sz, u32 write_protect_size = 0): WritableChip(sz, write_protect_size), state(FS_Normal) { }
+	enum class Type
+	{
+		DreamcastSystem,
+		Macronix29L001MC,
+	};
+
+	DCFlashChip(u32 sz, u32 write_protect_size = 0, Type type = Type::DreamcastSystem)
+		: WritableChip(sz, write_protect_size), state(FS_Normal), type(type)
+	{
+		memset(data, 0xff, size);
+	}
 
 	enum FlashState
 	{
@@ -241,6 +251,12 @@ struct DCFlashChip : WritableChip
 		FS_EraseAMD2,
 		FS_EraseAMD3,
 		FS_SelectMode,
+		FS_ProgramBusy,
+		FS_ErasePending,
+		FS_EraseBusy,
+		FS_EraseSuspended,
+		FS_FastMode,
+		FS_FastReset,
 	};
 
 	FlashState state;
@@ -248,32 +264,14 @@ struct DCFlashChip : WritableChip
 	{
 		//reset the flash chip state
 		state = FS_Normal;
+		operation_end = 0;
+		erase_suspended = false;
+		erase_remaining = 0;
+		fast_mode = false;
 	}
 	
 	void Write(u32 addr,u32 val,u32 sz) override;
-
-	u8 Read8(u32 addr) override
-	{
-		if (state == FS_SelectMode)
-		{
-			state = FS_Normal;
-			switch (addr & 0x43)
-			{
-			case 0:	// manufacturer's code
-				return 4;		// or 0x20 or 1
-			case 1:	// device code
-				return 0xb0;	// or 0x40 or 0x3e
-			case 2:	// sector protection verification
-				// sector protection
-				DEBUG_LOG(FLASHROM, "Sector protection address %x", addr);
-				return (addr & 0x1e000) == 0x1a000;
-			default:
-				WARN_LOG(FLASHROM, "SelectMode unknown address %x", addr);
-				return 0;
-			}
-		}
-		return MemChip::Read8(addr);
-	}
+	u8 Read8(u32 addr) override;
 
 	int WriteBlock(u32 part_id, u32 block_id, const void *data);
 	int ReadBlock(u32 part_id, u32 block_id, void *data);
@@ -313,6 +311,42 @@ struct DCFlashChip : WritableChip
 	void Validate();
 
 private:
+	Type type;
+	u32 operation_address = 0;
+	u32 operation_length = 0;
+	u8 erase_mask = 0;
+	u32 program_address = 0;
+	u8 program_data = 0xff;
+	u64 operation_end = 0;
+	bool operation_protected = false;
+	bool program_protected = false;
+	bool status_toggle = false;
+	bool erase_suspended = false;
+	u64 erase_remaining = 0;
+	bool fast_mode = false;
+
+	bool is_protected(u32 addr) const
+	{
+		addr &= mask;
+		return addr < write_protect_size
+				|| (type == Type::DreamcastSystem && (addr & 0x1e000) == 0x1a000);
+	}
+	void get_sector(u32 addr, u32& offset, u32& length) const;
+	u8 get_sector_mask(u32 addr) const;
+	bool is_sector_protected(u32 offset, u32 length) const;
+	void finish_operation();
+	u8 read_status(u32 addr);
+	virtual u64 current_cycle() const;
+	static bool is_unlock1_address(u32 addr);
+	static bool is_unlock2_address(u32 addr);
+	FlashState idle_state() const
+	{
+		return erase_suspended ? FS_EraseSuspended : fast_mode ? FS_FastMode : FS_Normal;
+	}
+	bool is_selected_sector(u32 addr) const;
+	void suspend_erase();
+	void resume_erase();
+
 	int crc_block(struct flash_user_block *block)
 	{
 		const u8 *buf = (const u8 *)block;
@@ -404,12 +438,54 @@ private:
 	void Serialize(Serializer& ser) const override
 	{
 		ser << state;
+		ser << operation_address;
+		ser << operation_length;
+		ser << erase_mask;
+		ser << program_address;
+		ser << program_data;
+		ser << operation_end;
+		ser << operation_protected;
+		ser << program_protected;
+		ser << status_toggle;
+		ser << erase_suspended;
+		ser << erase_remaining;
+		ser << fast_mode;
 		ser.serialize(&this->data[write_protect_size], size - write_protect_size);
 	}
 
 	void Deserialize(Deserializer& deser) override
 	{
 		deser >> state;
+		if (deser.version() >= Deserializer::V86)
+		{
+			deser >> operation_address;
+			deser >> operation_length;
+			deser >> erase_mask;
+			deser >> program_address;
+			deser >> program_data;
+			deser >> operation_end;
+			deser >> operation_protected;
+			deser >> program_protected;
+			deser >> status_toggle;
+			deser >> erase_suspended;
+			deser >> erase_remaining;
+			deser >> fast_mode;
+		}
+		else
+		{
+			operation_address = 0;
+			operation_length = 0;
+			erase_mask = 0;
+			program_address = 0;
+			program_data = 0xff;
+			operation_end = 0;
+			operation_protected = false;
+			program_protected = false;
+			status_toggle = false;
+			erase_suspended = false;
+			erase_remaining = 0;
+			fast_mode = false;
+		}
 		deser.deserialize(&this->data[write_protect_size], size - write_protect_size);
 	}
 

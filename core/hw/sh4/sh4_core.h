@@ -2,8 +2,10 @@
 #include "types.h"
 #include "sh4_if.h"
 #include <cmath>
+#include <cstring>
 
 int UpdateSystem_INTC();
+int UpdateSystem_INTC_Sleep();
 bool UpdateSR();
 void setDefaultRoundingMode();
 
@@ -28,9 +30,11 @@ static inline void AdjustDelaySlotException(SH4ThrownException& ex)
 static inline f32 fixNaN(f32 f)
 {
 #ifdef STRICT_MODE
-	u32& hex = *(u32 *)&f;
 	if (std::isnan(f))
-		hex = 0x7fbfffff;
+	{
+		const u32 hex = 0x7fbfffff;
+		std::memcpy(&f, &hex, sizeof(f));
+	}
 #endif
 	return f;
 }
@@ -38,9 +42,11 @@ static inline f32 fixNaN(f32 f)
 static inline f64 fixNaN64(f64 f)
 {
 #ifdef STRICT_MODE
-	u64& hex = *(u64 *)&f;
 	if (std::isnan(f))
-		hex = 0x7ff7ffffffffffffll;
+	{
+		const u64 hex = 0x7ff7ffffffffffffull;
+		std::memcpy(&f, &hex, sizeof(f));
+	}
 #endif
 	return f;
 }

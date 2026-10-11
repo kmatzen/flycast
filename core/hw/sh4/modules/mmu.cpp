@@ -11,18 +11,12 @@ TLB_Entry ITLB[4];
 static u32 ITLB_LRU_USE[64];
 bool mmuOn;
 
-//SQ fast remap , mainly hackish , assumes 1MB pages
-//max 64MB can be remapped on SQ
-// Used when FullMMU is off
+// Retained in the save-state layout for compatibility. Store-queue writeback
+// now resolves the authoritative UTLB entry instead of this old 1 MiB cache.
 u32 sq_remap[64];
 
-/*
-MMU support code
-This is mostly hacked-on as the core was never meant to have mmu support
-
-There are two modes, one with 'full' mmu emulation (for wince/bleem/wtfever)
-and a fast-hack mode for 1mb sqremaps (for katana)
-*/
+// SH-4 MMU support. FAST_MMU selects an optimized lookup implementation;
+// both implementations preserve the architectural TLB and store-queue rules.
 #ifndef FAST_MMU
 #include "ccn.h"
 #endif
@@ -64,10 +58,6 @@ bool UTLB_Sync(u32 entry)
 
 	if ((UTLB[entry].Address.VPN & (0xFC000000 >> 10)) == (0xE0000000 >> 10))
 	{
-		// Used when FullMMU is off
-		u32 vpn_sq = ((UTLB[entry].Address.VPN & 0x7FFFF) >> 10) & 0x3F;//upper bits are always known [0xE0/E1/E2/E3]
-		sq_remap[vpn_sq] = UTLB[entry].Data.PPN << 10;
-
 		return true;
 	}
 	else
@@ -196,6 +186,9 @@ MmuError mmu_full_lookup(u32 va, const TLB_Entry** tlb_entry_ret, u32& rv)
 	if (CCN_MMUCR.URB == CCN_MMUCR.URC)
 		CCN_MMUCR.URC = 0;
 
+	const TLB_Entry *localEntry;
+	if (tlb_entry_ret == nullptr)
+		tlb_entry_ret = &localEntry;
 	*tlb_entry_ret = nullptr;
 	for (const TLB_Entry& tlb_entry : UTLB)
 	{
@@ -241,11 +234,10 @@ MmuError mmu_full_SQ(u32 va, u32& rv)
 
 		const TLB_Entry *entry;
 		MmuError lookup = mmu_full_lookup(va, &entry, rv);
-
-		rv &= ~31;//lower 5 bits are forced to 0
-
 		if (lookup != MmuError::NONE)
 			return lookup;
+
+		rv &= ~31;//lower 5 bits are forced to 0
 
 		u32 md = entry->Data.PR >> 1;
 
@@ -355,10 +347,6 @@ MmuError mmu_instruction_translation(u32 va, u32& rv)
 		// User mode on kernel address
 		return MmuError::BADADDR;
 
-	if ((va >> 29) == 7)
-		// P4 not executable
-		return MmuError::BADADDR;
-
 	if (fast_reg_lut[va >> 29] != 0)
 	{
 		// P1 and P2 aren't translated
@@ -377,6 +365,8 @@ MmuError mmu_instruction_translation(u32 va, u32& rv)
 	//Priv mode protection
 	if (md == 0 && Sh4cntx.sr.MD == 0)
 		return MmuError::PROTECTED;
+	if ((rv & 0x1c000000) == 0x1c000000)
+		rv |= 0xf0000000;
 
 	return MmuError::NONE;
 }
@@ -439,21 +429,10 @@ retry_ITLB_Match:
 
 void mmu_set_state()
 {
-	if (CCN_MMUCR.AT == 1)
-	{
-		// Detect if we're running Windows CE
-		static const char magic[] = { 'S', 0, 'H', 0, '-', 0, '4', 0, ' ', 0, 'K', 0, 'e', 0, 'r', 0, 'n', 0, 'e', 0, 'l', 0 };
-		if (memcmp(GetMemPtr(0x8c0110a8, 4), magic, sizeof(magic)) == 0
-				|| memcmp(GetMemPtr(0x8c011118, 4), magic, sizeof(magic)) == 0)
-		{
-			mmuOn = true;
-			NOTICE_LOG(SH4, "Enabling Full MMU support");
-		}
-	}
-	else
-	{
-		mmuOn = false;
-	}
+	const bool enable = CCN_MMUCR.AT != 0;
+	if (enable && !mmuOn)
+		NOTICE_LOG(SH4, "Enabling Full MMU support");
+	mmuOn = enable;
 
 	SetMemoryHandlers();
 	setSqwHandler();
@@ -514,8 +493,18 @@ void mmu_flush_table()
 template<typename T>
 T DYNACALL mmu_ReadMem(u32 adr)
 {
-	if (adr & (std::min((int)sizeof(T), 4) - 1))
-		// Unaligned
+	if constexpr (sizeof(T) == 8)
+	{
+		if (sh4DataAddressError(adr, sizeof(T), false))
+			mmu_raise_exception(MmuError::BADADDR, adr, MMU_TT_DREAD);
+		u32 addr;
+		MmuError rv = mmu_data_translation<MMU_TT_DREAD>(adr, addr);
+		if (rv != MmuError::NONE)
+			mmu_raise_exception(rv, adr, MMU_TT_DREAD);
+		return (u64)addrspace::read32(addr)
+				| ((u64)addrspace::read32(addr + sizeof(u32)) << 32);
+	}
+	if (sh4DataAddressError(adr, sizeof(T), false))
 		mmu_raise_exception(MmuError::BADADDR, adr, MMU_TT_DREAD);
 	u32 addr;
 	MmuError rv = mmu_data_translation<MMU_TT_DREAD>(adr, addr);
@@ -543,8 +532,19 @@ u16 DYNACALL mmu_IReadMem16(u32 vaddr)
 template<typename T>
 void DYNACALL mmu_WriteMem(u32 adr, T data)
 {
-	if (adr & (std::min((int)sizeof(T), 4) - 1))
-		// Unaligned
+	if constexpr (sizeof(T) == 8)
+	{
+		if (sh4DataAddressError(adr, sizeof(T), true))
+			mmu_raise_exception(MmuError::BADADDR, adr, MMU_TT_DWRITE);
+		u32 addr;
+		MmuError rv = mmu_data_translation<MMU_TT_DWRITE>(adr, addr);
+		if (rv != MmuError::NONE)
+			mmu_raise_exception(rv, adr, MMU_TT_DWRITE);
+		addrspace::write32(addr, (u32)data);
+		addrspace::write32(addr + sizeof(u32), (u32)((u64)data >> 32));
+		return;
+	}
+	if (sh4DataAddressError(adr, sizeof(T), true))
 		mmu_raise_exception(MmuError::BADADDR, adr, MMU_TT_DWRITE);
 	u32 addr;
 	MmuError rv = mmu_data_translation<MMU_TT_DWRITE>(adr, addr);
@@ -557,24 +557,30 @@ template void mmu_WriteMem(u32 adr, u16 data);
 template void mmu_WriteMem(u32 adr, u32 data);
 template void mmu_WriteMem(u32 adr, u64 data);
 
+#if FEAT_SHREC == DYNAREC_JIT
+u64 DYNACALL mmuDynarecRead64(u32 vaddr, u32 pc)
+{
+	const u32 addr = mmuDynarecLookup(vaddr, false, pc, sizeof(u64));
+	return addrspace::read32(addr)
+			| (u64)addrspace::read32(addr + sizeof(u32)) << 32;
+}
+
+void DYNACALL mmuDynarecWrite64(u32 vaddr, u32 low, u32 high, u32 pc)
+{
+	const u32 addr = mmuDynarecLookup(vaddr, true, pc, sizeof(u64));
+	addrspace::write32(addr, low);
+	addrspace::write32(addr + sizeof(u32), high);
+}
+#endif
+
 void mmu_TranslateSQW(u32 adr, u32 *out)
 {
-	if (!mmuOn)
-	{
-		//This will only work for 1 mb pages .. hopefully nothing else is used
-		//*FIXME* to work for all page sizes ?
+	u32 addr;
+	MmuError tv = mmu_full_SQ<MMU_TT_DREAD>(adr, addr);
+	if (tv != MmuError::NONE)
+		mmu_raise_exception(tv, adr, MMU_TT_DREAD);
 
-		*out = sq_remap[(adr >> 20) & 0x3F] | (adr & 0xFFFE0);
-	}
-	else
-	{
-		u32 addr;
-		MmuError tv = mmu_full_SQ<MMU_TT_DREAD>(adr, addr);
-		if (tv != MmuError::NONE)
-			mmu_raise_exception(tv, adr, MMU_TT_DREAD);
-
-		*out = addr;
-	}
+	*out = addr;
 }
 
 void mmu_serialize(Serializer& ser)

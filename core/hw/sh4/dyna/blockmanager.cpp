@@ -57,7 +57,36 @@ static DynarecCodeEntryPtr DYNACALL bm_GetCode(u32 addr)
 DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr)
 {
 	if (!mmu_enabled())
-		return bm_GetCode(addr);
+	{
+		bool handledException = false;
+		while (sh4InstructionAddressError(addr))
+		{
+			DoMMUException(addr, MmuError::BADADDR, MMU_TT_IREAD);
+			addr = Sh4cntx.pc;
+			handledException = true;
+		}
+		if (handledException)
+			return ngen_FailedToFindBlock;
+		DynarecCodeEntryPtr code = bm_GetCode(addr);
+		if (code != ngen_FailedToFindBlock)
+		{
+			RuntimeBlockInfoPtr block = bm_GetBlock((void *)code);
+			if (block != nullptr
+					&& (block->vaddr != addr || !block->matchesFpscr(Sh4cntx.fpscr)))
+			{
+				bm_DiscardBlock(block.get());
+				return ngen_FailedToFindBlock;
+			}
+			if (block != nullptr && block->tail_addr != NullAddress
+					&& sh4InstructionAddressError(block->tailVaddr()))
+			{
+				Sh4cntx.cycle_counter -= block->entry_cycles;
+				DoMMUException(block->tailVaddr(), MmuError::BADADDR, MMU_TT_IREAD);
+				return ngen_FailedToFindBlock;
+			}
+		}
+		return code;
+	}
 
 	if (addr & 1)
 	{
@@ -73,12 +102,22 @@ DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr)
 
 		case 0xfffffd05: // QueryPerformanceCounter(u64 *)
 			{
-				bool isRam;
-				u64 *ptr;
-				u32 paddr;
-				if (rdv_writeMemImmediate(Sh4cntx.r[4], sizeof(u64), (void*&)ptr, isRam, paddr) && isRam)
+				bool lowIsRam;
+				bool highIsRam;
+				u32 *lowPtr;
+				u32 *highPtr;
+				u32 lowPaddr;
+				u32 highPaddr;
+				const u32 vaddr = Sh4cntx.r[4];
+				if (!sh4DataAddressError(vaddr, sizeof(u64), true)
+						&& rdv_writeMemImmediate(vaddr, sizeof(u32),
+								(void *&)lowPtr, lowIsRam, lowPaddr) && lowIsRam
+						&& rdv_writeMemImmediate(vaddr + sizeof(u32), sizeof(u32),
+								(void *&)highPtr, highIsRam, highPaddr) && highIsRam)
 				{
-					*ptr = sh4_sched_now64() >> 4;
+					const u64 value = sh4_sched_now64() >> 4;
+					*lowPtr = (u32)value;
+					*highPtr = value >> 32;
 					Sh4cntx.r[0] = 1;
 					Sh4cntx.pc = Sh4cntx.pr;
 					Sh4cntx.cycle_counter -= 100;
@@ -135,21 +174,66 @@ DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr)
 #endif
 
 		default:
-			Do_Exception(addr, Sh4Ex_AddressErrorRead);
+			DoMMUException(addr, MmuError::BADADDR, MMU_TT_IREAD);
 			break;
 		}
 		addr = Sh4cntx.pc;
 	}
 
 	u32 paddr;
-	MmuError rv = mmu_instruction_translation(addr, paddr);
-	if (rv != MmuError::NONE)
+	bool handledException = false;
+	for (;;)
 	{
-		DoMMUException(addr, rv, MMU_TT_IREAD);
-		mmu_instruction_translation(Sh4cntx.pc, paddr);
-	}
+		const MmuError rv = mmu_instruction_translation(addr, paddr);
+		if (rv == MmuError::NONE)
+			break;
 
-	return bm_GetCode(paddr);
+		// If the exception vector itself cannot be translated, the blocked
+		// second exception performs the manual-reset transition. Translate that
+		// fixed P2 vector on the next iteration rather than using stale output.
+		DoMMUException(addr, rv, MMU_TT_IREAD);
+		addr = Sh4cntx.pc;
+		handledException = true;
+	}
+	if (handledException)
+		return ngen_FailedToFindBlock;
+
+	DynarecCodeEntryPtr code = bm_GetCode(paddr);
+	if (code != ngen_FailedToFindBlock)
+	{
+		RuntimeBlockInfoPtr block = bm_GetBlock((void *)code);
+		if (block != nullptr
+				&& (block->vaddr != addr || !block->matchesFpscr(Sh4cntx.fpscr)))
+		{
+			// The same physical instruction can be mapped at multiple virtual
+			// addresses. PC-relative operations and exception PCs make blocks
+			// compiled for those aliases non-interchangeable.
+			bm_DiscardBlock(block.get());
+			return ngen_FailedToFindBlock;
+		}
+		if (block != nullptr && block->tail_addr != NullAddress)
+		{
+			// A delayed branch may fetch its slot from the next virtual page.
+			// Re-run that translation on every dispatch both to validate the
+			// cached physical opcode and to perform the architectural ITLB access.
+			u32 tailPaddr;
+			const u32 tailVaddr = block->tailVaddr();
+			const MmuError tailError = mmu_instruction_translation(tailVaddr, tailPaddr);
+			if (tailError != MmuError::NONE)
+			{
+				// The delayed branch has issued before its slot fetch faults.
+				Sh4cntx.cycle_counter -= block->entry_cycles;
+				DoMMUException(tailVaddr, tailError, MMU_TT_IREAD);
+				return ngen_FailedToFindBlock;
+			}
+			if (tailPaddr != block->tail_addr)
+			{
+				bm_DiscardBlock(block.get());
+				return ngen_FailedToFindBlock;
+			}
+		}
+	}
+	return code;
 }
 
 // addr must be a physical address
@@ -365,6 +449,23 @@ void bm_ResetCache()
 #endif
 }
 
+void bm_ResetLinks()
+{
+	// Direct links are valid only for the privilege mode in which their target
+	// was resolved. Keep compiled blocks, but force every edge back through
+	// bm_GetCodeByVAddr after SR.MD changes.
+	for (const auto& it : blkmap)
+	{
+		RuntimeBlockInfoPtr block = it.second;
+		block->relink_data = 0;
+		block->pNextBlock = nullptr;
+		block->pBranchBlock = nullptr;
+		block->pre_refs.clear();
+	}
+	for (const auto& it : blkmap)
+		it.second->Relink();
+}
+
 void bm_ResetTempCache(bool full)
 {
 	if (!full)
@@ -471,24 +572,29 @@ void RuntimeBlockInfo::Discard()
 	if (read_only)
 	{
 		// Remove this block from the per-page block lists
-		for (u32 addr = this->addr & ~PAGE_MASK; addr < this->addr + this->sh4_code_size; addr += PAGE_SIZE)
+		for (u32 addr = this->addr & ~PAGE_MASK; addr < this->addr + contiguousCodeSize(); addr += PAGE_SIZE)
 		{
 			auto& block_list = blocks_per_page[(addr & RAM_MASK) / PAGE_SIZE];
 			block_list.erase(this);
 		}
+		if (tail_addr != NullAddress
+				&& (tail_addr & ~PAGE_MASK) != (this->addr & ~PAGE_MASK))
+			blocks_per_page[(tail_addr & RAM_MASK) / PAGE_SIZE].erase(this);
 	}
 }
 
 void RuntimeBlockInfo::SetProtectedFlags()
 {
 	// Don't write protect rom and BIOS/IP.BIN (Grandia II)
-	if (!IsOnRam(addr) || (addr & 0x1FFF0000) == 0x0c000000)
+	if (!IsOnRam(addr) || (addr & 0x1FFF0000) == 0x0c000000
+			|| (tail_addr != NullAddress
+					&& (!IsOnRam(tail_addr) || (tail_addr & 0x1fff0000) == 0x0c000000)))
 	{
 		this->read_only = false;
 		unprotected_blocks++;
 		return;
 	}
-	for (u32 addr = this->addr & ~PAGE_MASK; addr < this->addr + sh4_code_size; addr += PAGE_SIZE)
+	for (u32 addr = this->addr & ~PAGE_MASK; addr < this->addr + contiguousCodeSize(); addr += PAGE_SIZE)
 	{
 		if (unprotected_pages[(addr & RAM_MASK) / PAGE_SIZE])
 		{
@@ -497,13 +603,28 @@ void RuntimeBlockInfo::SetProtectedFlags()
 			return;
 		}
 	}
+	if (tail_addr != NullAddress
+			&& unprotected_pages[(tail_addr & RAM_MASK) / PAGE_SIZE])
+	{
+		this->read_only = false;
+		unprotected_blocks++;
+		return;
+	}
 	this->read_only = true;
 	protected_blocks++;
-	for (u32 addr = this->addr & ~PAGE_MASK; addr < this->addr + sh4_code_size; addr += PAGE_SIZE)
+	for (u32 addr = this->addr & ~PAGE_MASK; addr < this->addr + contiguousCodeSize(); addr += PAGE_SIZE)
 	{
 		auto& block_list = blocks_per_page[(addr & RAM_MASK) / PAGE_SIZE];
 		if (block_list.empty())
 			bm_LockPage(addr);
+		block_list.insert(this);
+	}
+	if (tail_addr != NullAddress
+			&& (tail_addr & ~PAGE_MASK) != (this->addr & ~PAGE_MASK))
+	{
+		auto& block_list = blocks_per_page[(tail_addr & RAM_MASK) / PAGE_SIZE];
+		if (block_list.empty())
+			bm_LockPage(tail_addr);
 		block_list.insert(this);
 	}
 }
@@ -654,4 +775,3 @@ void print_blocks()
 	if (f) fclose(f);
 }
 #endif
-

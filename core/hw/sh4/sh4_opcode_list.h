@@ -103,6 +103,111 @@ struct sh4_opcodelistentry
 	{
 		return (type & UsesFPU) != 0;
 	}
+
+	bool IsIllegalFpuMode(u16 opcode, bool doublePrecision, bool pairTransfer) const
+	{
+		if (!IsFloatingPoint())
+			return false;
+
+		// FPSCR.PR=1 and FPSCR.SZ=1 is a reserved combination for FPU
+		// operation instructions. FMOV is a data-transfer instruction: it
+		// ignores PR and continues to use SZ to select a 32- or 64-bit move.
+		const u16 lowNibble = opcode & 0xf;
+		const bool fmov = (opcode & 0xf000) == 0xf000
+				&& lowNibble >= 6 && lowNibble <= 0xc;
+		if (doublePrecision && pairTransfer
+				&& (opcode & 0xf000) == 0xf000 && !fmov)
+			return true;
+
+		const u16 unary = opcode & 0xf0ff;
+		if (!doublePrecision)
+		{
+			// FCNVSD and FCNVDS exist only in double-precision mode.
+			return unary == 0xf0ad || unary == 0xf0bd;
+		}
+
+		// These graphics/single-precision operations are undefined in PR=1.
+		if (unary == 0xf07d || unary == 0xf08d || unary == 0xf09d
+				|| unary == 0xf0ed || unary == 0xf0fd
+				|| (opcode & 0xf00f) == 0xf00e
+				|| opcode == 0xfbfd || opcode == 0xf3fd)
+			return true;
+
+		// Double arithmetic and comparisons require even-numbered DR operands.
+		if ((opcode & 0xf000) == 0xf000 && (opcode & 0xf) <= 5)
+			return ((opcode >> 8) & 1) != 0 || ((opcode >> 4) & 1) != 0;
+
+		// Unary double-precision instructions and conversions name one DR.
+		if (unary == 0xf02d || unary == 0xf03d || unary == 0xf04d
+				|| unary == 0xf05d || unary == 0xf06d
+				|| unary == 0xf0ad || unary == 0xf0bd)
+			return ((opcode >> 8) & 1) != 0;
+
+		return false;
+	}
+
+	bool ClearsFpuCause(u16 opcode) const
+	{
+		if (!IsFloatingPoint())
+			return false;
+		// FRCHG and FSCHG share the low-byte encoding used by FSCA/FTRV, but
+		// they only change FPSCR mode bits and do not begin an FPU operation.
+		if (opcode == 0xfbfd || opcode == 0xf3fd)
+			return false;
+
+		// Basic arithmetic and comparisons.
+		if ((opcode & 0xf000) == 0xf000 && (opcode & 0xf) <= 5)
+			return true;
+
+		const u16 unary = opcode & 0xf0ff;
+		return unary == 0xf02d || unary == 0xf03d
+				|| unary == 0xf06d || unary == 0xf07d
+				|| unary == 0xf0ad || unary == 0xf0bd
+				|| unary == 0xf0ed || unary == 0xf0fd
+				|| (opcode & 0xf00f) == 0xf00e;
+	}
+
+	bool IsIllegalDelaySlot(u16 opcode) const
+	{
+		// SH-4 forbids instructions which modify or address relative to PC in a
+		// delay slot. SLEEP is also slot-illegal; its ReadWritePC classification
+		// captures that restriction. LDTLB has no PC dependency but is separately
+		// specified as slot-illegal.
+		return NeedPC() || opcode == 0x0038;
+	}
+
+	bool IsPrivileged(u16 opcode) const
+	{
+		if (opcode == 0x0038 || opcode == 0x002b || opcode == 0x001b)
+			return true; // LDTLB, RTE, SLEEP
+
+		// SGR and DBR use the special-register STS/LDS encodings rather than
+		// the ordinary control-register STC/LDC forms below. Unlike the other
+		// special registers, both are privileged in every transfer form.
+		switch (opcode & 0xf0ff)
+		{
+		case 0x003a: // STS SGR,Rn
+		case 0x00fa: // STS DBR,Rn
+		case 0x4032: // STS.L SGR,@-Rn
+		case 0x40f2: // STS.L DBR,@-Rn
+		case 0x4036: // LDS.L @Rn+,SGR
+		case 0x40f6: // LDS.L @Rn+,DBR
+		case 0x403a: // LDS Rn,SGR
+		case 0x40fa: // LDS Rn,DBR
+			return true;
+		default:
+			break;
+		}
+
+		const u16 form = opcode & 0xf00f;
+		if (form != 0x0002 && form != 0x4003
+				&& form != 0x400e && form != 0x4007)
+			return false;
+
+		// LDC/STC accesses are privileged except when the control register is
+		// GBR (selector 1).
+		return ((opcode >> 4) & 0xf) != 1;
+	}
 };
 
 extern sh4_opcodelistentry* OpDesc[0x10000];

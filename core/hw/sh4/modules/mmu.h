@@ -68,6 +68,39 @@ static inline bool mmu_enabled()
 	return mmuOn;
 }
 
+static inline bool sh4DataAddressError(u32 vaddr, u32 size, bool write)
+{
+	if ((vaddr & (size - 1)) != 0)
+		return true;
+	if (write && size < sizeof(u32)
+			&& (vaddr & 0xfc000000) == 0xe0000000)
+		// Store queues accept only longword and quadword MOV stores.
+		return true;
+
+	const u32 last = vaddr + size - 1;
+	if (last < vaddr)
+		return true;
+	if (write && (vaddr & 0xfc000000) == 0xe0000000
+			&& (last & 0xfc000000) != 0xe0000000)
+		return true;
+	if (Sh4cntx.sr.MD != 0
+			|| ((vaddr | last) & 0x80000000) == 0)
+		return false;
+
+	// User mode can write the store-queue window when SQMD is clear, but
+	// cannot read it or access any other P1-P4 address.
+	return !(write
+			&& (vaddr & 0xfc000000) == 0xe0000000
+			&& (last & 0xfc000000) == 0xe0000000
+			&& CCN_MMUCR.SQMD == 0);
+}
+
+static inline bool sh4InstructionAddressError(u32 vaddr)
+{
+	return (vaddr & 1) != 0
+			|| (Sh4cntx.sr.MD == 0 && (vaddr & 0x80000000) != 0);
+}
+
 MmuError mmu_full_lookup(u32 va, const TLB_Entry **entry, u32& rv);
 MmuError mmu_instruction_lookup(u32 va, const TLB_Entry **entry, u32& rv);
 template<u32 translation_type>
@@ -76,13 +109,26 @@ MmuError mmu_full_SQ(u32 va, u32& rv);
 #ifdef FAST_MMU
 static inline MmuError mmu_instruction_translation(u32 va, u32& rv)
 {
+	if (Sh4cntx.sr.MD == 0 && (va & 0x80000000) != 0)
+		return MmuError::BADADDR;
+
 	if (fast_reg_lut[va >> 29] != 0)
 	{
 		rv = va;
 		return MmuError::NONE;
 	}
 
-	return mmu_full_lookup(va, nullptr, rv);
+	const TLB_Entry *entry;
+	MmuError lookup = mmu_instruction_lookup(va, &entry, rv);
+	if (lookup != MmuError::NONE)
+		return lookup;
+
+	if (Sh4cntx.sr.MD == 0 && (entry->Data.PR >> 1) == 0)
+		return MmuError::PROTECTED;
+	if ((rv & 0x1c000000) == 0x1c000000)
+		rv |= 0xf0000000;
+
+	return MmuError::NONE;
 }
 #else
 MmuError mmu_instruction_translation(u32 va, u32& rv);
@@ -95,7 +141,7 @@ void DoMMUException(u32 addr, MmuError mmu_error, u32 access_type);
 inline static bool mmu_is_translated(u32 va, u32 size)
 {
 #ifndef FAST_MMU
-	if (va & (std::min(size, 4u) - 1))
+	if (va & (size - 1))
 		return true;
 #endif
 
@@ -119,6 +165,8 @@ void mmu_TranslateSQW(u32 adr, u32* out);
 #ifdef FAST_MMU
 // maps 4K virtual page number to physical address
 extern u32 mmuAddressLUT[0x100000];
+// Generated accesses must not consume this table without also performing the
+// architecturally visible MMUCR.URC update for every UTLB access.
 
 static inline void mmuAddressLUTFlush(bool full)
 {
@@ -133,12 +181,40 @@ static inline void mmuAddressLUTFlush(bool full)
 #endif
 
 #if FEAT_SHREC == DYNAREC_JIT
-static inline u32 DYNACALL mmuDynarecLookup(u32 vaddr, u32 write, u32 pc)
+static inline bool mmuDynarecCacheable(u32 vaddr)
+{
+#ifdef FAST_MMU
+	if (vaddr >> 31 != 0)
+		return false;
+
+	// This is a host-side cacheability probe, not another guest UTLB access:
+	// inspect the entries directly so MMUCR.URC advances only once.
+	const TLB_Entry *match = nullptr;
+	for (const TLB_Entry& entry : UTLB)
+	{
+		if (!mmu_match(vaddr, entry.Address, entry.Data))
+			continue;
+		if (match != nullptr)
+			return false;
+		match = &entry;
+	}
+	// The address LUT has one entry per 4 KiB. A 1 KiB mapping cannot
+	// describe the other three translations in that slot.
+	return match != nullptr && (match->Data.SZ0 != 0 || match->Data.SZ1 != 0);
+#else
+	return false;
+#endif
+}
+
+static inline u32 DYNACALL mmuDynarecLookup(u32 vaddr, u32 write, u32 pc, u32 size)
 {
 	u32 paddr;
 	MmuError rv;
-	// TODO pass access size so that alignment errors are raised
-	if (write)
+	if (sh4DataAddressError(vaddr, size, write != 0))
+		rv = MmuError::BADADDR;
+	else if (!mmu_enabled())
+		return vaddr;
+	else if (write)
 		rv = mmu_data_translation<MMU_TT_DWRITE>(vaddr, paddr);
 	else
 		rv = mmu_data_translation<MMU_TT_DREAD>(vaddr, paddr);
@@ -153,12 +229,15 @@ static inline u32 DYNACALL mmuDynarecLookup(u32 vaddr, u32 write, u32 pc)
 		return 0;
 	}
 #ifdef FAST_MMU
-	if (vaddr >> 31 == 0)
+	if (mmuDynarecCacheable(vaddr))
 		mmuAddressLUT[vaddr >> 12] = paddr & ~0xfff;
 #endif
 
 	return paddr;
 }
+
+u64 DYNACALL mmuDynarecRead64(u32 vaddr, u32 pc);
+void DYNACALL mmuDynarecWrite64(u32 vaddr, u32 low, u32 high, u32 pc);
 #endif
 
 void MMU_init();

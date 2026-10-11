@@ -40,7 +40,7 @@ public:
 	BaseHopper()
 	{
 		schedId = sh4_sched_register(0, schedCallback, this);
-		sh4_sched_request(schedId, SCHED_CYCLES);
+		sh4_sched_request(schedId, frameClock.nextCycles());
 		EventManager::listen(Event::Pause, handleEvent, this);
 
 		std::string path = getConfigFileName();
@@ -116,6 +116,7 @@ public:
 			ser << b;
 		ser << started;
 		sh4_sched_serialize(ser, schedId);
+		ser << frameClock.phase();
 	}
 	
 	void deserialize(Deserializer& deser)
@@ -136,6 +137,14 @@ public:
 		}
 		deser >> started;
 		sh4_sched_deserialize(deser, schedId);
+		if (deser.version() >= Deserializer::V149)
+		{
+			u32 phase;
+			deser >> phase;
+			frameClock.setPhase(phase);
+		}
+		else
+			frameClock.reset();
 	}
 
 	void saveConfig() const
@@ -249,8 +258,7 @@ protected:
 	int schedId;
 	bool started = false;
 	bool coinKey = false;
-
-	static constexpr u32 SCHED_CYCLES = SH4_MAIN_CLOCK / 60;
+	FixedFrequencyClock<60> frameClock;
 
 private:
 	static int schedCallback(int tag, int cycles, int jitter, void *p)
@@ -263,7 +271,7 @@ private:
 				board->sendCoinInMessage();
 			board->coinKey = (mapleInputState[0].kcode & DC_BTN_D) == 0;
 		}
-		return SCHED_CYCLES;
+		return board->frameClock.nextCycles();
 	}
 
 	static void handleEvent(Event event, void *p) {

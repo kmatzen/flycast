@@ -143,9 +143,12 @@ struct MapleMsg
 	void pushData(const void *p, u32 size)
 	{
 		u32 offset = this->size * 4;
+		verify(offset + size <= sizeof(data));
 		memcpy(&data[offset], p, size);
 		offset += size;
-		this->size = (offset + 3) / 4;
+		u32 paddedOffset = (offset + 3) & ~3;
+		memset(&data[offset], 0, paddedOffset - offset);
+		this->size = paddedOffset / 4;
 	}
 
 	template<typename T>
@@ -160,12 +163,12 @@ static_assert(sizeof(MapleMsg) == 1024);
 
 struct maple_device : public std::enable_shared_from_this<maple_device>
 {
-	u8 maple_port;          //raw maple port
-	u8 bus_port;            //0 .. 5
-	u8 bus_id;              //0 .. 3
-	u8 player_num;			// for Atomiswave
+	u8 maple_port = 0;          //raw maple port
+	u8 bus_port = 0;            //0 .. 5
+	u8 bus_id = 0;              //0 .. 3
+	u8 player_num = 0;			// for Atomiswave
 	char logical_port[3];  //A0, etc
-	MapleConfigMap* config;
+	MapleConfigMap* config = nullptr;
 
 	//fill in the info
 	void Setup(u32 bus, u32 port = 5, int playerNum = -1);
@@ -261,6 +264,14 @@ struct maple_base: maple_device
 			*dst8++ = r8();
 	}
 	u32 r_count() { return dma_count_in; }
+	MapleDeviceRV validateFunction(u32 expectedFunction, u32 expectedPayloadSize) const
+	{
+		if (dma_count_in != expectedPayloadSize)
+			return MDRE_TransmitAgain;
+		u32 function;
+		memcpy(&function, dma_buffer_in, sizeof(function));
+		return function == expectedFunction ? MDRS_JVSNone : MDRE_UnknownFunction;
+	}
 
 	u32 Dma(u32 Command, const u32* buffer_in, u32 buffer_in_len, u32* buffer_out, u32& buffer_out_len)
 	{
@@ -276,20 +287,32 @@ struct maple_base: maple_device
 
 	u32 RawDma(const u32* buffer_in, u32 buffer_in_len, u32* buffer_out) override
 	{
+		if (buffer_in_len < sizeof(u32))
+			return 0;
 		inMsg = (const MapleMsg *)buffer_in;
 		u32 command=buffer_in[0] &0xFF;
-		//Recipient address
-		u32 reci = (buffer_in[0] >> 8) & 0xFF;
 		//Sender address
 		u32 send = (buffer_in[0] >> 16) & 0xFF;
 		u32 outlen = 0;
-		u32 resp = Dma(command, &buffer_in[1], buffer_in_len - 4, &buffer_out[1], outlen);
+		u32 resp;
+		if (buffer_in_len > sizeof(MapleMsg) || (buffer_in_len & 3) != 0)
+			resp = MDRE_TransmitAgain;
+		else if (command >= MDC_DeviceRequest && command <= MDC_DeviceKill
+				&& buffer_in_len != sizeof(u32))
+			resp = MDRE_TransmitAgain;
+		else
+			resp = Dma(command, &buffer_in[1], buffer_in_len - 4, &buffer_out[1], outlen);
 
-		if (reci & 0x20)
-			reci |= maple_GetAttachedDevices(bus_id);
+		// A response originates from this device's own AP, not from the request's
+		// destination mask. This differs for multicast requests: the sole responder
+		// identifies its individual LM address. Main devices additionally advertise
+		// the attached-device mask in their sender AP.
+		u32 origin = (bus_id << 6) | (bus_port == 5 ? 0x20 : 1u << bus_port);
+		if (bus_port == 5)
+			origin |= maple_GetAttachedDevices(bus_id);
 
 		verify(u8(outlen / 4) * 4 == outlen);
-		buffer_out[0] = (resp << 0 ) | (send << 8) | (reci << 16) | ((outlen / 4) << 24);
+		buffer_out[0] = (resp << 0 ) | (send << 8) | (origin << 16) | ((outlen / 4) << 24);
 
 		return outlen + 4;
 	}
@@ -307,6 +330,10 @@ struct BaseMIE : public maple_base
 
 	virtual void handle_86_subcommand();
 	virtual void firmwareLoaded(u32 hash) {}
+
+private:
+	u8 replyDestAP = 0;
+	u8 replyOriginAP = 0x20;
 };
 
 struct MIE : public BaseMIE, public SerialPort

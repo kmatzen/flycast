@@ -41,35 +41,25 @@ public:
 		ctx->cycle_counter -= cycles;
 	}
 
-	void addReadAccessCycles(u32 addr, u32 size) const
-	{
-		ctx->cycle_counter -= readAccessCycles(addr, size);
-	}
-
-	void addWriteAccessCycles(u32 addr, u32 size) const
-	{
-		ctx->cycle_counter -= writeAccessCycles(addr, size);
-	}
+	void addReadAccessCycles(u32 addr, u32 size) const;
+	void addWriteAccessCycles(u32 addr, u32 size) const;
 
 	int countCycles(u16 op);
 
 	void reset()
 	{
 		lastUnit = CO;
-		memOps = 0;
+		lastOpcode = 0;
 	}
 
 	u64 now() {
-		return sh4_sched_now64() + SH4_TIMESLICE - ctx->cycle_counter;
+		return sh4_sched_now64() + sh4_sched_cpu_slice() - ctx->cycle_counter;
 	}
 
-	int readAccessCycles(u32 addr, u32 size) const {
-		return readExternalAccessCycles(addr, size) * 2 * cpuRatio;
-	}
-
-	int writeAccessCycles(u32 addr, u32 size) const {
-		return writeExternalAccessCycles(addr, size) * 2 * cpuRatio;
-	}
+	int readAccessCycles(u32 addr, u32 size) const;
+	int writeAccessCycles(u32 addr, u32 size) const;
+	int dmaReadAccessCycles(u32 addr, u32 size) const;
+	int dmaWriteAccessCycles(u32 addr, u32 size) const;
 
 private:
 	// Returns the number of external cycles (100 MHz) needed for a sized read at the given address
@@ -78,7 +68,7 @@ private:
 	static int writeExternalAccessCycles(u32 addr, u32 size);
 
 	sh4_eu lastUnit = CO;
+	u16 lastOpcode = 0;
 	const int cpuRatio;
-	int memOps = 0;
 	Sh4Context *ctx = nullptr;
 };

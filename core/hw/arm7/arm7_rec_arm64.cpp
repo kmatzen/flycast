@@ -342,18 +342,16 @@ class Arm7Compiler : public MacroAssembler
 
 		if (logical_op_set_flags)
 		{
-			// When an Operand2 constant is used with the instructions MOVS, MVNS, ANDS, ORRS, ORNS, EORS, BICS, TEQ or TST,
-			// the carry flag is updated to bit[31] of the constant,
-			// if the constant is greater than 255 and can be produced by shifting an 8-bit value.
-			if (op.arg[0].isImmediate() && op.arg[0].getImmediate() > 255)
+			// ARM logical instructions preserve V, while AArch64 logical flag
+			// instructions clear it. Save the incoming value for restoration
+			// after the native operation.
+			Cset(w3, vs);
+			// A non-zero immediate rotation sets carry to the result's bit 31.
+			// The decoded value alone cannot reveal whether a rotation occurred.
+			if (op.immediateCarryValid)
 			{
 				set_carry_bit = true;
-				Mov(w14, (op.arg[0].getImmediate() & 0x80000000) >> 31);
-			}
-			else if (op.arg[1].isImmediate() && op.arg[1].getImmediate() > 255)
-			{
-				set_carry_bit = true;
-				Mov(w14, (op.arg[1].getImmediate() & 0x80000000) >> 31);
+				Mov(w14, op.immediateCarry);
 			}
 			else if (!set_carry_bit)
 			{
@@ -384,11 +382,13 @@ class Arm7Compiler : public MacroAssembler
 				Sub(rd, rn, op2);
 			break;
 		case 3:		// RSB
-			Neg(w0, rn);
+			{
+			Register rhs = getRegister(w0, op2);
 			if (set_flags)
-				Adds(rd, w0, op2);
+				Subs(rd, rhs, rn);
 			else
-				Add(rd, w0, op2);
+				Sub(rd, rhs, rn);
+			}
 			break;
 		case 4:		// ADD
 			if (set_flags)
@@ -420,39 +420,20 @@ class Arm7Compiler : public MacroAssembler
 				Sbc(rd, rn, op2);
 			break;
 		case 7:		// RSC
-			Ngc(w0, rn);
+			{
+			Register rhs = getRegister(w0, op2);
 			if (set_flags)
-				Adds(rd, w0, op2);
+				Sbcs(rd, rhs, rn);
 			else
-				Add(rd, w0, op2);
+				Sbc(rd, rhs, rn);
+			}
 			break;
 		case 8:		// TST
-#ifdef STRICT_MODE
-			// In armv7, TST and TEQ do not affect the V flag.
-			// This isn't the case in armv8 so we need to save
-			// and restore it.
-			// Since this is a bit complicated/slow, let's assume nobody
-			// relies on this.
-			Cset(w3, vs);
-#endif
 			Tst(rn, op2);
-#ifdef STRICT_MODE
-			Mrs(x0, NZCV);
-			Bfi(x0, x3, 28, 1);		// V is bit 28
-			Msr(NZCV, x0);
-#endif
 			break;
 		case 9:		// TEQ
 			Eor(w0, rn, op2);
-#ifdef STRICT_MODE
-			Cset(w3, vs);
-#endif
 			Tst(w0, w0);
-#ifdef STRICT_MODE
-			Mrs(x0, NZCV);
-			Bfi(x0, x3, 28, 1);		// V is bit 28
-			Msr(NZCV, x0);
-#endif
 			break;
 		case 10:	// CMP
 			Cmp(rn, op2);
@@ -478,6 +459,12 @@ class Arm7Compiler : public MacroAssembler
 		{
 			Mrs(x0, NZCV);
 			Bfi(x0, x14, 29, 1);		// C is bit 29 in NZCV
+			Msr(NZCV, x0);
+		}
+		if (logical_op_set_flags)
+		{
+			Mrs(x0, NZCV);
+			Bfi(x0, x3, 28, 1);		// Preserve ARM V across logical ops
 			Msr(NZCV, x0);
 		}
 	}
@@ -705,7 +692,8 @@ public:
 		arm_dispatch = GetCursorAddress<void (*)()>();
 		Ldr(w3, arm_reg_operand(CYCL_CNT));			// load cycle counter
 		Ldp(w0, w1, arm_reg_operand(R15_ARM_NEXT));	// load Next PC, interrupt
-		Tbnz(w3, 31, &arm_exit);					// exit if cycle counter negative
+		Cmp(w3, 0);
+		B(le, &arm_exit);						// exit if timeslice is exhausted
 		Ubfx(w2, w0, 2, 21);						// w2 = pc >> 2. Note: assuming address space == 8 MB (23 bits)
 		Cbnz(w1, &arm_dofiq);						// if interrupt pending, handle it
 

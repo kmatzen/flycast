@@ -111,6 +111,19 @@ static_assert(sizeof(ArmOpBits) == sizeof(u32), "sizeof(ArmOpBits) == sizeof(u32
 
 static std::vector<ArmOp> block_ops;
 
+static u32 decodeRotatedImmediate(u32 imm8, u32 rotate)
+{
+	return rotate == 0 ? imm8 : (imm8 >> rotate) | (imm8 << (32 - rotate));
+}
+
+static s32 decodeBranchOffset(u32 opcode)
+{
+	s64 offset = opcode & 0x00ffffffu;
+	if (opcode & 0x00800000u)
+		offset -= 0x01000000;
+	return (s32)(offset * 4);
+}
+
 //findfirstset -- used in LDM/STM handling
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -146,12 +159,28 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 	{
 	case 0:	// data processing, Multiply, Swap
 		// disambiguate
-		if ((bits.op_type & 4) == 0 && bits.imm_op == 0 && bits.shift_by_reg && bits._zero != 0)
+		if ((opcode & 0x01f0f000) == 0x0130f000)
 		{
-			// MUL, MLA or SWP
+			// ARM7DI gives TEQP special 32-bit-mode semantics: privileged
+			// execution restores CPSR from SPSR and User execution is a no-op.
+			// Keep that mode-changing compatibility operation on the reference path.
 			op.op_type = ArmOp::FALLBACK;
 			op.arg[0] = ArmOp::Operand(opcode);
 			op.cycles = 0;
+			return op;
+		}
+		if (bits.imm_op == 0 && bits.shift_by_reg && bits._zero != 0)
+		{
+			// Multiply, swap, and later extra load/store encodings share bits
+			// 7 and 4. The reference core classifies the ARM7DI-valid subset.
+			op.op_type = ArmOp::FALLBACK;
+			op.arg[0] = ArmOp::Operand(opcode);
+			op.cycles = 0;
+			bool validMultiply = (opcode & 0x0FC000F0) == 0x00000090
+					|| (opcode & 0x0FC000F0) == 0x000000D0;
+			bool validSwap = (opcode & 0x0FB00FF0) == 0x01000090;
+			if (!validMultiply && !validSwap)
+				op.flags |= ArmOp::OP_SETS_PC;
 			return op;
 		}
 		if (bits.op_type >= (u32)ArmOp::TST && bits.op_type <= ArmOp::CMN && bits.set_flags == 0)
@@ -160,46 +189,65 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 			op.spsr = bits.op_type & 2;
 			if ((bits.full & 0x0FBF0FFF) == 0x010F0000)
 			{
+				if (bits.rd == 15)
+				{
+					// ARM7DI forbids R15 as an MRS destination. Do not let a
+					// malformed guest instruction trip a host-side assertion;
+					// preserve the interpreter's implementation-defined behavior.
+					op.op_type = ArmOp::FALLBACK;
+					op.arg[0] = ArmOp::Operand(opcode);
+					op.cycles = 0;
+					return op;
+				}
 				op.op_type = ArmOp::MRS;
 				op.rd = ArmOp::Operand((Arm7Reg)bits.rd);
-				verify(bits.rd != 15);
 			}
-			else if ((bits.full & 0x0FB0FFF0) == 0x0120F000)
+			else if ((bits.full & 0x0FBFFFF0) == 0x0129F000)
 			{
 				op.op_type = ArmOp::MSR;
-				op.psrMask = (bits.full >> 16) & 0xF;
+				op.psrMask = 0xF;
 				op.arg[0] = ArmOp::Operand((Arm7Reg)bits.rm);
-				op.cycles++;
 			}
-			else if ((bits.full & 0x0DB0F000) == 0x0120F000)
+			else if ((bits.full & 0x0FBFFFF0) == 0x0128F000)
 			{
 				op.op_type = ArmOp::MSR;
-				op.psrMask = (bits.full >> 16) & 0xF;
-				if (bits.imm_op == 0)
-				{
-					// source is reg
-					op.arg[0] = ArmOp::Operand((Arm7Reg)bits.rm);
-					verify(bits.rm != 15);
-				}
-				else
-				{
-					u32 rotate = bits.rotate * 2;
-					op.arg[0] = ArmOp::Operand((bits.imm8 >> rotate) | (bits.imm8 << (32 - rotate)));
-				}
+				op.psrMask = 8;
+				op.arg[0] = ArmOp::Operand((Arm7Reg)bits.rm);
+			}
+			else if ((bits.full & 0x0DBFF000) == 0x0128F000)
+			{
+				op.op_type = ArmOp::MSR;
+				op.psrMask = 8;
+				u32 rotate = bits.rotate * 2;
+				op.arg[0] = ArmOp::Operand(decodeRotatedImmediate(bits.imm8, rotate));
 			}
 			else
 			{
-				// Unsupported op
-				op.op_type = ArmOp::MOV;
-				op.condition = ArmOp::AL;
-				op.flags = 0;
-				op.rd = ArmOp::Operand((Arm7Reg)0);
-				op.arg[0] = op.rd;
+				op.op_type = ArmOp::FALLBACK;
+				op.arg[0] = ArmOp::Operand(opcode);
+				op.cycles = 0;
+				op.flags |= ArmOp::OP_SETS_PC;
 			}
 			return op;
 		}
 		{
 			op.op_type = (ArmOp::OpType)bits.op_type;
+			// Register-controlled shifts use only Rs[7:0] and have several
+			// architecturally significant carry cases at 0, 32, and >32.
+			// The native backends don't implement those cases consistently.
+			// Keep them on the reference path until they can all preserve the
+			// exact ARM7 shifter semantics.
+			if (!bits.imm_op && bits.shift_by_reg)
+			{
+				const bool writesPc = !op.isCompOp() && bits.rd == 15;
+				op.op_type = ArmOp::FALLBACK;
+				op.arg[0] = ArmOp::Operand(opcode);
+				op.cycles = 0;
+				// interpret() owns condition and NZCV handling. Preserve only the
+				// block-ending property needed to keep its PC result intact.
+				op.flags = writesPc ? ArmOp::OP_SETS_PC : 0;
+				return op;
+			}
 			if (!op.isCompOp())
 				op.rd = ArmOp::Operand((Arm7Reg)bits.rd);
 			int argidx = 0;
@@ -215,7 +263,13 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 			if (bits.imm_op)
 			{
 				u32 rotate = bits.rotate * 2;
-				op.arg[argidx] = ArmOp::Operand((bits.imm8 >> rotate) | (bits.imm8 << (32 - rotate)));
+				u32 value = decodeRotatedImmediate(bits.imm8, rotate);
+				op.arg[argidx] = ArmOp::Operand(value);
+				if (rotate != 0)
+				{
+					op.immediateCarryValid = true;
+					op.immediateCarry = value >> 31;
+				}
 			}
 			else
 			{
@@ -246,10 +300,15 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 							op.arg[argidx] = ArmOp::Operand(next_pc << op.arg[argidx].shift_value);
 							break;
 						case ArmOp::LSR:
-							op.arg[argidx] = ArmOp::Operand(next_pc >> op.arg[argidx].shift_value);
+							// An immediate zero field encodes LSR #32, not LSR #0.
+							op.arg[argidx] = ArmOp::Operand(op.arg[argidx].shift_value == 0
+									? 0 : next_pc >> op.arg[argidx].shift_value);
 							break;
 						case ArmOp::ASR:
-							op.arg[argidx] = ArmOp::Operand((int)next_pc >> op.arg[argidx].shift_value);
+							// Likewise, a zero field is ASR #32. PC+8 is positive in
+							// ARM7 address space, so its sign-filled result is zero.
+							op.arg[argidx] = ArmOp::Operand(op.arg[argidx].shift_value == 0
+									? 0 : (u32)((s32)next_pc >> op.arg[argidx].shift_value));
 							break;
 						default:
 							break;
@@ -257,7 +316,19 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 					}
 					else
 					{
-						op.arg[argidx].setImmediate(arm_pc + (op.arg[argidx].shift_imm ? 8 : 12));
+						const bool writesPc = !op.isCompOp() && bits.rd == 15;
+						// Keeping R15 as a shifted native operand would require materializing
+						// its instruction-relative value, while changing it to an immediate
+						// discards the shift metadata. This includes logical flag-setting
+						// shifts and all ROR/RRX forms. Execute them on the reference path.
+						op.op_type = ArmOp::FALLBACK;
+						op.arg = {};
+						op.arg[0] = ArmOp::Operand(opcode);
+						op.rd = ArmOp::Operand();
+						op.cycles = 0;
+						// interpret() performs condition evaluation and all flag I/O itself.
+						op.flags = writesPc ? ArmOp::OP_SETS_PC : 0;
+						return op;
 					}
 				}
 			}
@@ -272,21 +343,15 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 					op.cycles += 3;
 					return op;
 				}
-				if (op.condition != ArmOp::AL || (op.flags & ArmOp::OP_SETS_FLAGS))
-				{
-					// TODO no support for conditional/setflags ops that set pc except the case above
-					op.op_type = ArmOp::FALLBACK;
-					op.arg[0] = ArmOp::Operand(opcode);
-					op.arg[1] = ArmOp::Operand();
-					op.arg[2] = ArmOp::Operand();
-					op.rd = ArmOp::Operand();
-					op.cycles = 0;
-				}
-				else
-				{
-					op.rd.getReg().armreg = R15_ARM_NEXT;
-					op.cycles++;
-				}
+				// All other data-processing writes to pc need ARM-state alignment,
+				// pipeline-refill timing, and (with S) SPSR restoration. The native
+				// ALU paths do not implement that complete combination.
+				op.op_type = ArmOp::FALLBACK;
+				op.arg[0] = ArmOp::Operand(opcode);
+				op.arg[1] = ArmOp::Operand();
+				op.arg[2] = ArmOp::Operand();
+				op.rd = ArmOp::Operand();
+				op.cycles = 0;
 				op.flags |= ArmOp::OP_SETS_PC;
 			}
 			if (op.op_type == ArmOp::ADC || op.op_type == ArmOp::SBC || op.op_type == ArmOp::RSC)
@@ -296,10 +361,25 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 
 	case 1: // LDR/STR
 		{
+			if (bits.imm_op && (opcode & 0x10))
+			{
+				// ARM7DI reserves the 011...1 encoding as Undefined; bit 4
+				// must be zero for a single-transfer register offset.
+				op.op_type = ArmOp::FALLBACK;
+				op.arg[0] = ArmOp::Operand(opcode);
+				op.cycles = 0;
+				op.flags |= ArmOp::OP_SETS_PC;
+				return op;
+			}
 			op.add_offset = bits.up;
 			op.byte_xfer = bits.byte;
 			op.pre_index = bits.pre_index;
-			op.write_back = (bits.write_back || !bits.pre_index) && bits.rd != bits.rn && (bits.imm_op != 0 || bits.imm12 != 0);
+			// LDR with Rd == Rn and write-back has an architecturally ambiguous
+			// collision, so preserve the existing no-write-back choice. STR has no
+			// such collision: it stores the old base and then updates Rn.
+			op.write_back = (bits.write_back || !bits.pre_index)
+					&& (!bits.load || bits.rd != bits.rn)
+					&& (bits.imm_op != 0 || bits.imm12 != 0);
 			if (bits.load)
 			{
 				op.op_type = ArmOp::LDR;
@@ -307,16 +387,13 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 				if (op.rd.getReg().armreg == RN_PC)			// LDR w/ rd=pc
 				{
 					op.flags |= ArmOp::OP_SETS_PC;
-					if (op.condition != ArmOp::AL)
-					{
-						// TODO no support for conditional ops
-						op.op_type = ArmOp::FALLBACK;
-						op.arg[0] = ArmOp::Operand(opcode);
-						op.cycles = 0;
-						return op;
-					}
-					op.rd.setReg(R15_ARM_NEXT);
-					op.cycles++;
+					// The native memory paths don't apply ARM-state PC alignment,
+					// and LDR pc also has pipeline-refill timing. Keep all forms on
+					// the reference path so both behaviors remain identical.
+					op.op_type = ArmOp::FALLBACK;
+					op.arg[0] = ArmOp::Operand(opcode);
+					op.cycles = 0;
+					return op;
 				}
 				op.cycles += 4;
 			}
@@ -329,6 +406,19 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 				op.cycles += 3;
 			}
 			op.arg[0] = ArmOp::Operand((Arm7Reg)bits.rn);
+			if (!bits.load && bits.rd == bits.rn && bits.pre_index && op.write_back)
+			{
+				// ARM7DI forbids a write-back store whose source is also the base,
+				// leaving its result implementation-defined. Preserve the reference
+				// core's pre-index ordering (updated base is stored) instead of letting
+				// the SSA split choose a different result.
+				op.op_type = ArmOp::FALLBACK;
+				op.arg[0] = ArmOp::Operand(opcode);
+				op.arg[1] = ArmOp::Operand();
+				op.arg[2] = ArmOp::Operand();
+				op.cycles = 0;
+				return op;
+			}
 			if (op.arg[0].getReg().armreg == RN_PC && op.write_back)
 			{
 				// LDR/STR w pc-based offset and write-back
@@ -380,7 +470,7 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 		{
 			// B, BL
 			op.op_type = bits.op_type & 8 ? ArmOp::BL : ArmOp::B;	// L bit
-			op.arg[0] = ArmOp::Operand(arm_pc + 8 + (((int)(opcode & 0xffffff) << 8) >> 6));
+			op.arg[0] = ArmOp::Operand(arm_pc + 8 + decodeBranchOffset(opcode));
 			op.flags |= ArmOp::OP_SETS_PC;
 			op.cycles += 3;
 		}
@@ -389,7 +479,10 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 			// LDM/STM
 			u32 reg_list = opcode & 0xffff;
 			// one register selected and no PSR
-			if (!(opcode & (1 << 22)) && cpuBitsSet[reg_list & 255] + cpuBitsSet[(reg_list >> 8) & 255] == 1)
+			if (!(opcode & (1 << 22))
+					&& cpuBitsSet[reg_list & 255] + cpuBitsSet[(reg_list >> 8) & 255] == 1
+					&& (bits.pre_index || bits.write_back)
+					&& (!bits.write_back || !(reg_list & (1u << bits.rn))))
 			{
 				if (opcode & (1 << 20))
 				{
@@ -406,8 +499,8 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 					newbits.up = bits.up;
 					//Word/Byte
 					//newbits.byte = 0;
-					//Write back (must be 0 for post-incr)
-					newbits.write_back = bits.write_back & bits.pre_index;
+					//Write back (post-indexed no-writeback forms use fallback)
+					newbits.write_back = bits.write_back;
 					//Load
 					newbits.load = 1;
 
@@ -423,7 +516,6 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 					arm_printf("ARM: MEM TFX R %08X -> %08X", opcode, newbits.full);
 
 					op = decodeArmOp(newbits.full, arm_pc);
-					op.cycles += 4;
 					return op;
 				}
 				//STM common case
@@ -439,8 +531,8 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 					newbits.up = bits.up;
 					//Word/Byte
 					//newbits.byte = 0;
-					//Write back (must be 0 for PI)
-					newbits.write_back = bits.pre_index;
+					//Write back (post-indexed no-writeback forms use fallback)
+					newbits.write_back = bits.write_back;
 					//Load
 					newbits.load = 0;
 
@@ -456,7 +548,6 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 					arm_printf("ARM: MEM TFX W %08X -> %08X", opcode, newbits.full);
 
 					op = decodeArmOp(newbits.full, arm_pc);
-					op.cycles += 4;
 					return op;
 				}
 			}
@@ -473,8 +564,9 @@ static ArmOp decodeArmOp(u32 opcode, u32 arm_pc)
 		op.op_type = ArmOp::FALLBACK;
 		op.arg[0] = ArmOp::Operand(opcode);
 		op.cycles = 0;
-		if (bits.imm_op == 1 && (bits.op_type & 8)) // SWI
-			op.flags |= ArmOp::OP_SETS_PC;
+		// AICA has no coprocessor, so both coprocessor instructions and SWI
+		// leave sequential execution through an exception.
+		op.flags |= ArmOp::OP_SETS_PC;
 		break;
 	}
 
@@ -560,6 +652,10 @@ static void block_ssa_pass()
 
 void compile()
 {
+	// The dispatcher is the cycle-budget and FIQ sampling boundary. Keeping a
+	// translated block to one architectural instruction prevents execution
+	// from running up to 31 instructions past either boundary.
+	constexpr u32 MaxBlockInstructions = 1;
 	//Get the code ptr
 	void* rv = icPtr;
 
@@ -578,12 +674,10 @@ void compile()
 	u32 cycles = 0;
 
 	arm_printf("ARM7 Block %x", pc);
-	//the ops counter is used to terminate the block (max op count for a single block is 32 currently)
-	//We don't want too long blocks for timing accuracy
-	for (u32 ops = 0; ops < 32; ops++)
+	for (u32 ops = 0; ops < MaxBlockInstructions; ops++)
 	{
 		//Read opcode ...
-		u32 opcd = *(u32*)&aica_ram[pc & ARAM_MASK];
+		u32 opcd = *(u32*)&aica_ram[pc & soundRamMask()];
 
 #if 0
 		std::ostringstream ostr;
@@ -593,13 +687,33 @@ void compile()
 #endif
 
 		ArmOp last_op = decodeArmOp(opcd, pc);
+		if (last_op.condition != ArmOp::AL && last_op.op_type != ArmOp::FALLBACK)
+		{
+			// Block cycle charges are unconditional, but ARM instruction-specific
+			// cycles are incurred only when the condition passes. Keep conditional
+			// instructions on the reference path until cycle subtraction is emitted
+			// inside each backend's condition guard.
+			const bool msr = last_op.op_type == ArmOp::MSR;
+			const u8 flags = last_op.flags;
+			last_op.op_type = ArmOp::FALLBACK;
+			last_op.arg = {};
+			last_op.arg[0] = ArmOp::Operand(opcd);
+			last_op.cycles = 0;
+			// MSR must still end the block so a newly unmasked FIQ is sampled at
+			// the next instruction boundary. OP_SETS_PC provides that boundary;
+			// the sequential PC is installed by the conditional-block path below.
+			last_op.flags = flags | (msr ? ArmOp::OP_SETS_PC : 0);
+		}
 		cycles += last_op.cycles;
 
 		//Goto next opcode
 		pc += 4;
 
-		if (opcd != 0 && opcd != 0x41474553)	// andeq r0, r0, r0 (== NOP) and 'SEGA'
-		{										// ARAM is filled with these at start up
+		// 0 is ANDEQ r0,r0,r0 and is side-effect free in either condition
+		// outcome. Do not special-case ARAM's "SEGA" fill word: it is a real
+		// conditional encoding and must trap or execute if control reaches it.
+		if (opcd != 0)
+		{
 
 			if (last_op.op_type == ArmOp::FALLBACK)
 			{
@@ -633,10 +747,20 @@ void compile()
 				break;
 			}
 			block_ops.push_back(last_op);
+			if (last_op.op_type == ArmOp::MSR)
+			{
+				// A CPSR write can unmask a pending FIQ. Return to the dispatcher
+				// so it is recognized at the next instruction boundary.
+				ArmOp armop(ArmOp::MOV, ArmOp::AL);
+				armop.rd = ArmOp::Operand(R15_ARM_NEXT);
+				armop.arg[0] = ArmOp::Operand(pc);
+				block_ops.push_back(armop);
+				break;
+			}
 		}
 
 		//block size limit ?
-		if (ops == 31)
+		if (ops + 1 == MaxBlockInstructions)
 		{
 			// Update armNextPC
 			ArmOp armop(ArmOp::MOV, ArmOp::AL);
@@ -736,7 +860,7 @@ void run(u32 samples)
 {
 	for (u32 i = 0; i < samples; i++)
 	{
-		if (Arm7Enabled)
+		if (Arm7Enabled && soundCpuAccessAllowed(CommonData->MRWINH))
 		{
 			arm_Reg[CYCL_CNT].I += ARM_CYCLES_PER_SAMPLE;
 			arm_mainloop(arm_Reg, recompiler::EntryPoints);

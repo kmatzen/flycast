@@ -13,6 +13,8 @@
 #include "sh4_interrupts.h"
 #include "sh4_core.h"
 #include "sh4_mmr.h"
+#include "sh4_sched.h"
+#include "modules/dmac.h"
 #include "oslib/oslib.h"
 #include "debug/gdb_server.h"
 #include "serialize.h"
@@ -98,13 +100,26 @@ alignas(64) static u32 InterruptLevelBit[16];
 static void Do_Interrupt(Sh4ExceptionCode intEvn);
 
 static u32 interrupt_vpend; // Vector of pending interrupts
+static u32 interrupt_visible_vpend; // Pending interrupts after INTC decision latency
 static u32 interrupt_vmask; // Vector of masked interrupts             (-1 inhibits all interrupts)
 static u32 decoded_srimask; // Vector of interrupts allowed by SR.IMSK (-1 inhibits all interrupts)
+static int interrupt_sched[sh4_INT_ID_COUNT];
+static int nmi_sched;
+static bool interrupts_initialized;
+static bool nmi_pending;
+static bool nmi_visible;
+static bool nmi_level = true;
+
+static constexpr u32 NMI_PENDING_BIT = 0x80000000u;
 
 //bit 0 ~ 27 : interrupt source 27:0. 0 = lowest level, 27 = highest level.
 static void recalc_pending_itrs()
 {
-	Sh4cntx.interrupt_pend = interrupt_vpend & interrupt_vmask & decoded_srimask;
+	const bool maskAll = INTC_ICR.MAI && !nmi_level;
+	Sh4cntx.interrupt_pend = maskAll ? 0
+			: interrupt_visible_vpend & interrupt_vmask & decoded_srimask;
+	if (nmi_visible && (!Sh4cntx.sr.BL || INTC_ICR.NMIB))
+		Sh4cntx.interrupt_pend |= NMI_PENDING_BIT;
 }
 
 //Rebuild sorted interrupt id table (priorities were updated)
@@ -112,8 +127,10 @@ void SIIDRebuild()
 {
 	int cnt = 0;
 	u32 vpend = interrupt_vpend;
+	u32 visible_vpend = interrupt_visible_vpend;
 	u32 vmask = interrupt_vmask;
 	interrupt_vpend = 0;
+	interrupt_visible_vpend = 0;
 	interrupt_vmask = 0;
 	//rebuild interrupt table
 	for (int ilevel = 0; ilevel < 16; ilevel++)
@@ -124,10 +141,13 @@ void SIIDRebuild()
 			{
 				InterruptEnvId[cnt] = InterruptSourceList[isrc].IntEvnCode;
 				u32 p = InterruptBit[isrc] & vpend;
+				u32 visible = InterruptBit[isrc] & visible_vpend;
 				u32 m = InterruptBit[isrc] & vmask;
 				InterruptBit[isrc] = 1 << cnt;
 				if (p)
 					interrupt_vpend |= InterruptBit[isrc];
+				if (visible)
+					interrupt_visible_vpend |= InterruptBit[isrc];
 				if (m)
 					interrupt_vmask |= InterruptBit[isrc];
 				cnt++;
@@ -154,19 +174,128 @@ int UpdateINTC()
 {
 	if (!Sh4cntx.interrupt_pend)
 		return 0;
+	if (nmi_visible && (!Sh4cntx.sr.BL || INTC_ICR.NMIB))
+	{
+		nmi_pending = false;
+		nmi_visible = false;
+		INTC_ICR.NMIB = 0;
+		Do_Interrupt(Sh4Ex_NmiInterrupt);
+		return 1;
+	}
 
-	Do_Interrupt(InterruptEnvId[bitscanrev(Sh4cntx.interrupt_pend)]);
+	Do_Interrupt(InterruptEnvId[bitscanrev(Sh4cntx.interrupt_pend & ~NMI_PENDING_BIT)]);
 	return 1;
+}
+
+int UpdateINTC_Sleep()
+{
+	if (nmi_visible)
+	{
+		nmi_pending = false;
+		nmi_visible = false;
+		INTC_ICR.NMIB = 0;
+		Do_Interrupt(Sh4Ex_NmiInterrupt);
+		return 1;
+	}
+
+	// Unlike normal execution, sleep and standby accept an interrupt even
+	// while SR.BL is set. SR.IMASK and the interrupt-controller source masks
+	// still apply, so select from the unblocked visible requests here rather
+	// than changing the ordinary cached pending vector.
+	const u32 sleepPending = interrupt_visible_vpend & interrupt_vmask
+			& ~InterruptLevelBit[Sh4cntx.sr.IMASK];
+	if (!sleepPending)
+		return 0;
+
+	Do_Interrupt(InterruptEnvId[bitscanrev(sleepPending)]);
+	return 1;
+}
+
+int sh4InterruptDecisionCycles(Sh4ExceptionCode event)
+{
+	if (event == Sh4Ex_NmiInterrupt)
+		return 9; // 1 Icyc + 4 Bcyc, with Bcyc = 2 Icyc on Dreamcast
+	if (event >= Sh4Ex_ExtInterrupt0 && event <= Sh4Ex_ExtInterruptE)
+		return 15; // 1 Icyc + 7 Bcyc, with Bcyc = 2 Icyc on Dreamcast
+	return 5; // 1 Icyc + 2 Bcyc for on-chip peripheral sources
+}
+
+int sh4InterruptEntryCycles(Sh4ExceptionCode event)
+{
+	(void)event;
+	return 4;
+}
+
+int sh4ExceptionEntryCycles(Sh4ExceptionCode event)
+{
+	(void)event;
+	return 4;
+}
+
+static int interruptDecisionCallback(int tag, int, int, void *)
+{
+	const InterruptID intr = static_cast<InterruptID>(tag);
+	if (interrupt_vpend & InterruptBit[intr])
+	{
+		interrupt_visible_vpend |= InterruptBit[intr];
+		recalc_pending_itrs();
+	}
+	return 0;
+}
+
+static int nmiDecisionCallback(int, int, int, void *)
+{
+	if (nmi_pending)
+	{
+		nmi_visible = true;
+		recalc_pending_itrs();
+	}
+	return 0;
+}
+
+void SetNmiLevel(bool high)
+{
+	if (high == nmi_level)
+		return;
+	const bool rising = !nmi_level && high;
+	nmi_level = high;
+	INTC_ICR.NMIL = high;
+	recalc_pending_itrs();
+
+	if (rising != (INTC_ICR.NMIE != 0) || nmi_pending)
+		return;
+	nmi_pending = true;
+	nmi_visible = false;
+	DMAC_Nmi();
+	if (interrupts_initialized)
+		sh4_sched_request(nmi_sched, sh4InterruptDecisionCycles(Sh4Ex_NmiInterrupt));
+	else
+	{
+		nmi_visible = true;
+		recalc_pending_itrs();
+	}
 }
 
 void SetInterruptPend(InterruptID intr)
 {
+	if (interrupt_vpend & InterruptBit[intr])
+		return;
 	interrupt_vpend |= InterruptBit[intr];
-	recalc_pending_itrs();
+	if (interrupts_initialized)
+		sh4_sched_request(interrupt_sched[intr],
+				sh4InterruptDecisionCycles(InterruptSourceList[intr].IntEvnCode));
+	else
+	{
+		interrupt_visible_vpend |= InterruptBit[intr];
+		recalc_pending_itrs();
+	}
 }
 void ResetInterruptPend(InterruptID intr)
 {
 	interrupt_vpend &= ~InterruptBit[intr];
+	interrupt_visible_vpend &= ~InterruptBit[intr];
+	if (interrupts_initialized)
+		sh4_sched_request(interrupt_sched[intr], -1);
 	recalc_pending_itrs();
 }
 
@@ -183,6 +312,7 @@ void ResetInterruptMask(InterruptID intr)
 
 static void Do_Interrupt(Sh4ExceptionCode intEvn)
 {
+	Sh4cntx.cycle_counter -= sh4InterruptEntryCycles(intEvn);
 	CCN_INTEVT = intEvn;
 
 	Sh4cntx.ssr = Sh4cntx.sr.getFull();
@@ -196,12 +326,52 @@ static void Do_Interrupt(Sh4ExceptionCode intEvn)
 	debugger::subroutineCall();
 }
 
+static void enterResetException(Sh4ExceptionCode expEvn)
+{
+	// Reset exceptions initialize the on-chip modules as a manual reset does.
+	// This deliberately stops short of the platform-wide soft-reset path: RAM
+	// and external Dreamcast/Naomi devices are outside the SH-4 reset domain.
+	sh4_mmr_reset(false);
+
+	Sh4cntx.cycle_counter -= sh4ExceptionEntryCycles(expEvn);
+	CCN_EXPEVT = expEvn;
+	Sh4cntx.vbr = 0;
+	// T, S, Q, and M are undefined after reset; preserve their previous values
+	// rather than inventing a deterministic result for them.
+	Sh4cntx.sr.MD = 1;
+	Sh4cntx.sr.RB = 1;
+	Sh4cntx.sr.BL = 1;
+	Sh4cntx.sr.IMASK = 15;
+	Sh4cntx.sr.FD = 0;
+	UpdateSR();
+	Sh4cntx.fpscr.full = 0x00040001;
+	Sh4Context::UpdateFPSCR(&Sh4cntx);
+	Sh4cntx.pc = 0xa0000000;
+	debugger::subroutineCall();
+}
+
 void Do_Exception(u32 epc, Sh4ExceptionCode expEvn)
 {
 	assert((expEvn >= Sh4Ex_TlbMissRead && expEvn <= Sh4Ex_SlotIllegalInstr)
 			|| expEvn == Sh4Ex_FpuDisabled || expEvn == Sh4Ex_SlotFpuDisabled || expEvn == Sh4Ex_UserBreak);
-	if (Sh4cntx.sr.BL != 0)
-		throw FlycastException("Fatal: SH4 exception when blocked");
+
+	if (expEvn == Sh4Ex_TlbMultiHit)
+	{
+		// Instruction and operand TLB multiple hits are reset-class
+		// exceptions. Unlike ordinary exceptions they do not save SPC/SSR/SGR
+		// or use VBR; execution restarts at the fixed reset vector.
+		enterResetException(expEvn);
+		return;
+	}
+	if (Sh4cntx.sr.BL != 0 && expEvn != Sh4Ex_UserBreak)
+	{
+		// A general exception while exceptions are blocked causes a manual
+		// reset. SPC and SSR become undefined; keep their previous values rather
+		// than inventing deterministic replacement data.
+		enterResetException(Sh4Ex_ManualReset);
+		return;
+	}
+	Sh4cntx.cycle_counter -= sh4ExceptionEntryCycles(expEvn);
 	CCN_EXPEVT = expEvn;
 
 	Sh4cntx.ssr = Sh4cntx.sr.getFull();
@@ -212,7 +382,14 @@ void Do_Exception(u32 epc, Sh4ExceptionCode expEvn)
 	Sh4cntx.sr.RB = 1;
 	UpdateSR();
 
-	Sh4cntx.pc = Sh4cntx.vbr + (expEvn == Sh4Ex_TlbMissRead || expEvn == Sh4Ex_TlbMissWrite ? 0x400 : 0x100);
+	if (expEvn == Sh4Ex_UserBreak && (UBC_BRCR & 1) != 0)
+		// BRCR.UBDE selects the dedicated debug handler address directly; DBR
+		// is not a vector base and therefore receives no exception offset.
+		Sh4cntx.pc = Sh4cntx.dbr;
+	else
+		Sh4cntx.pc = Sh4cntx.vbr
+				+ (expEvn == Sh4Ex_TlbMissRead || expEvn == Sh4Ex_TlbMissWrite
+						? 0x400 : 0x100);
 	debugger::subroutineCall();
 
 	//printf("RaiseException: from pc %08x to %08x, event %x\n", epc, next_pc, expEvn);
@@ -222,14 +399,29 @@ void Do_Exception(u32 epc, Sh4ExceptionCode expEvn)
 //Init/Res/Term
 void interrupts_init()
 {
+	for (int i = 0; i < sh4_INT_ID_COUNT; i++)
+		interrupt_sched[i] = sh4_sched_register(i, interruptDecisionCallback);
+	nmi_sched = sh4_sched_register(0, nmiDecisionCallback);
+	interrupts_initialized = true;
 }
 
 void interrupts_reset()
 {
+	if (interrupts_initialized)
+		for (int sched : interrupt_sched)
+			sh4_sched_request(sched, -1);
+	if (interrupts_initialized)
+		sh4_sched_request(nmi_sched, -1);
+
 	//reset interrupts cache
 	interrupt_vpend = 0;
+	interrupt_visible_vpend = 0;
 	interrupt_vmask = 0xFFFFFFFF;
 	decoded_srimask = 0;
+	nmi_pending = false;
+	nmi_visible = false;
+	nmi_level = true;
+	INTC_ICR.NMIL = 1;
 
 	for (u32 i = 0; i < sh4_INT_ID_COUNT; i++)
 		InterruptBit[i] = 1 << i;
@@ -240,6 +432,14 @@ void interrupts_reset()
 
 void interrupts_term()
 {
+	interrupts_initialized = false;
+	for (int& sched : interrupt_sched)
+	{
+		sh4_sched_unregister(sched);
+		sched = -1;
+	}
+	sh4_sched_unregister(nmi_sched);
+	nmi_sched = -1;
 }
 
 void interrupts_serialize(Serializer& ser)
@@ -248,9 +448,15 @@ void interrupts_serialize(Serializer& ser)
 	ser << InterruptBit;
 	ser << InterruptLevelBit;
 	ser << interrupt_vpend;
+	ser << interrupt_visible_vpend;
 	ser << interrupt_vmask;
 	ser << decoded_srimask;
-
+	for (int sched : interrupt_sched)
+		sh4_sched_serialize(ser, sched);
+	ser << nmi_pending;
+	ser << nmi_visible;
+	ser << nmi_level;
+	sh4_sched_serialize(ser, nmi_sched);
 }
 
 void interrupts_deserialize(Deserializer& deser)
@@ -259,6 +465,31 @@ void interrupts_deserialize(Deserializer& deser)
 	deser >> InterruptBit;
 	deser >> InterruptLevelBit;
 	deser >> interrupt_vpend;
+	if (deser.version() >= Deserializer::V67)
+		deser >> interrupt_visible_vpend;
+	else
+		interrupt_visible_vpend = interrupt_vpend;
 	deser >> interrupt_vmask;
 	deser >> decoded_srimask;
+	if (deser.version() >= Deserializer::V67)
+		for (int sched : interrupt_sched)
+			sh4_sched_deserialize(deser, sched);
+	else
+		for (int sched : interrupt_sched)
+			sh4_sched_request(sched, -1);
+	if (deser.version() >= Deserializer::V125)
+	{
+		deser >> nmi_pending;
+		deser >> nmi_visible;
+		deser >> nmi_level;
+		sh4_sched_deserialize(deser, nmi_sched);
+	}
+	else
+	{
+		nmi_pending = false;
+		nmi_visible = false;
+		nmi_level = INTC_ICR.NMIL;
+		sh4_sched_request(nmi_sched, -1);
+	}
+	recalc_pending_itrs();
 }

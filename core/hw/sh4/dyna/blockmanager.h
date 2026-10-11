@@ -13,7 +13,14 @@ typedef std::shared_ptr<RuntimeBlockInfo> RuntimeBlockInfoPtr;
 
 struct RuntimeBlockInfo
 {
+	static constexpr u32 FpscrDecodeMask = 0x00180003; // PR, SZ and RM
+
 	bool Setup(u32 pc,fpscr_t fpu_cfg);
+	bool matchesFpscr(fpscr_t current) const
+	{
+		return !has_fpu_op
+				|| ((current.full ^ fpu_cfg.full) & FpscrDecodeMask) == 0;
+	}
 
 	u32 addr;
 	u32 vaddr;
@@ -21,9 +28,19 @@ struct RuntimeBlockInfo
 
 	u32 host_code_size;	//in bytes
 	u32 sh4_code_size; //in bytes
+	u32 tail_addr;		// physical address of a noncontiguous cross-page delay slot
+	u16 tail_opcode;
+
+	u32 contiguousCodeSize() const {
+		return tail_addr == 0xffffffff ? sh4_code_size : sh4_code_size - sizeof(tail_opcode);
+	}
+	u32 tailVaddr() const {
+		return vaddr + sh4_code_size - sizeof(tail_opcode);
+	}
 
 	fpscr_t fpu_cfg;
 	u32 guest_cycles;
+	u32 entry_cycles;	// issue cycles consumed if the first instruction faults
 	u32 guest_opcodes;
 	u32 host_opcodes;	// set by host code generator, optional
 	bool has_fpu_op;
@@ -77,6 +94,7 @@ void bm_AddBlock(RuntimeBlockInfo* blk);
 void bm_DiscardBlock(RuntimeBlockInfo* block);
 void bm_Reset();
 void bm_ResetCache();
+void bm_ResetLinks();
 void bm_ResetTempCache(bool full);
 void bm_Periodical_1s();
 

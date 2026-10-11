@@ -31,17 +31,24 @@ struct CHDDisc : Disc
 
 struct CHDTrack : TrackFile
 {
+	enum class Subcode { None, PackedRW, RawPW };
+
 	CHDDisc* disc;
 	s32 Offset;
 	u32 fmt;
+	SectorFormat sectorFormat;
 	bool swap_bytes;
+	Subcode subcodeFormat;
 
-	CHDTrack(CHDDisc* disc, s32 Offset, u32 fmt, bool swap_bytes)
+	CHDTrack(CHDDisc* disc, s32 Offset, u32 fmt, SectorFormat sectorFormat,
+			bool swap_bytes, Subcode subcodeFormat)
 	{
 		this->disc = disc;
 		this->Offset = Offset;
 		this->fmt = fmt;
+		this->sectorFormat = sectorFormat;
 		this->swap_bytes = swap_bytes;
+		this->subcodeFormat = subcodeFormat;
 	}
 
 	bool Read(u32 FAD, u8* dst, SectorFormat* sector_type, u8* subcode, SubcodeFormat* subcode_type) override
@@ -68,23 +75,19 @@ struct CHDTrack : TrackFile
 				dst[i + 1] = b;
 			}
 		}
-		switch (fmt)
-		{
-		case 2048:
-			*sector_type = SECFMT_2048_MODE1;
-			break;
-		case 2336:
-			*sector_type = SECFMT_2336_MODE2;
-			break;
-		case 2352:
-		default:
-			*sector_type = SECFMT_2352;
-			break;
-		}
+		*sector_type = sectorFormat;
 
-		//While space is reserved for it, the images contain no actual subcodes
-		//memcpy(subcode,disc->hunk_mem+hunk_ofs*(2352+96)+2352,96);
-		*subcode_type = SUBFMT_NONE;
+		if (subcodeFormat == Subcode::None)
+			*subcode_type = SUBFMT_NONE;
+		else
+		{
+			const u8 *source = disc->hunk_mem + hunk_ofs * (2352 + 96) + 2352;
+			memcpy(subcode, source, 96);
+			if (subcodeFormat == Subcode::PackedRW)
+				for (u32 i = 0; i < 96; i++)
+					subcode[i] &= 0x3f;
+			*subcode_type = SUBFMT_96;
+		}
 
 		return true;
 	}
@@ -100,10 +103,29 @@ static u32 getSectorSize(const std::string& type)
 		return 2352;	// CDROM Mode1 Data (raw)
 	else if (type == "MODE2" || type == "MODE2/2336")
 		return 2336;	// CDROM XA Mode2 Data
+	else if (type == "MODE2_FORM1" || type == "MODE2/2048")
+		return 2048;
+	else if (type == "MODE2_FORM2" || type == "MODE2/2324")
+		return 2324;
+	else if (type == "MODE2_FORM_MIX")
+		return 2336;
 	else if (type == "MODE2_RAW" || type == "MODE2/2352" || type == "CDI/2352")
 		return 2352;	// CDROM XA Mode2 Data
 
 	throw FlycastException(strprintf(i18n::T("chd: track type %s is not supported"), type.c_str()));
+}
+
+static SectorFormat getSectorFormat(const std::string& type)
+{
+	if (type == "MODE1" || type == "MODE1/2048")
+		return SECFMT_2048_MODE1;
+	if (type == "MODE2_FORM1" || type == "MODE2/2048")
+		return SECFMT_2048_MODE2_FORM1;
+	if (type == "MODE2_FORM2" || type == "MODE2/2324")
+		return SECFMT_2324_MODE2_FORM2;
+	if (type == "MODE2" || type == "MODE2/2336" || type == "MODE2_FORM_MIX")
+		return SECFMT_2336_MODE2;
+	return SECFMT_2352;
 }
 
 void CHDDisc::tryOpen(const char* file)
@@ -144,6 +166,7 @@ void CHDDisc::tryOpen(const char* file)
 	bool isGdrom = head->version < 5;	// MIL-CDs only supported starting with CHD v5
 	bool needAudioSwap = false;
 	u32 lastPregap = 0;
+	bool hasMode2Track = false;
 
 	for(;;)
 	{
@@ -187,33 +210,45 @@ void CHDDisc::tryOpen(const char* file)
 
 		if (tkid != (int)tracks.size() + 1)
 			throw FlycastException(i18n::Ts("Unexpected track number"));
+		if (frames <= 0 || pregap < 0 || postgap < 0 || padframes < 0)
+			throw FlycastException(i18n::Ts("Invalid CHD track geometry"));
 
-		// Subcode data is stored in the CHD but we don't use it. It doesn't change the sector layout.
-		if (strcmp(subtype, "NONE") != 0)
-			WARN_LOG(GDROM, "chd: track %d has subcode data (%s). Ignoring", tkid, subtype);
-		// Postgap sectors are never stored in the file
-		if (postgap != 0)
-			WARN_LOG(GDROM, "chd: track %d has a %d frame postgap. Ignoring", tkid, postgap);
-
+		CHDTrack::Subcode subcodeFormat;
+		if (strcmp(subtype, "NONE") == 0)
+			subcodeFormat = CHDTrack::Subcode::None;
+		else if (strcmp(subtype, "RW") == 0)
+			subcodeFormat = CHDTrack::Subcode::PackedRW;
+		else if (strcmp(subtype, "RW_RAW") == 0)
+			subcodeFormat = CHDTrack::Subcode::RawPW;
+		else
+			throw FlycastException(strprintf(i18n::T("Invalid CHD subcode type: %s"), subtype));
 		DEBUG_LOG(GDROM, "%s", temp);
 		// When PGTYPE is prefixed with 'V', the pregap sectors are included in the track data,
 		// and thus counted in FRAMES. Otherwise they only take up space on the disc.
 		const u32 pregapInFile = pregap > 0 && pgtype[0] == 'V' ? (u32)pregap : 0;
 		if ((int)pregapInFile > frames)
 			throw FlycastException(i18n::Ts("Invalid CHD: pregap is longer than the track"));
+		if ((u32)padframes > (u32)frames - pregapInFile)
+			throw FlycastException(i18n::Ts("Invalid CHD: padding is longer than the track"));
+		const u64 trackEnd = (u64)total_frames + pregap + frames - pregapInFile;
+		if (trackEnd + postgap > std::numeric_limits<u32>::max())
+			throw FlycastException(i18n::Ts("Invalid CHD: track range overflow"));
 
 		Track t;
 		// StartFAD is the position of INDEX 01, hence after the pregap
 		t.StartFAD = total_frames + pregap;
 		lastPregap = pregap;
-		total_frames = t.StartFAD + frames - pregapInFile;
-		t.EndFAD = total_frames - 1 - padframes;
+		t.EndFAD = (u32)trackEnd - 1 - padframes;
+		// Postgap frames occupy disc addresses but are not stored in the CHD.
+		total_frames = (u32)trackEnd + postgap;
 		t.CTRL = strcmp(type,"AUDIO") == 0 ? 0 : 4;
 
 		u32 sectorSize = getSectorSize(type);
+		hasMode2Track |= strncmp(type, "MODE2", 5) == 0 || strncmp(type, "CDI", 3) == 0;
 		t.file = new CHDTrack(this, Offset + pregapInFile - t.StartFAD, sectorSize,
+							  getSectorFormat(type),
 							  // audio tracks are byteswapped in recent CHDv5+
-							  !t.isDataTrack() && needAudioSwap);
+							  !t.isDataTrack() && needAudioSwap, subcodeFormat);
 
 		// CHD files are padded, so we have to respect the offset
 		int padded = (frames + CD_TRACK_PADDING - 1) / CD_TRACK_PADDING;
@@ -264,15 +299,15 @@ void CHDDisc::tryOpen(const char* file)
 		{
 			// Single-session disc: mixed mode or audio CD. Single-track CD-ROMs aren't
 			// supported with the exception of naomi mj1/cdp-10002b.chd
-			type = CdRom;
-			if (tracks.size() > 1)
-				for (const Track& track : tracks)
-					if (track.isDataTrack()) {
-						type = CdRom_XA;
-						break;
-					}
+			const bool hasData = std::any_of(tracks.begin(), tracks.end(),
+					[](const Track& track) { return track.isDataTrack(); });
+			const bool hasAudio = std::any_of(tracks.begin(), tracks.end(),
+					[](const Track& track) { return !track.isDataTrack(); });
+			type = !hasData ? CdDA : hasAudio || hasMode2Track ? CdRom_XA : CdRom;
 			EndFAD = LeadOut.StartFAD = total_frames;
 		}
+		LeadOut.ADR = 1;
+		LeadOut.CTRL = tracks.back().CTRL;
 	}
 }
 

@@ -2,6 +2,7 @@
 #include "ta_ctx.h"
 #include "hw/holly/holly_intc.h"
 #include "pvr_mem.h"
+#include "pvr_regs.h"
 
 /*
 	Threaded TA Implementation
@@ -568,11 +569,15 @@ static void DYNACALL ta_thd_data32_i(const simd256_t *data)
 
 void DYNACALL ta_vtx_data32(const SQBuffer *data)
 {
+	if (SOFTRESET & 1)
+		return;
 	ta_thd_data32_i((const simd256_t *)data);
 }
 
 void ta_vtx_data(const SQBuffer *data, u32 size)
 {
+	if (SOFTRESET & 1)
+		return;
 	while (size >= 4)
 	{
 		ta_thd_data32_i((simd256_t *)data);

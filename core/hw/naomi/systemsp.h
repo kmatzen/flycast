@@ -238,6 +238,8 @@ private:
 		u8 reg84 = 0;
 		u8 buffer[SECTOR_SIZE];
 		u32 bufferIndex = 0;
+		u8 pendingCommand = 0;
+		u16 sectorsRemaining = 0;
 	} ata;
 
 	enum class CmdState {

@@ -14,15 +14,28 @@ target_sources(${PROJECT_NAME} PRIVATE
         src/test_stubs.cpp
         src/serialize_test.cpp
         src/AicaArmTest.cpp
+        src/AicaDspTest.cpp
         src/Sh4InterpreterTest.cpp
         src/MmuTest.cpp
         src/HttpTest.cpp
         src/IniFileTest.cpp
+        src/hw/gdrom/GdromTest.cpp
+        src/hw/flashrom/FlashRomTest.cpp
+        src/hw/holly/HollyIntcTest.cpp
+        src/hw/maple/MapleTest.cpp
+        src/hw/maple/VmuCpuTest.cpp
+        src/hw/maple/VmuEmulatorTest.cpp
+        src/hw/maple/VmuMemoryTest.cpp
+        src/hw/maple/VmuPicTest.cpp
+        src/hw/maple/VmuTimersTest.cpp
+        src/hw/bba/BbaTest.cpp
+        src/hw/maple/VmuTest.cpp
         src/hw/modem/v42Test.cpp
         src/hw/modem/v42bisTest.cpp
         src/hw/sh4/modules/TimerTest.cpp
         src/imgread/ChdTest.cpp
         src/imgread/CueTest.cpp
+        src/imgread/GdromSectorTest.cpp
         src/imgread/GdiTest.cpp
         src/input/ButtonComboTest.cpp
         src/input/GamepadInputHandlingTest.cpp
@@ -33,6 +46,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         src/input/InputSetTest.cpp
         src/input/SDLControllerMappingTest.cpp
         src/oslib/I18nTest.cpp
+        src/rend/SoftwareRasterizerTest.cpp
         src/util/PeriodicThreadTest.cpp
         src/util/TsQueueTest.cpp
         src/util/WorkerThreadTest.cpp)

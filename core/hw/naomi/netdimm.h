@@ -18,6 +18,7 @@
  */
 #pragma once
 #include "gdcartridge.h"
+#include "hw/sh4/sh4_sched.h"
 #include "network/net_platform.h"
 
 class NetDimm : public GDCartridge
@@ -38,6 +39,7 @@ protected:
 private:
 	void systemCmd(int cmd);
 	void netCmd(int cmd);
+	void schedulePoll();
 
 	template<typename T>
 	void poke(u32 address, T value)
@@ -129,6 +131,5 @@ private:
 	bool finalTuned = false;
 
 	u32 dimmBufferOffset = 0x0f000000;
-
-	static constexpr int POLL_CYCLES = SH4_MAIN_CLOCK / 60;
+	FixedFrequencyClock<60> pollClock;
 };

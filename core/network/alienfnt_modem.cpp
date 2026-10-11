@@ -29,7 +29,7 @@ struct ModemEmu : public SerialPort::Pipe
 {
 	ModemEmu() {
 		SCIFSerialPort::Instance().setPipe(this);
-		schedId = sh4_sched_register(0, schedCallback);
+		schedId = sh4_sched_register(0, schedCallback, this);
 	}
 
 	~ModemEmu() override {
@@ -115,7 +115,8 @@ private:
 			send("CONNECT 14400");
 			net::modbba::start();
 			dataMode = true;
-			sh4_sched_request(schedId, SH4_MAIN_CLOCK / 60);
+			pollClock.reset();
+			sh4_sched_request(schedId, pollClock.nextCycles());
 		}
 		if (line.substr(0, 3) == "ATH")
 		{
@@ -138,7 +139,7 @@ private:
 	static int schedCallback(int tag, int cycles, int lag, void *arg)
 	{
 		SCIFSerialPort::Instance().updateStatus();
-		return SH4_MAIN_CLOCK / 60;
+		return static_cast<ModemEmu *>(arg)->pollClock.nextCycles();
 	}
 
 	std::deque<char> toSend;
@@ -147,6 +148,7 @@ private:
 	int pluses = 0;
 	u64 plusTime = 0;
 	bool dataMode = false;
+	FixedFrequencyClock<60> pollClock;
 };
 
 static std::unique_ptr<ModemEmu> modemEmu;

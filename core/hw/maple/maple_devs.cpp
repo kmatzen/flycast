@@ -2,7 +2,9 @@
 #include "maple_cfg.h"
 #include "maple_helper.h"
 #include "maple_if.h"
+#include "vmu_emulator.h"
 #include "hw/pvr/spg.h"
+#include "hw/sh4/sh4_sched.h"
 #include "audio/audiostream.h"
 #include "oslib/oslib.h"
 #include "oslib/storage.h"
@@ -11,14 +13,16 @@
 #include "cfg/option.h"
 #include "input/maplelink.h"
 #include <zlib.h>
+#include <algorithm>
 #include <cerrno>
 #include <ctime>
 #include <thread>
 #include <chrono>
+#include <memory>
 
 const char* maple_sega_controller_name = "Dreamcast Controller";
 const char* maple_sega_vmu_name        = "Visual Memory";
-const char* maple_sega_kbd_name        = "Emulated Dreamcast Keyboard";
+const char* maple_sega_kbd_name        = "Dreamcast Keyboard";
 const char* maple_sega_mouse_name      = "Emulated Dreamcast Mouse";
 const char* maple_sega_dreameye_name_1 = "Dreamcast Camera Flash  Device";
 const char* maple_sega_dreameye_name_2 = "Dreamcast Camera Flash LDevice";
@@ -68,6 +72,30 @@ static inline void mutualExclusion(u32& keycode, u32 mask)
 {
 	if ((keycode & mask) == 0)
 		keycode |= mask;
+}
+
+// The six buttons visible through the standard VMU clock function are mapped
+// to controls that a Dreamcast controller does not consume. Both protocols use
+// active-low button bits. MODE and SLEEP are deliberately left released: those
+// two buttons are not pollable over Maple on a first-party VMU.
+static u8 getVmuButtons(u32 kcode)
+{
+	mutualExclusion(kcode, DC_DPAD2_UP | DC_DPAD2_DOWN);
+	mutualExclusion(kcode, DC_DPAD2_LEFT | DC_DPAD2_RIGHT);
+	u8 buttons = 0xff;
+	if ((kcode & DC_DPAD2_UP) == 0)
+		buttons &= ~0x01;
+	if ((kcode & DC_DPAD2_DOWN) == 0)
+		buttons &= ~0x02;
+	if ((kcode & DC_DPAD2_LEFT) == 0)
+		buttons &= ~0x04;
+	if ((kcode & DC_DPAD2_RIGHT) == 0)
+		buttons &= ~0x08;
+	if ((kcode & DC_BTN_C) == 0)
+		buttons &= ~0x10;
+	if ((kcode & DC_BTN_D) == 0)
+		buttons &= ~0x20;
+	return buttons;
 }
 
 /*
@@ -184,6 +212,9 @@ struct maple_sega_controller: maple_base
 			//controller condition
 		case MDCF_GetCondition:
 			{
+				MapleDeviceRV validation = validateFunction(MFID_0_Input, 4);
+				if (validation != MDRS_JVSNone)
+					return validation;
 				PlainJoystickState pjs;
 				config->GetInput(&pjs);
 				//caps
@@ -349,11 +380,206 @@ u8 vmu_default[] = {
 
 struct maple_sega_vmu: maple_base
 {
+	static constexpr u32 FileErrorInvalidPartition = 0x01000000;
+	static constexpr u32 FileErrorPhase = 0x02000000;
+	static constexpr u32 FileErrorInvalidBlock = 0x04000000;
+	static constexpr u32 FileErrorWrite = 0x08000000;
+	static constexpr u32 FileErrorInvalidLength = 0x10000000;
+
 	FILE *file = nullptr;
 	u8 flash_data[128_KB];
 	u8 lcd_data[192];
 	u8 lcd_data_decoded[48*32];
 	bool fullSaveNeeded = false;
+	s64 clockOffsetSeconds = 0;
+	u8 pendingWrite[512] {};
+	u16 pendingWriteBlock = 0xffff;
+	u8 nextWritePhase = 0;
+	std::array<u8, vmu::Lc86MemoryMap::RomSize> vmuBios {};
+	std::unique_ptr<vmu::Emulator> vmuEmulator;
+	u64 lastVmuUpdate = 0;
+	u64 vmuTimeRemainder = 0;
+	u8 firmwareBuzzerPeriod = 0;
+	u8 firmwareBuzzerDuty = 0;
+
+	void syncVmuEmulator()
+	{
+		if (vmuEmulator == nullptr)
+			return;
+		const u64 now = sh4_sched_now64();
+		const u64 elapsed = std::min<u64>(now - lastVmuUpdate, SH4_MAIN_CLOCK);
+		lastVmuUpdate = now;
+		const u64 scaled = elapsed * 1'000'000'000ull + vmuTimeRemainder;
+		const u64 nanoseconds = scaled / SH4_MAIN_CLOCK;
+		vmuTimeRemainder = scaled % SH4_MAIN_CLOCK;
+
+		PlainJoystickState input;
+		config->GetInput(&input);
+		vmuEmulator->setButtons(static_cast<u8>(~getVmuButtons(input.kcode)));
+		vmuEmulator->runForNanoseconds(nanoseconds);
+		if (vmuEmulator->memory().takeFlashDirty())
+		{
+			fullSaveNeeded = true;
+			fullSave();
+		}
+		u8 buzzerPeriod;
+		u8 buzzerDuty;
+		vmuEmulator->buzzerOutput(buzzerPeriod, buzzerDuty);
+		if (buzzerPeriod != firmwareBuzzerPeriod || buzzerDuty != firmwareBuzzerDuty)
+		{
+			firmwareBuzzerPeriod = buzzerPeriod;
+			firmwareBuzzerDuty = buzzerDuty;
+			aica::sgc::vmuBeep(bus_id, bus_port, buzzerPeriod, buzzerDuty);
+		}
+
+		u8 firmwareLcd[sizeof(lcd_data)];
+		vmuEmulator->memory().copyLcdFramebuffer(firmwareLcd);
+		if (memcmp(lcd_data, firmwareLcd, sizeof(lcd_data)) != 0)
+		{
+			memcpy(lcd_data, firmwareLcd, sizeof(lcd_data));
+			decodeLcd();
+			config->SetImage(lcd_data_decoded);
+			updateMapleLinkScreen();
+		}
+	}
+
+	void initializeVmuEmulator()
+	{
+		vmuEmulator.reset();
+		const std::string path = hostfs::findFlash("",
+				"vmu_bios.bin;vms_bios.bin;en1005-19991026-315-6208-05.bin");
+		if (path.empty())
+			return;
+		std::unique_ptr<hostfs::File> biosFile(hostfs::storage().openFile(path, "rb"));
+		if (biosFile == nullptr || biosFile->size() != static_cast<s64>(vmuBios.size())
+				|| biosFile->read(vmuBios.data(), vmuBios.size(), 1) != 1)
+		{
+			WARN_LOG(MAPLE, "Invalid VMU BIOS file \"%s\"", path.c_str());
+			return;
+		}
+		vmuEmulator = std::make_unique<vmu::Emulator>(vmuBios.data(), vmuBios.size(),
+				flash_data, sizeof(flash_data));
+		lastVmuUpdate = sh4_sched_now64();
+		vmuTimeRemainder = 0;
+		firmwareBuzzerPeriod = firmwareBuzzerDuty = 0;
+		INFO_LOG(MAPLE, "VMU %s firmware emulation enabled", logical_port);
+	}
+
+	static constexpr bool isLeapYear(int year)
+	{
+		return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+	}
+
+	static constexpr unsigned daysInMonth(int year, unsigned month)
+	{
+		constexpr unsigned days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+		return month == 2 && isLeapYear(year) ? 29 : days[month - 1];
+	}
+
+	// Gregorian civil-date conversion. The epoch is 1970-01-01, but unlike
+	// mktime this representation has no host timezone or DST rules attached.
+	static constexpr s64 daysFromCivil(int year, unsigned month, unsigned day)
+	{
+		year -= month <= 2;
+		const int era = (year >= 0 ? year : year - 399) / 400;
+		const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+		const unsigned adjustedMonth = static_cast<unsigned>(static_cast<int>(month) + (month > 2 ? -3 : 9));
+		const unsigned dayOfYear = (153 * adjustedMonth + 2) / 5 + day - 1;
+		const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+		return static_cast<s64>(era) * 146097 + dayOfEra - 719468;
+	}
+
+	static void civilFromDays(s64 days, int& year, unsigned& month, unsigned& day)
+	{
+		days += 719468;
+		const s64 era = (days >= 0 ? days : days - 146096) / 146097;
+		const unsigned dayOfEra = static_cast<unsigned>(days - era * 146097);
+		const unsigned yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524
+				+ dayOfEra / 146096) / 365;
+		year = static_cast<int>(yearOfEra) + static_cast<int>(era) * 400;
+		const unsigned dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100);
+		const unsigned monthPrime = (5 * dayOfYear + 2) / 153;
+		day = dayOfYear - (153 * monthPrime + 2) / 5 + 1;
+		month = static_cast<unsigned>(static_cast<int>(monthPrime) + (monthPrime < 10 ? 3 : -9));
+		year += month <= 2;
+	}
+
+	static constexpr s64 civilSeconds(int year, int month, int day, int hour, int minute, int second)
+	{
+		return daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400
+				+ hour * 3600 + minute * 60 + second;
+	}
+
+	void resetClockToHostLocalTime()
+	{
+		time_t hostSeconds = time(nullptr);
+		tm *hostLocal = localtime(&hostSeconds);
+		if (hostLocal == nullptr)
+		{
+			clockOffsetSeconds = 0;
+			return;
+		}
+		clockOffsetSeconds = civilSeconds(hostLocal->tm_year + 1900, hostLocal->tm_mon + 1,
+				hostLocal->tm_mday, hostLocal->tm_hour, hostLocal->tm_min, hostLocal->tm_sec)
+				- static_cast<s64>(hostSeconds);
+	}
+
+	void clearPendingWrite()
+	{
+		memset(pendingWrite, 0, sizeof(pendingWrite));
+		pendingWriteBlock = 0xffff;
+		nextWritePhase = 0;
+	}
+
+	u32 fileError(u32 error)
+	{
+		w32(error);
+		return MDRE_FileError;
+	}
+
+	u32 commitStorageWrite(u16 block)
+	{
+		if (pendingWriteBlock != block || nextWritePhase != 4)
+			return fileError(FileErrorPhase);
+
+		if (file != nullptr)
+		{
+			if (fullSaveNeeded && !fullSave())
+				return fileError(FileErrorWrite);
+			if (std::fseek(file, block * 512, SEEK_SET) != 0
+					|| std::fwrite(pendingWrite, sizeof(pendingWrite), 1, file) != 1
+					|| std::fflush(file) != 0)
+			{
+				ERROR_LOG(MAPLE, "Failed to save VMU %s: I/O error", logical_port);
+				return fileError(FileErrorWrite);
+			}
+		}
+
+		memcpy(&flash_data[block * 512], pendingWrite, sizeof(pendingWrite));
+		clearPendingWrite();
+		return MDRS_DeviceReply;
+	}
+
+	void decodeLcd()
+	{
+		for (u32 y = 0; y < 32; y++)
+		{
+			for (u32 x = 0; x < 48; x++)
+			{
+				bool pixelOn = (lcd_data[y * 6 + x / 8] & (0x80 >> (x & 7))) != 0;
+				lcd_data_decoded[y * 48 + x] = pixelOn ? 0 : 0xff;
+			}
+		}
+	}
+
+	bool isFormatted() const
+	{
+		const u8 *root = flash_data + 0xff * 512;
+		for (u32 i = 0; i < 16; i++)
+			if (root[i] != 0x55)
+				return false;
+		return true;
+	}
 
 	MapleDeviceType get_device_type() override
 	{
@@ -366,6 +592,15 @@ struct maple_sega_vmu: maple_base
 		ser << flash_data;
 		ser << lcd_data;
 		ser << lcd_data_decoded;
+		const s64 clockTimeSeconds = time(nullptr) + clockOffsetSeconds;
+		ser << clockTimeSeconds;
+		ser << pendingWrite;
+		ser << pendingWriteBlock;
+		ser << nextWritePhase;
+		const bool firmwareEnabled = vmuEmulator != nullptr;
+		ser << firmwareEnabled;
+		if (firmwareEnabled)
+			vmuEmulator->serialize(ser);
 	}
 	void deserialize(Deserializer& deser) override
 	{
@@ -373,13 +608,49 @@ struct maple_sega_vmu: maple_base
 		deser >> flash_data;
 		deser >> lcd_data;
 		deser >> lcd_data_decoded;
-		for (u8 b : lcd_data)
-			if (b != 0)
+		if (deser.version() >= Deserializer::V90)
+		{
+			s64 clockTimeSeconds;
+			deser >> clockTimeSeconds;
+			clockOffsetSeconds = clockTimeSeconds - time(nullptr);
+			deser >> pendingWrite;
+			deser >> pendingWriteBlock;
+			deser >> nextWritePhase;
+		}
+		else
+		{
+			resetClockToHostLocalTime();
+			clearPendingWrite();
+		}
+		if (nextWritePhase > 4
+				|| (nextWritePhase == 0 && pendingWriteBlock != 0xffff)
+				|| (nextWritePhase != 0 && pendingWriteBlock >= sizeof(flash_data) / 512))
+			clearPendingWrite();
+		if (deser.version() >= Deserializer::V150)
+		{
+			bool firmwareEnabled;
+			deser >> firmwareEnabled;
+			if (firmwareEnabled)
 			{
-				config->SetImage(lcd_data_decoded);
-				updateMapleLinkScreen();
-				break;
+				if (vmuEmulator == nullptr)
+					initializeVmuEmulator();
+				if (vmuEmulator == nullptr)
+					throw Deserializer::Exception("VMU BIOS required by savestate");
+				vmuEmulator->deserialize(deser);
 			}
+			else
+				vmuEmulator.reset();
+		}
+		else if (vmuEmulator != nullptr)
+			vmuEmulator->reset();
+		lastVmuUpdate = sh4_sched_now64();
+		vmuTimeRemainder = 0;
+		firmwareBuzzerPeriod = firmwareBuzzerDuty = 0;
+		decodeLcd();
+		// A blank LCD is still meaningful state. Always publish the restored
+		// framebuffer so loading a state can clear an image drawn afterward.
+		config->SetImage(lcd_data_decoded);
+		updateMapleLinkScreen();
 		fullSaveNeeded = true;
 	}
 
@@ -407,7 +678,8 @@ struct maple_sega_vmu: maple_base
 			ERROR_LOG(MAPLE, "VMU %s: I/O error", logical_port);
 			return false;
 		}
-		if (std::fwrite(flash_data, sizeof(flash_data), 1, file) != 1) {
+		if (std::fwrite(flash_data, sizeof(flash_data), 1, file) != 1
+				|| std::fflush(file) != 0) {
 			ERROR_LOG(MAPLE, "Failed to write the VMU %s to disk", logical_port);
 			return false;
 		}
@@ -432,6 +704,9 @@ struct maple_sega_vmu: maple_base
 	{
 		memset(flash_data, 0, sizeof(flash_data));
 		memset(lcd_data, 0, sizeof(lcd_data));
+		memset(lcd_data_decoded, 0xff, sizeof(lcd_data_decoded));
+		resetClockToHostLocalTime();
+		clearPendingWrite();
 
         // Load existing vmu file if found
         std::string rpath = hostfs::getVmuPath(logical_port, false);
@@ -442,8 +717,21 @@ struct maple_sega_vmu: maple_base
         }
         else
         {
-            if (rfile->read(flash_data, sizeof(flash_data), 1) != 1)
-                WARN_LOG(MAPLE, "Failed to read the VMU file \"%s\" from disk", rpath.c_str());
+			s64 imageSize = rfile->size();
+			if (imageSize != sizeof(flash_data))
+			{
+				WARN_LOG(MAPLE, "Invalid VMU file \"%s\" size: %lld (expected %zu)",
+						rpath.c_str(), (long long)imageSize, sizeof(flash_data));
+				// Do not treat a partially read image as a valid card. Otherwise a
+				// truncated file can retain a nonzero prefix and silently expose a
+				// mostly zero, corrupt volume.
+				memset(flash_data, 0, sizeof(flash_data));
+			}
+			else if (rfile->read(flash_data, sizeof(flash_data), 1) != 1)
+			{
+				WARN_LOG(MAPLE, "Failed to read the VMU file \"%s\" from disk", rpath.c_str());
+				memset(flash_data, 0, sizeof(flash_data));
+			}
             delete rfile;
         }
         // Open or create the vmu file to save to
@@ -472,10 +760,14 @@ struct maple_sega_vmu: maple_base
 			// This means the existing VMU file is completely empty and needs to be recreated
 			initializeVmu();
 		fullSaveNeeded = false;
+		initializeVmuEmulator();
 	}
 
 	~maple_sega_vmu() override
 	{
+		aica::sgc::vmuBeep(bus_id, bus_port, 0, 0);
+		if (fullSaveNeeded)
+			fullSave();
 		if (file != nullptr)
 			std::fclose(file);
 		memset(lcd_data, 0, sizeof(lcd_data));
@@ -484,6 +776,7 @@ struct maple_sega_vmu: maple_base
 
 	u32 dma(u32 cmd) override
 	{
+		syncVmuEmulator();
 		//printf("maple_sega_vmu::dma Called for port %d:%d, Command %d\n", bus_id, bus_port, cmd);
 		switch (cmd)
 		{
@@ -516,8 +809,10 @@ struct maple_sega_vmu: maple_base
 
 			if (cmd == MDC_AllStatusReq)
 			{
-				const char *extra = "Version 1.005,1999/04/15,315-6208-03,SEGA Visual Memory System BIOS Produced by ";
-				wptr(extra, strlen(extra));
+				static constexpr char extra[] =
+						"Version 1.005,1999/10/26,315-6208-05,SEGA Visual Memory System BIOS Produced by ";
+				static_assert(sizeof(extra) - 1 == 80);
+				wptr(extra, sizeof(extra) - 1);
 				return MDRS_DeviceStatusAll;
 			}
 			else {
@@ -528,14 +823,19 @@ struct maple_sega_vmu: maple_base
 			//out[0] is function used
 		case MDCF_GetMediaInfo:
 			{
+				if (r_count() != 8)
+					return MDRE_TransmitAgain;
 				u32 function=r32();
+				u32 location = r32();
 				switch(function)
 				{
 				case MFID_1_Storage:
+					if (location != 0)
+						return fileError(FileErrorInvalidPartition);
 					DEBUG_LOG(MAPLE, "VMU %s GetMediaInfo storage", logical_port);
 					w32(MFID_1_Storage);
 
-					if (*(u16*)&flash_data[0xFF * 512 + 0x40] != 0xFF)
+					if (!isFormatted())
 					{
 						// Unformatted state: return predetermined media information
 						//total_size;
@@ -572,10 +872,9 @@ struct maple_sega_vmu: maple_base
 
 				case MFID_2_LCD:
 					{
-						u32 pt=r32();
-						if (pt!=0)
+						if (location != 0)
 						{
-							INFO_LOG(MAPLE, "VMU: MDCF_GetMediaInfo -> bad input |%08X|, returning MDRE_UnknownCmd", pt);
+							INFO_LOG(MAPLE, "VMU: MDCF_GetMediaInfo -> bad input |%08X|, returning MDRE_UnknownCmd", location);
 							return MDRE_UnknownCmd;
 						}
 						else
@@ -601,33 +900,42 @@ struct maple_sega_vmu: maple_base
 
 		case MDCF_BlockRead:
 			{
+				if (r_count() != 8)
+					return MDRE_TransmitAgain;
 				u32 function=r32();
 				switch(function)
 				{
 				case MFID_1_Storage:
 					{
-						w32(MFID_1_Storage);
 						u32 xo=r32();
-						u32 Block = (SWAP32(xo))&0xffff;
-						w32(xo);
+						u32 location = SWAP32(xo);
+						u32 partition = location >> 24;
+						u32 phase = (location >> 16) & 0xff;
+						u32 Block = location & 0xffff;
+						if (partition != 0)
+							return fileError(FileErrorInvalidPartition);
+						if (phase != 0)
+							return fileError(FileErrorPhase);
+						if (Block >= sizeof(flash_data) / 512)
+							return fileError(FileErrorInvalidBlock);
 
-						if (Block>255)
-						{
-							DEBUG_LOG(MAPLE, "Block read : %d", Block);
-							DEBUG_LOG(MAPLE, "BLOCK READ ERROR");
-							Block&=255;
-						}
-						else
-							DEBUG_LOG(MAPLE, "VMU %s block read: Block %d addr %x len %d", logical_port, Block, Block*512, 512);
+						w32(MFID_1_Storage);
+						w32(xo);
+						DEBUG_LOG(MAPLE, "VMU %s block read: Block %d addr %x len %d", logical_port, Block, Block*512, 512);
 						wptr(flash_data+Block*512,512);
 					}
 					return MDRS_DataTransfer;//data transfer
 
 				case MFID_2_LCD:
-					DEBUG_LOG(MAPLE, "VMU %s read LCD", logical_port);
-					w32(MFID_2_LCD);
-					w32(r32()); // mnn ?
-					wptr(flash_data,192);
+					{
+						u32 location = r32();
+						if (location != 0)
+							return MDRE_LCDError;
+						DEBUG_LOG(MAPLE, "VMU %s read LCD", logical_port);
+						w32(MFID_2_LCD);
+						w32(location);
+						wptr(lcd_data, sizeof(lcd_data));
+					}
 
 					return MDRS_DataTransfer;//data transfer
 
@@ -641,22 +949,30 @@ struct maple_sega_vmu: maple_base
 					{
 						w32(MFID_3_Clock);
 
-						time_t now;
-						time(&now);
-						tm* timenow=localtime(&now);
+						s64 now = static_cast<s64>(time(nullptr)) + clockOffsetSeconds;
+						s64 days = now / 86400;
+						s64 secondsOfDay = now % 86400;
+						if (secondsOfDay < 0)
+						{
+							secondsOfDay += 86400;
+							days--;
+						}
+						int year;
+						unsigned month, day;
+						civilFromDays(days, year, month, day);
+						if (year < 0 || year > 9999)
+							return MDRE_TransmitAgain;
 
 						u8* timebuf=dma_buffer_out;
 
-						w8((timenow->tm_year+1900)%256);
-						w8((timenow->tm_year+1900)/256);
-
-						w8(timenow->tm_mon+1);
-						w8(timenow->tm_mday);
-
-						w8(timenow->tm_hour);
-						w8(timenow->tm_min);
-						w8(timenow->tm_sec);
-						w8(0);
+						w8(static_cast<u8>(year % 256));
+						w8(static_cast<u8>(year / 256));
+						w8(static_cast<u8>(month));
+						w8(static_cast<u8>(day));
+						w8(static_cast<u8>(secondsOfDay / 3600));
+						w8(static_cast<u8>(secondsOfDay / 60 % 60));
+						w8(static_cast<u8>(secondsOfDay % 60));
+						w8(static_cast<u8>((days % 7 + 10) % 7)); // 1970-01-01 was Thursday; Monday = 0
 
 						DEBUG_LOG(MAPLE, "VMU: CLOCK Read-> datetime is %04d/%02d/%02d ~ %02d:%02d:%02d!",
 								timebuf[0] + timebuf[1] * 256,
@@ -678,63 +994,50 @@ struct maple_sega_vmu: maple_base
 
 		case MDCF_BlockWrite:
 			{
+				if (r_count() < 8)
+					return MDRE_TransmitAgain;
 				u32 function = r32();
 				switch (function)
 				{
 					case MFID_1_Storage:
 					{
 						u32 bph=r32();
-						u32 Block = (SWAP32(bph))&0xffff;
-						u32 Phase = ((SWAP32(bph))>>16)&0xff;
-						u32 write_adr=Block*512+Phase*(512/4);
+						u32 location = SWAP32(bph);
+						u32 Partition = location >> 24;
+						u32 Block = location & 0xffff;
+						u32 Phase = (location >> 16) & 0xff;
 						u32 write_len=r_count();
+						if (Partition != 0)
+							return fileError(FileErrorInvalidPartition);
+						if (Phase >= 4)
+							return fileError(FileErrorPhase);
+						if (Block >= sizeof(flash_data) / 512)
+							return fileError(FileErrorInvalidBlock);
+						if (write_len != 512 / 4)
+							return fileError(FileErrorInvalidLength);
+						if (Phase == 0)
+						{
+							clearPendingWrite();
+							pendingWriteBlock = Block;
+						}
+						if (pendingWriteBlock != Block || Phase != nextWritePhase)
+							return fileError(FileErrorPhase);
+						u32 write_adr=Phase*(512/4);
 						DEBUG_LOG(MAPLE, "VMU %s block write: Block %d Phase %d addr %x len %d", logical_port, Block, Phase, write_adr, write_len);
-						if (write_adr + write_len > sizeof(flash_data))
-						{
-							INFO_LOG(MAPLE, "Failed to write VMU %s: overflow", logical_port);
-							skip(write_len);
-							return MDRE_FileError; //invalid params
-						}
-						rptr(&flash_data[write_adr],write_len);
-
-						if (file != nullptr)
-						{
-							if (fullSaveNeeded) {
-								if (!fullSave())
-									return MDRE_FileError;
-							}
-							else if (std::fseek(file, write_adr, SEEK_SET) != 0
-									|| std::fwrite(&flash_data[write_adr], write_len, 1, file) != 1)
-							{
-								ERROR_LOG(MAPLE, "Failed to save VMU %s: I/O error", logical_port);
-								return MDRE_FileError; // I/O error
-							}
-						}
+						rptr(&pendingWrite[write_adr],write_len);
+						nextWritePhase++;
 						return MDRS_DeviceReply;
 					}
 
 					case MFID_2_LCD:
 					{
+						u32 location = r32();
+						if (location != 0 || r_count() != sizeof(lcd_data))
+							return MDRE_LCDError;
 						DEBUG_LOG(MAPLE, "VMU %s LCD write", logical_port);
-						r32();	// PT, phase, block#
-						rptr(lcd_data,192);
+						rptr(lcd_data, sizeof(lcd_data));
 
-						u8 white=0xff,black=0x00;
-
-						for(int y=0;y<32;++y)
-						{
-							u8* dst=lcd_data_decoded+y*48;
-							u8* src=lcd_data+6*y+5;
-							for(int x=0;x<6;++x)
-							{
-								u8 col=*src--;
-								for(int l=0;l<8;l++)
-								{
-									*dst++=col&1?black:white;
-									col>>=1;
-								}
-							}
-						}
+						decodeLcd();
 						config->SetImage(lcd_data_decoded);
 						relayMapleLink();
 
@@ -751,7 +1054,15 @@ struct maple_sega_vmu: maple_base
 						{
 							u8 timebuf[8];
 							rptr(timebuf,8);
-							DEBUG_LOG(MAPLE, "VMU: CLOCK Write-> datetime is %04d/%02d/%02d ~ %02d:%02d:%02d! Nothing set tho ...",
+							int year = timebuf[0] + timebuf[1] * 256;
+							if (timebuf[2] < 1 || timebuf[2] > 12
+									|| timebuf[3] < 1 || timebuf[3] > daysInMonth(year, timebuf[2])
+									|| timebuf[4] > 23 || timebuf[5] > 59 || timebuf[6] > 59
+									|| timebuf[7] > 6)
+								return MDRE_TransmitAgain;
+							clockOffsetSeconds = civilSeconds(year, timebuf[2], timebuf[3],
+									timebuf[4], timebuf[5], timebuf[6]) - static_cast<s64>(time(nullptr));
+							DEBUG_LOG(MAPLE, "VMU: CLOCK Write-> datetime is %04d/%02d/%02d ~ %02d:%02d:%02d",
 									timebuf[0]+timebuf[1]*256,timebuf[2],timebuf[3],timebuf[4],timebuf[5],timebuf[6]);
 							return  MDRS_DeviceReply;//ok !
 						}
@@ -764,10 +1075,40 @@ struct maple_sega_vmu: maple_base
 			break;
 
 		case MDCF_GetLastError:
-			return MDRS_DeviceReply;//just ko
+			{
+				if (r_count() != 8)
+					return MDRE_TransmitAgain;
+				u32 function = r32();
+				u32 location = SWAP32(r32());
+				switch (function)
+				{
+				case MFID_1_Storage:
+					{
+					if ((location >> 24) != 0)
+						return fileError(FileErrorInvalidPartition);
+					if ((location & 0xffff) >= sizeof(flash_data) / 512)
+						return fileError(FileErrorInvalidBlock);
+					u32 phase = (location >> 16) & 0xff;
+					if (phase != 4)
+						return fileError(FileErrorPhase);
+					return commitStorageWrite(location & 0xffff);
+					}
+
+				case MFID_2_LCD:
+					return location == 0 ? MDRS_DeviceReply : MDRE_LCDError;
+
+				case MFID_3_Clock:
+					return location == 0 ? MDRS_DeviceReply : MDRE_TransmitAgain;
+
+				default:
+					return MDRE_UnknownFunction;
+				}
+			}
 
 		case MDCF_SetCondition:
 			{
+				if (r_count() != 8)
+					return MDRE_TransmitAgain;
 				switch(r32())
 				{
 				case MFID_3_Clock:
@@ -776,7 +1117,7 @@ struct maple_sega_vmu: maple_base
 					u8 ald = r8();
 					r16(); // Alarm 2
 					INFO_LOG(MAPLE, "BEEP: %d/%d", alw, ald);
-					aica::sgc::vmuBeep(alw, ald);
+					aica::sgc::vmuBeep(bus_id, bus_port, alw, ald);
 
 					relayMapleLink();
 					return MDRS_DeviceReply;
@@ -789,12 +1130,37 @@ struct maple_sega_vmu: maple_base
 			}
 			break;
 
+		case MDCF_GetCondition:
+		{
+			if (r_count() != 4)
+				return MDRE_TransmitAgain;
+			if (r32() != MFID_3_Clock)
+				return MDRE_UnknownFunction;
+			PlainJoystickState pjs;
+			config->GetInput(&pjs);
+			w32(MFID_3_Clock);
+			w8(getVmuButtons(pjs.kcode));
+			w8(0);
+			w8(0);
+			w8(0);
+			return MDRS_DataTransfer;
+		}
+
 		case MDC_DeviceReset:
-			aica::sgc::vmuBeep(0, 0);
+			clearPendingWrite();
+			aica::sgc::vmuBeep(bus_id, bus_port, 0, 0);
+			if (vmuEmulator != nullptr)
+			{
+				vmuEmulator->reset();
+				lastVmuUpdate = sh4_sched_now64();
+				vmuTimeRemainder = 0;
+				firmwareBuzzerPeriod = firmwareBuzzerDuty = 0;
+			}
 			return MDRS_DeviceReply;
 
 		case MDC_DeviceKill:
-			aica::sgc::vmuBeep(0, 0);
+			clearPendingWrite();
+			aica::sgc::vmuBeep(bus_id, bus_port, 0, 0);
 			return MDRS_DeviceReply;
 
 		default:
@@ -812,9 +1178,9 @@ struct maple_sega_vmu: maple_base
 
 struct maple_microphone: maple_base
 {
-	u32 gain;
-	bool sampling;
-	bool eight_khz;
+	u32 gain = 0xf;
+	bool sampling = false;
+	bool eight_khz = false;
 
 	~maple_microphone() override
 	{
@@ -892,6 +1258,7 @@ struct maple_microphone: maple_base
 			return cmd == MDC_DeviceRequest ? MDRS_DeviceStatus : MDRS_DeviceStatusAll;
 
 		case MDC_DeviceReset:
+		case MDC_DeviceKill:
 			DEBUG_LOG(MAPLE, "maple_microphone::dma MDC_DeviceReset");
 			if (sampling)
 				StopAudioRecording();
@@ -900,6 +1267,8 @@ struct maple_microphone: maple_base
 
 		case MDCF_MICControl:
 		{
+			if (r_count() != 8)
+				return MDRE_TransmitAgain;
 			u32 function=r32();
 
 			switch(function)
@@ -917,8 +1286,11 @@ struct maple_microphone: maple_base
 					gain = dt1;
 					w32(MFID_4_Mic);
 
-					u8 micdata[240 * 2];
-					u32 samples = RecordAudio(micdata, 240);
+					u8 micdata[240 * 2] {};
+					// Recording is process-global, while the Maple sampling state is
+					// per device. Do not let an idle microphone consume samples from a
+					// backend that another microphone has started.
+					u32 samples = sampling ? std::min(RecordAudio(micdata, 240), 240u) : 0;
 
 					//32 bit header
 			        //status: bit   7      6     5 4      3      2    1    0
@@ -934,17 +1306,18 @@ struct maple_microphone: maple_base
 				}
 
 				case 0x02:	// Basic_Control
+				{
 					DEBUG_LOG(MAPLE, "maple_microphone::dma MDCF_MICControl Basic_Control DT1 %02x", dt1);
-					eight_khz = ((dt1 >> 2) & 3) == 1;
-					if (((dt1 & 0x80) == 0x80) != sampling)
-					{
-						if (sampling)
-							StopAudioRecording();
-						else
-							StartAudioRecording(eight_khz);
-						sampling = (dt1 & 0x80) == 0x80;
-					}
+					const bool newEightKhz = ((dt1 >> 2) & 3) == 1;
+					const bool newSampling = (dt1 & 0x80) != 0;
+					if (sampling && (!newSampling || newEightKhz != eight_khz))
+						StopAudioRecording();
+					if (newSampling && (!sampling || newEightKhz != eight_khz))
+						StartAudioRecording(newEightKhz);
+					eight_khz = newEightKhz;
+					sampling = newSampling;
 					return MDRS_DeviceReply;
+				}
 
 				case 0x03:	// AMP_GAIN
 					gain = dt1;
@@ -978,9 +1351,6 @@ struct maple_microphone: maple_base
 			break;
 		}
 
-		case MDC_DeviceKill:
-			return MDRS_DeviceReply;
-
 		default:
 			INFO_LOG(MAPLE, "maple_microphone::dma UNHANDLED MAPLE COMMAND %d", cmd);
 			return MDRE_UnknownCmd;
@@ -991,7 +1361,27 @@ struct maple_microphone: maple_base
 struct maple_sega_purupuru : maple_base
 {
 	u16 AST = 19, AST_ms = 5000;
-	u32 VIBSET;
+	u32 VIBSET = 0;
+
+	~maple_sega_purupuru() override
+	{
+		if (config != nullptr)
+			config->SetVibration(0, 0, 0);
+	}
+
+	void resetVibration()
+	{
+		AST = 19;
+		AST_ms = 5000;
+		VIBSET = 0;
+		if (config != nullptr)
+			config->SetVibration(0, 0, 0);
+	}
+
+	void OnSetup() override
+	{
+		resetVibration();
+	}
 
 	MapleDeviceType get_device_type() override
 	{
@@ -1049,8 +1439,12 @@ struct maple_sega_purupuru : maple_base
 
 			if (cmd == MDC_AllStatusReq)
 			{
-				const char *extra = "Version 1.000,1998/11/10,315-6211-AH   ,Vibration Motor:1,Fm:4 - 30Hz,Pow:7     ";
-				wptr(extra, strlen(extra));
+				// Captured from an original HKT-8600 Puru Puru Pack. The
+				// punctuation and padding are part of the 80-byte free status.
+				static constexpr char extra[] =
+						"Version 1.000,1998/11/10,315-6211-AH   ,Vibration Motor:1 , Fm:4 - 30Hz ,Pow:7  ";
+				static_assert(sizeof(extra) - 1 == 80);
+				wptr(extra, sizeof(extra) - 1);
 				return MDRS_DeviceStatusAll;
 			}
 			else {
@@ -1059,14 +1453,23 @@ struct maple_sega_purupuru : maple_base
 
 			//get last vibration
 		case MDCF_GetCondition:
+			{
+				MapleDeviceRV validation = validateFunction(MFID_8_Vibration, 4);
+				if (validation != MDRS_JVSNone)
+					return validation;
 
 			w32(MFID_8_Vibration);
 
 			w32(VIBSET);
 
 			return MDRS_DataTransfer;
+			}
 
 		case MDCF_GetMediaInfo:
+			{
+				MapleDeviceRV validation = validateFunction(MFID_8_Vibration, 8);
+				if (validation != MDRS_JVSNone)
+					return validation;
 
 			w32(MFID_8_Vibration);
 
@@ -1074,8 +1477,13 @@ struct maple_sega_purupuru : maple_base
 			w32(0x3B07E010);
 
 			return MDRS_DataTransfer;
+			}
 
 		case MDCF_BlockRead:
+			{
+				MapleDeviceRV validation = validateFunction(MFID_8_Vibration, 8);
+				if (validation != MDRS_JVSNone)
+					return validation;
 
 			w32(MFID_8_Vibration);
 			w32(0);
@@ -1084,8 +1492,13 @@ struct maple_sega_purupuru : maple_base
 			w16(AST);
 
 			return MDRS_DataTransfer;
+			}
 
 		case MDCF_BlockWrite:
+			{
+				MapleDeviceRV validation = validateFunction(MFID_8_Vibration, 12);
+				if (validation != MDRS_JVSNone)
+					return validation;
 
 			//Auto-stop time
 			AST = dma_buffer_in[10];
@@ -1093,10 +1506,15 @@ struct maple_sega_purupuru : maple_base
 			relayMapleLink();
 
 			return MDRS_DeviceReply;
+			}
 
 		case MDCF_SetCondition:
+			{
+				MapleDeviceRV validation = validateFunction(MFID_8_Vibration, 8);
+				if (validation != MDRS_JVSNone)
+					return validation;
 
-			VIBSET = *(u32*)&dma_buffer_in[4];
+			memcpy(&VIBSET, &dma_buffer_in[4], sizeof(VIBSET));
 			{
 				//Do the rumble thing!
 				u8 POW_POS = (VIBSET >> 8) & 0x7;
@@ -1121,17 +1539,18 @@ struct maple_sega_purupuru : maple_base
 					inclination = 0.0;
 				else
 					inclination = FREQ / (1000.0 * INC * std::max(POW_POS, POW_NEG));
-				config->SetVibration(power, inclination, duration_ms);
+				if (config != nullptr)
+					config->SetVibration(power, inclination, duration_ms);
 
 				relayMapleLink();
 			}
 
 			return MDRS_DeviceReply;
+			}
 
 		case MDC_DeviceReset:
-			return MDRS_DeviceReply;
-
 		case MDC_DeviceKill:
+			resetVibration();
 			return MDRS_DeviceReply;
 
 		default:
@@ -1173,7 +1592,7 @@ struct maple_keyboard : maple_base
 				w8(6);	// 105 keys
 				break;
 			}
-			w8(0);
+			w8(7);		// modifier byte plus six-key rollover
 			w8(0x80);	// keyboard-controlled LEDs
 
 			w32(0);
@@ -1189,15 +1608,29 @@ struct maple_keyboard : maple_base
 			wstr(maple_sega_brand, 60);
 
 			// Low-consumption standby current (2)
-			w16(0x01AE);	// 43 mA
+			w16(0x015E);	// 35 mA
 
 			// Maximum current consumption (2)
-			w16(0x01F5);	// 50.1 mA
+			w16(0x01F4);	// 50 mA
 
-			return cmd == MDC_DeviceRequest ? MDRS_DeviceStatus : MDRS_DeviceStatusAll;
+			if (cmd == MDC_AllStatusReq)
+			{
+				// Captured from the licensed Mad Catz Dreamcast keyboard. Unlike
+				// the first-party controller, this device supplies 40 free-status
+				// bytes rather than the maximum 80.
+				static constexpr char extra[] =
+						"Version 1.000,1999/09/29,Mad Catz Inc.  ";
+				static_assert(sizeof(extra) - 1 == 40);
+				wptr(extra, sizeof(extra) - 1);
+				return MDRS_DeviceStatusAll;
+			}
+			return MDRS_DeviceStatus;
 
 		case MDCF_GetCondition:
 			{
+				MapleDeviceRV validation = validateFunction(MFID_6_Keyboard, 4);
+				if (validation != MDRS_JVSNone)
+					return validation;
 				u8 shift;
 				u8 keys[6];
 				config->GetKeyboardInput(shift, keys);
@@ -1274,19 +1707,18 @@ struct maple_mouse : maple_base
 
 		case MDCF_GetCondition:
 			{
+				MapleDeviceRV validation = validateFunction(MFID_9_Mouse, 4);
+				if (validation != MDRS_JVSNone)
+					return validation;
 				u8 buttons;
 				int x, y, wheel;
 				config->GetMouseInput(buttons, x, y, wheel);
 
 				w32(MFID_9_Mouse);
-				// buttons (RLDUSABC, where A is left btn, B is right, and S is middle/scrollwheel)
-				w8(buttons);
-				// options
-				w8(0);
-				// axes overflow
-				w8(0);
-				// reserved
-				w8(0);
+				// The standard mouse condition starts with a 16-bit active-low
+				// button field followed by a reserved 16-bit field.
+				w16(buttons);
+				w16(0);
 				//int16 axis1         ; horizontal movement (0-$3FF) (little endian)
 				w16(mo_cvt(x));
 				//int16 axis2         ; vertical movement (0-$3FF) (little endian)
@@ -1371,6 +1803,9 @@ struct maple_lightgun : maple_base
 
 		case MDCF_GetCondition:
 		{
+			MapleDeviceRV validation = validateFunction(MFID_0_Input, 4);
+			if (validation != MDRS_JVSNone)
+				return validation;
 			PlainJoystickState pjs;
 			config->GetInput(&pjs);
 
@@ -1771,6 +2206,8 @@ struct maple_dreamparapara_controller : maple_device
 
 	u32 RawDma(const u32 *buffer_in, u32 buffer_in_len, u32 *buffer_out) override
 	{
+		if (buffer_in_len < sizeof(u32))
+			return 0;
 		u32 outlen = 0;
 
 		if (buffer_in[0] == 0x08000000)
@@ -1781,6 +2218,8 @@ struct maple_dreamparapara_controller : maple_device
 		}
 		else
 		{
+			if (buffer_in_len < 2 * sizeof(u32))
+				return 0;
 			u16 state = ~get_state();
 			u8 method = (unshift(buffer_in[0]) >> 11) & 3;
 			u8 val14 = unshift(buffer_in[0]) & 0xff;
@@ -1915,6 +2354,10 @@ struct MapleLinkVmu : public maple_sega_vmu
 
 		memset(flash_data, 0, sizeof(flash_data));
 		memset(lcd_data, 0, sizeof(lcd_data));
+		memset(lcd_data_decoded, 0xff, sizeof(lcd_data_decoded));
+		clearPendingWrite();
+		resetClockToHostLocalTime();
+		fullSaveNeeded = false;
 	}
 
 	bool fullSave() override
@@ -1945,14 +2388,36 @@ struct MapleLinkVmu : public maple_sega_vmu
 		return link;
 	}
 
-	MapleDeviceRV readBlock(unsigned block)
+	static bool validLinkedResponse(const MapleMsg& request, const MapleMsg& response)
+	{
+		if (response.destAP != request.originAP || response.originAP != request.destAP)
+			return false;
+		switch (response.command)
+		{
+		case MDRS_DeviceReply:
+		case MDRE_UnknownFunction:
+		case MDRE_UnknownCmd:
+		case MDRE_TransmitAgain:
+			return response.size == 0;
+		case MDRE_FileError:
+		case MDRE_LCDError:
+		case MDRE_ARGunError:
+			return response.size == 1;
+		case MDRS_DataTransfer:
+			return response.size != 0;
+		default:
+			return false;
+		}
+	}
+
+	u32 readBlock(unsigned block)
 	{
 		if (cachedBlocks[block])
 			return MDRS_JVSNone;
 
 		MapleLink::Ptr link = getMapleLink();
 		if (link == nullptr)
-			return MDRS_JVSNone;
+			return fileError(FileErrorWrite);
 
 		MapleMsg txMsg;
 		txMsg.command = MDCF_BlockRead;
@@ -1961,7 +2426,12 @@ struct MapleLinkVmu : public maple_sega_vmu
 		txMsg.pushData(MFID_1_Storage);
 		txMsg.pushData<u32>(block << 24); // (BE) partition #, phase, block #
 		MapleMsg rxMsg;
-		if (link->sendReceive(txMsg, rxMsg) && rxMsg.size == 130)
+		if (link->sendReceive(txMsg, rxMsg)
+				&& validLinkedResponse(txMsg, rxMsg)
+				&& rxMsg.command == MDRS_DataTransfer
+				&& rxMsg.size == 130
+				&& rxMsg.readData<u32>(0) == MFID_1_Storage
+				&& rxMsg.readData<u32>(1) == (block << 24))
 		{
 			DEBUG_LOG(MAPLE, "MapleLinkVmu[%s]: read block %d", logical_port, block);
 			memcpy(&flash_data[block * 4 * 128], &rxMsg.data[8], 4 * 128);
@@ -1969,7 +2439,7 @@ struct MapleLinkVmu : public maple_sega_vmu
 		}
 		else {
 			ERROR_LOG(MAPLE, "Failed to read VMU %s: I/O error", logical_port);
-			return MDRE_FileError; // I/O error
+			return fileError(FileErrorWrite);
 		}
 		return MDRS_JVSNone;
 	}
@@ -1980,14 +2450,116 @@ struct MapleLinkVmu : public maple_sega_vmu
 		if (dma_count_in >= 4)
 		{
 			const u32 functionId = inMsg->readData<u32>(0);
+			if (functionId == MFID_3_Clock
+					&& (cmd == MDCF_GetCondition || cmd == MDCF_BlockRead || cmd == MDCF_BlockWrite))
+			{
+				if ((cmd == MDCF_GetCondition && dma_count_in != 4)
+						|| (cmd == MDCF_BlockRead && (dma_count_in != 8 || inMsg->readData<u32>(1) != 0))
+						|| (cmd == MDCF_BlockWrite && (dma_count_in != 16 || inMsg->readData<u32>(1) != 0)))
+					return MDRE_TransmitAgain;
+
+				MapleLink::Ptr link = getMapleLink();
+				if (link == nullptr)
+					return MDRE_TransmitAgain;
+				MapleMsg response;
+				if (!link->sendReceive(*inMsg, response))
+				{
+					ERROR_LOG(MAPLE, "MapleLinkVmu[%s]: clock command %02x failed", logical_port, cmd);
+					return MDRE_TransmitAgain;
+				}
+				if (!validLinkedResponse(*inMsg, response))
+					return MDRE_TransmitAgain;
+				if (response.command == MDRS_DataTransfer)
+				{
+					if (cmd == MDCF_BlockWrite)
+						return MDRE_TransmitAgain;
+					const u8 expectedSize = cmd == MDCF_GetCondition ? 2 : 3;
+					if (response.size != expectedSize
+							|| response.readData<u32>() != MFID_3_Clock)
+						return MDRE_TransmitAgain;
+					wptr(response.data, response.getDataSize());
+					return response.command;
+				}
+				if (cmd != MDCF_BlockWrite && response.command == MDRS_DeviceReply)
+					return MDRE_TransmitAgain;
+				if (cmd != MDCF_BlockWrite || response.command != MDRS_DeviceReply)
+				{
+					wptr(response.data, response.getDataSize());
+					return response.command;
+				}
+				// Keep the synthetic fallback clock synchronized if the link later
+				// disconnects. The validated request is consumed by the base below.
+			}
+			else if (functionId == MFID_3_Clock && cmd == MDCF_SetCondition)
+			{
+				if (dma_count_in != 8)
+					return MDRE_TransmitAgain;
+				MapleLink::Ptr link = getMapleLink();
+				if (link == nullptr)
+					return MDRE_TransmitAgain;
+				MapleMsg response;
+				if (!link->sendReceive(*inMsg, response))
+					return MDRE_TransmitAgain;
+				if (response.command == MDRS_DeviceReply)
+						aica::sgc::vmuBeep(bus_id, bus_port, inMsg->data[4], inMsg->data[5]);
+				else
+					wptr(response.data, response.getDataSize());
+				return response.command;
+			}
+			else if (functionId == MFID_2_LCD && (cmd == MDCF_BlockRead || cmd == MDCF_BlockWrite))
+			{
+				const u32 expectedSize = cmd == MDCF_BlockWrite ? 8 + sizeof(lcd_data) : 8;
+				if (dma_count_in != expectedSize || inMsg->readData<u32>(1) != 0)
+					return MDRE_LCDError;
+				MapleLink::Ptr link = getMapleLink();
+				if (link == nullptr)
+					return MDRE_TransmitAgain;
+				MapleMsg response;
+				if (!link->sendReceive(*inMsg, response))
+					return MDRE_TransmitAgain;
+				if (cmd == MDCF_BlockWrite && response.command == MDRS_DeviceReply)
+				{
+					memcpy(lcd_data, inMsg->data + 8, sizeof(lcd_data));
+					decodeLcd();
+					config->SetImage(lcd_data_decoded);
+				}
+				else
+				{
+					wptr(response.data, response.getDataSize());
+					if (cmd == MDCF_BlockRead && response.command == MDRS_DataTransfer
+							&& response.size == 50
+							&& response.readData<u32>(0) == MFID_2_LCD
+							&& response.readData<u32>(1) == 0)
+					{
+						memcpy(lcd_data, response.data + 8, sizeof(lcd_data));
+						decodeLcd();
+						config->SetImage(lcd_data_decoded);
+					}
+				}
+				return response.command;
+			}
 
 			if (functionId == MFID_1_Storage)
 			{
 				switch (cmd)
 				{
-				case MDCF_BlockWrite:
-				{
-					if (!userNotified)
+					case MDCF_BlockWrite:
+					{
+						if (dma_count_in != 8 + 512 / 4)
+							return MDRE_TransmitAgain;
+						u32 location = SWAP32(inMsg->readData<u32>(1));
+						u32 partition = location >> 24;
+						u32 phase = (location >> 16) & 0xff;
+						u32 block = location & 0xffff;
+						if (partition != 0)
+							return fileError(FileErrorInvalidPartition);
+						if (phase >= 4)
+							return fileError(FileErrorPhase);
+						if (block >= sizeof(flash_data) / 512)
+							return fileError(FileErrorInvalidBlock);
+						if (phase != 0 && (pendingWriteBlock != block || phase != nextWritePhase))
+							return fileError(FileErrorPhase);
+						if (!userNotified)
 					{
 						os_notify("ATTENTION: You are saving to a physical VMU", 6000,
 								"Do not disconnect the VMU or close the game");
@@ -1995,41 +2567,81 @@ struct MapleLinkVmu : public maple_sega_vmu
 					}
 					MapleLink::Ptr link = getMapleLink();
 					if (link == nullptr)
-						return MDRE_FileError;
+						return fileError(FileErrorWrite);
 					MapleMsg rxMsg;
 					if (!link->sendReceive(*inMsg, rxMsg)) {
 						ERROR_LOG(MAPLE, "Failed to write VMU %s: I/O error", logical_port);
-						return MDRE_FileError;
+						return fileError(FileErrorWrite);
 					}
-					if (rxMsg.command != MDRS_DeviceReply)
+						if (!validLinkedResponse(*inMsg, rxMsg))
+							return fileError(FileErrorWrite);
+						if (rxMsg.command != MDRS_DeviceReply)
+					{
+						wptr(rxMsg.data, rxMsg.getDataSize());
 						return rxMsg.command;
-					cachedBlocks[inMsg->data[7]] = true;
+					}
 					DEBUG_LOG(MAPLE, "MapleLinkVmu[%s]: write block %d", logical_port, inMsg->data[7]);
 					break;
 				}
 
-				case MDCF_BlockRead:
-				{
-					u8 block = inMsg->data[7];
-					MapleDeviceRV rc = readBlock(block);
+					case MDCF_BlockRead:
+					{
+						if (dma_count_in != 8)
+							return MDRE_TransmitAgain;
+						u32 location = SWAP32(inMsg->readData<u32>(1));
+						if ((location >> 24) != 0)
+							return fileError(FileErrorInvalidPartition);
+						if (((location >> 16) & 0xff) != 0)
+							return fileError(FileErrorPhase);
+						if ((location & 0xffff) >= sizeof(flash_data) / 512)
+							return fileError(FileErrorInvalidBlock);
+						u8 block = inMsg->data[7];
+						u32 rc = readBlock(block);
 					if (rc != MDRS_JVSNone)
 						return rc;
 					break;
 				}
 
-				case MDCF_GetMediaInfo:
-					// block 255 contains the media info
-					readBlock(255);
-					break;
+					case MDCF_GetMediaInfo:
+					{
+						if (dma_count_in != 8)
+							return MDRE_TransmitAgain;
+						if (inMsg->readData<u32>(1) != 0)
+							return fileError(FileErrorInvalidPartition);
+						// block 255 contains the media info
+						u32 rc = readBlock(255);
+						if (rc != MDRS_JVSNone)
+							return rc;
+						break;
+					}
 
-				case MDCF_GetLastError:
-				{
+					case MDCF_GetLastError:
+					{
+						if (dma_count_in != 8)
+							return MDRE_TransmitAgain;
+						u32 location = SWAP32(inMsg->readData<u32>(1));
+						if ((location >> 24) != 0)
+							return fileError(FileErrorInvalidPartition);
+						if ((location & 0xffff) >= sizeof(flash_data) / 512)
+							return fileError(FileErrorInvalidBlock);
+						if (((location >> 16) & 0xff) != 4
+								|| pendingWriteBlock != (location & 0xffff)
+								|| nextWritePhase != 4)
+							return fileError(FileErrorPhase);
 					MapleLink::Ptr link = getMapleLink();
 					if (link == nullptr)
-						return MDRE_FileError;
-					if (!link->handleGetLastError(*inMsg)) {
+						return fileError(FileErrorWrite);
+					MapleMsg response;
+						if (!link->handleGetLastError(*inMsg, response)) {
 						ERROR_LOG(MAPLE, "MapleLinkVmu[%s]::GetLastError: I/O error", logical_port);
-						return MDRE_FileError;
+							return fileError(FileErrorWrite);
+						}
+						if (!validLinkedResponse(*inMsg, response))
+							return fileError(FileErrorWrite);
+					if (response.command != MDRS_DeviceReply)
+					{
+						wptr(response.data, response.getDataSize());
+						return response.command;
 					}
 					break;
 				}
@@ -2040,7 +2652,12 @@ struct MapleLinkVmu : public maple_sega_vmu
 				}
 			}
 		}
-		return maple_sega_vmu::dma(cmd);
+		u32 response = maple_sega_vmu::dma(cmd);
+		if (response == MDRS_DeviceReply && cmd == MDCF_GetLastError
+				&& inMsg->getDataSize() == 8
+				&& inMsg->readData<u32>() == MFID_1_Storage)
+			cachedBlocks[inMsg->data[7]] = true;
+		return response;
 	}
 
 	bool linkStatus() override

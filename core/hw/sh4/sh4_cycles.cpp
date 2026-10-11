@@ -17,71 +17,137 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
 #include "sh4_cycles.h"
-#include "modules/mmu.h"
+#include "modules/dmac.h"
+#include "modules/modules.h"
+
+void Sh4Cycles::addReadAccessCycles(u32 addr, u32 size) const
+{
+	const int cycles = readAccessCycles(addr, size);
+	if (cycles > 0)
+		DMAC_AddBusAccessCycles(ctx, cycles);
+}
+
+void Sh4Cycles::addWriteAccessCycles(u32 addr, u32 size) const
+{
+	const int cycles = writeAccessCycles(addr, size);
+	if (cycles > 0)
+		DMAC_AddBusAccessCycles(ctx, cycles);
+}
+
+static bool usesExternalBus(u32 addr)
+{
+	if ((addr & 0xfc000000) == 0xe0000000)
+		return false; // store queues
+	return ((addr & 0x1fffffff) >> 26) != 7; // on-chip registers
+}
+
+int Sh4Cycles::readAccessCycles(u32 addr, u32 size) const
+{
+	const int refresh = usesExternalBus(addr) ? bsc.takeRefreshBusCycles() : 0;
+	return (refresh + readExternalAccessCycles(addr, size)) * 2 * cpuRatio;
+}
+
+int Sh4Cycles::writeAccessCycles(u32 addr, u32 size) const
+{
+	const int refresh = usesExternalBus(addr) ? bsc.takeRefreshBusCycles() : 0;
+	return (refresh + writeExternalAccessCycles(addr, size)) * 2 * cpuRatio;
+}
+
+int Sh4Cycles::dmaReadAccessCycles(u32 addr, u32 size) const
+{
+	if (((addr & 0x1fffffff) >> 26) == 3)
+		return (bsc.takeRefreshBusCycles() + bsc.sdramDmaReadCycles(addr)) * 2 * cpuRatio;
+	return readAccessCycles(addr, size);
+}
+
+int Sh4Cycles::dmaWriteAccessCycles(u32 addr, u32 size) const
+{
+	if (((addr & 0x1fffffff) >> 26) == 3)
+		return (bsc.takeRefreshBusCycles() + bsc.sdramDmaWriteCycles(addr)) * 2 * cpuRatio;
+	return writeAccessCycles(addr, size);
+}
+
+static bool parameterReadsGpr(DecParam parameter, u16 op, u32 reg)
+{
+	switch (parameter)
+	{
+	case PRM_R0:
+		return reg == 0;
+	case PRM_RN:
+	case PRM_RN_D4_x1:
+	case PRM_RN_D4_x2:
+	case PRM_RN_D4_x4:
+		return reg == ((op >> 8) & 0xf);
+	case PRM_RM:
+	case PRM_RM_D4_x1:
+	case PRM_RM_D4_x2:
+	case PRM_RM_D4_x4:
+		return reg == ((op >> 4) & 0xf);
+	case PRM_RN_R0:
+		return reg == 0 || reg == ((op >> 8) & 0xf);
+	case PRM_RM_R0:
+		return reg == 0 || reg == ((op >> 4) & 0xf);
+	default:
+		return false;
+	}
+}
+
+static bool readsGpr(u16 op, u32 reg)
+{
+	const u64 decode = OpDesc[op]->decode;
+	if (decode == 0)
+		return false;
+	const DecMode mode = (DecMode)((decode >> 24) & 0xff);
+	const DecParam destination = (DecParam)((decode >> 16) & 0xff);
+	const DecParam source = (DecParam)((decode >> 8) & 0xff);
+	const bool readsDestination = mode == DM_BinaryOp || mode == DM_WriteM
+			|| mode == DM_WriteTOp || mode == DM_DT || mode == DM_Shift
+			|| mode == DM_Rot || mode == DM_MUL || mode == DM_DIV0
+			|| mode == DM_ADC || mode == DM_NEGC;
+	return (readsDestination && parameterReadsGpr(destination, op, reg))
+			|| parameterReadsGpr(source, op, reg);
+}
+
+static int loadedGpr(u16 op)
+{
+	const u64 decode = OpDesc[op]->decode;
+	if (decode == 0 || (DecMode)((decode >> 24) & 0xff) != DM_ReadM)
+		return -1;
+	switch ((DecParam)((decode >> 16) & 0xff))
+	{
+	case PRM_R0:
+		return 0;
+	case PRM_RN:
+		return (op >> 8) & 0xf;
+	default:
+		return -1;
+	}
+}
 
 int Sh4Cycles::countCycles(u16 op)
 {
 	sh4_opcodelistentry *opcode = OpDesc[op];
 	int cycles = 0;
-#ifndef STRICT_MODE
-	static const bool isMemOp[45] {
-		false,
-		false,
-		true,	// all mem moves, ldtlb, sts.l FPUL/FPSCR, @-Rn, lds.l @Rn+,FPUL
-		true,	// gbr-based load/store
-		false,
-		true,	// tst.b #<imm8>, @(R0,GBR)
-		true,	// and/or/xor.b #<imm8>, @(R0,GBR)
-		true,	// tas.b @Rn
-		false,
-		false,
-		false,
-		false,
-		true,	// movca.l R0, @Rn
-		false,
-		false,
-		false,
-		false,
-		true,	// ldc.l @Rn+, VBR/SPC/SSR/Rn_Bank/DBR
-		true,	// ldc.l @Rn+, GBR/SGR
-		true,	// ldc.l @Rn+, SR
-		false,
-		false,
-		true,	// stc.l DBR/SR/GBR/VBR/SSR/SPC/Rn_Bank, @-Rn
-		true,	// stc.l SGR, @-Rn
-		false,
-		true,	// lds.l @Rn+, PR
-		false,
-		true,	// sts.l PR, @-Rn
-		false,
-		true,	// lds.l @Rn+, MACH/MACL
-		false,
-		true,	// sts.l MACH/MACL, @-Rn
-		false,
-		true,	// lds.l @Rn+,FPSCR
-		false,
-		true,	// mac.wl @Rm+,@Rn+
-	};
-	if (isMemOp[opcode->ex_type])
-	{
-		if (++memOps < 4)
-			cycles = mmu_enabled() ? 5 : 2;
-	}
-	// TODO only for mem read?
-#endif
+	const int loadedReg = lastUnit == CO ? -1 : loadedGpr(lastOpcode);
+	const bool loadUseDependency = loadedReg >= 0 && readsGpr(op, loadedReg);
 
 	if (lastUnit == CO
 			|| opcode->unit == CO
-			|| (lastUnit == opcode->unit && lastUnit != MT))
+			|| (lastUnit == opcode->unit && lastUnit != MT)
+			|| loadUseDependency)
 	{
 		// cannot run in parallel
 		lastUnit = opcode->unit;
-		cycles += opcode->IssueCycles;
+		cycles += loadUseDependency
+				? std::max(opcode->IssueCycles, OpDesc[lastOpcode]->LatencyCycles)
+				: opcode->IssueCycles;
+		lastOpcode = op;
 	}
 	else
 	{
 		// can run in parallel
 		lastUnit = CO;
+		lastOpcode = 0;
 	}
 	return cycles * cpuRatio;
 }
@@ -103,6 +169,8 @@ int Sh4Cycles::readExternalAccessCycles(u32 addr, u32 size)
 		return 0;
 
 	addr &= 0x1fffffff;
+	if ((addr >> 26) != 3)
+		bsc.endSdramDmaPipeline();
 	switch (addr >> 26)
 	{
 	case 0:
@@ -285,7 +353,7 @@ int Sh4Cycles::readExternalAccessCycles(u32 addr, u32 size)
 
 	case 3:
 		// System RAM
-		return 7;	// or 12 if row miss TODO average?
+		return bsc.sdramReadCycles(addr);
 
 	case 4:
 		// TA FIFO
@@ -332,6 +400,8 @@ int Sh4Cycles::writeExternalAccessCycles(u32 addr, u32 size)
 		return 0;
 
 	addr &= 0x1fffffff;
+	if ((addr >> 26) != 3)
+		bsc.endSdramDmaPipeline();
 	switch (addr >> 26)
 	{
 	case 0:
@@ -481,7 +551,7 @@ int Sh4Cycles::writeExternalAccessCycles(u32 addr, u32 size)
 
 	case 3:
 		// System RAM
-		return 4;	// or 9 if row miss TODO average?
+		return bsc.sdramWriteCycles(addr);
 
 	case 4:
 		// TA FIFO

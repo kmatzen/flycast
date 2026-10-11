@@ -163,7 +163,7 @@ public:
 	/**
 	 * Called internally to reset the emulator.
 	 */
-	void requestReset();
+	void requestReset(bool powerOn = false);
 	/**
 	 * Called internally on vblank.
 	 */
@@ -210,6 +210,7 @@ private:
 	State state = Uninitialized;
 	std::shared_future<void> threadResult;
 	bool resetRequested = false;
+	bool powerOnResetRequested = false;
 	bool singleStep = false;
 	u64 startTime = 0;
 	u32 stepRangeFrom = 0;

@@ -100,7 +100,14 @@ typedef union
 alignas(8) extern reg_pair arm_Reg[RN_ARM_REG_COUNT];
 
 // AICA ARM cpu clock: 22.5792 MHz
-#define ARM_CYCLES_PER_SAMPLE (AICA_ARM_CLOCK / 44100)
+// The AICA derives both clocks from the same crystal: its ARM7 clock is
+// 22.5792 MHz and the sample clock is 44.1 kHz. Keep this relationship exact;
+// truncating a non-integral ratio here would make the sound CPU drift relative
+// to timers, envelopes, and sample generation.
+inline constexpr u32 ARM_CYCLES_PER_SAMPLE = AICA_ARM_CLOCK / 44100;
+static_assert(AICA_ARM_CLOCK % 44100 == 0,
+		"AICA ARM clock must be an integral number of cycles per sample");
+static_assert(ARM_CYCLES_PER_SAMPLE == 512);
 extern int arm7ClockTicks;
 
 extern bool armIrqEnable;

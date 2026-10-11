@@ -44,6 +44,15 @@ static u32 getSectorSize(const std::string& type) {
 			return 0;
 }
 
+static SectorFormat getSectorFormat(const std::string& type)
+{
+	if (type == "MODE1/2048")
+		return SECFMT_2048_MODE1;
+	if (type == "MODE2/2336" || type == "CDI/2336")
+		return SECFMT_2336_MODE2;
+	return SECFMT_2352;
+}
+
 Disc* cue_parse(const char* file, std::vector<u8> *digest)
 {
 	if (get_file_extension(file) != "cue")
@@ -87,11 +96,35 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 	// FILE context
 	std::string track_filename;
 	u32 fileStartFAD = 0;
+	u64 trackByteOffset = 0;
+	u32 previousIndexFAD = 0;
+	u32 previousSectorSize = 0;
+	bool fileHasTrack = false;
 	// TRACK context
 	u32 track_number = -1;
 	std::string track_type;
 	u32 track_secsize = 0;
 	std::string track_isrc;
+	bool hasMode2Track = false;
+
+	auto finalizeFile = [&]() {
+		if (!fileHasTrack)
+			return;
+		if (trackByteOffset > fileInfo.size)
+			throw FlycastException(i18n::Ts("Invalid CUE file: track offset exceeds file size"));
+		const u64 remainingBytes = fileInfo.size - trackByteOffset;
+		if (remainingBytes < previousSectorSize)
+			throw FlycastException(i18n::Ts("Invalid CUE file: empty final track"));
+		if (remainingBytes % previousSectorSize != 0)
+			WARN_LOG(GDROM, "Warning: Size of track %s is not multiple of sector size %d",
+					track_filename.c_str(), previousSectorSize);
+		const u64 totalFrames = (u64)previousIndexFAD + remainingBytes / previousSectorSize;
+		if (totalFrames > std::numeric_limits<u32>::max() - fileStartFAD)
+			throw FlycastException(i18n::Ts("Invalid CUE file: track range overflow"));
+		currentFAD = fileStartFAD + (u32)totalFrames;
+		disc->tracks.back().EndFAD = currentFAD - 1;
+		fileHasTrack = false;
+	};
 
 	std::string line;
 	while (std::getline(istream, line))
@@ -103,6 +136,7 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 
 		if (token == "REM")
 		{
+			finalizeFile();
 			cuesheet >> token;
 			if (token == "SESSION")
 			{
@@ -154,6 +188,7 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 		}
 		else if (token == "FILE")
 		{
+			finalizeFile();
 			track_filename.clear();
 			char last;
 			do {
@@ -192,6 +227,10 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 			delete track_file;
 			fileInfo = hostfs::storage().getFileInfo(track_filename);
 			fileStartFAD = currentFAD;
+			trackByteOffset = 0;
+			previousIndexFAD = 0;
+			previousSectorSize = 0;
+			fileHasTrack = false;
 			// Clear track context
 			track_number = -1;
 			track_type.clear();
@@ -210,16 +249,10 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 				WARN_LOG(GDROM, "CUE parse error: Invalid track number %d", track_number);
 				throw FlycastException(i18n::T("Invalid CUE file"));
 			}
-			bool firstTrackOfFile = track_secsize == 0;
 			track_secsize = getSectorSize(track_type);
 			if (track_secsize == 0)
 				throw FlycastException(strprintf(i18n::T("CUE file: track has unknown sector type: %s"), track_type.c_str()));
-			// Can happen if multiple tracks with different sector sizes share the same file
-			if (fileInfo.size % track_secsize != 0)
-				WARN_LOG(GDROM, "Warning: Size of track %s is not multiple of sector size %d", track_filename.c_str(), track_secsize);
-			// FIXME This is wrong if tracks of different sector size share the same file
-			if (firstTrackOfFile)
-				currentFAD += fileInfo.size / track_secsize;
+			hasMode2Track |= track_type.rfind("MODE2/", 0) == 0 || track_type.rfind("CDI/", 0) == 0;
 		}
 		else if (token == "INDEX")
 		{
@@ -240,22 +273,39 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 					currentFAD -= pregap;
 				}
 				firstTrackOfSession = false;
+				if (indexFAD < 0 || (fileHasTrack && (u32)indexFAD < previousIndexFAD))
+					throw FlycastException(i18n::Ts("Invalid CUE file: track indexes are not ordered"));
+				if (!fileHasTrack)
+					trackByteOffset = (u64)indexFAD * track_secsize;
+				else
+					trackByteOffset += ((u32)indexFAD - previousIndexFAD) * (u64)previousSectorSize;
+				if (trackByteOffset > fileInfo.size)
+					throw FlycastException(i18n::Ts("Invalid CUE file: track offset exceeds file size"));
+				if (trackByteOffset > std::numeric_limits<u32>::max())
+					throw FlycastException(i18n::Ts("Invalid CUE file: track offset is too large"));
 				Track t;
 				t.StartFAD = fileStartFAD + indexFAD;
 				t.CTRL = (track_type == "AUDIO" || track_type == "CDG") ? 0 : 4;
-				t.EndFAD = currentFAD - 1;
+				t.EndFAD = 0;
 				t.isrc = track_isrc;
 				DEBUG_LOG(GDROM, "file[%zd] \"%s\": session %d type %s FAD:%d -> %d %s", disc->tracks.size() + 1, track_filename.c_str(),
 						session_number, track_type.c_str(), t.StartFAD, t.EndFAD, t.isrc.empty() ? "" : ("ISRC " + t.isrc).c_str());
 				hostfs::File *track_file = hostfs::storage().openFile(track_filename, "rb");
 				if (track_file == nullptr)
 					throw FlycastException(strprintf(i18n::T("CUE file: cannot open track %s"), track_filename.c_str()));
-				t.file = new RawTrackFile(track_file, indexFAD * track_secsize, t.StartFAD, track_secsize);
-				disc->tracks.push_back(t);
+				t.file = new RawTrackFile(track_file, trackByteOffset, t.StartFAD,
+						track_secsize, getSectorFormat(track_type));
+					disc->tracks.push_back(t);
 				if (disc->tracks.size() >= 2) {
 					Track& prevTrack = disc->tracks[disc->tracks.size() - 2];
-					prevTrack.EndFAD = std::min(prevTrack.EndFAD, t.StartFAD - 1);
+					if (prevTrack.EndFAD == 0)
+						prevTrack.EndFAD = t.StartFAD - 1;
+					else
+						prevTrack.EndFAD = std::min(prevTrack.EndFAD, t.StartFAD - 1);
 				}
+				previousIndexFAD = indexFAD;
+				previousSectorSize = track_secsize;
+				fileHasTrack = true;
 			}
 			else if (index_num != 0) {
 				WARN_LOG(GDROM, "INDEX %02d not supported", index_num);
@@ -271,6 +321,7 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 			cuesheet >> track_isrc;
 		}
 	}
+	finalizeFile();
 	if (disc->tracks.empty())
 		throw FlycastException(i18n::Ts("CUE parse error: failed to parse or invalid file with 0 tracks"));
 	if (disc->tracks.size() > 99) {
@@ -310,6 +361,16 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 			ses.FirstTrack = 1;
 			ses.StartFAD = disc->tracks[0].StartFAD;
 			disc->sessions.push_back(ses);
+			const bool hasData = std::any_of(disc->tracks.begin(), disc->tracks.end(),
+					[](const Track& track) { return track.isDataTrack(); });
+			const bool hasAudio = std::any_of(disc->tracks.begin(), disc->tracks.end(),
+					[](const Track& track) { return !track.isDataTrack(); });
+			if (!hasData)
+				disc->type = CdDA;
+			else if (hasAudio || hasMode2Track)
+				disc->type = CdRom_XA;
+			else
+				disc->type = CdRom;
 		}
 	}
 	else {
@@ -319,7 +380,7 @@ Disc* cue_parse(const char* file, std::vector<u8> *digest)
 	if (disc->type != GdRom)
 	{
 		disc->LeadOut.ADR = 1;
-		disc->LeadOut.CTRL = 4;
+		disc->LeadOut.CTRL = disc->tracks.back().CTRL;
 		disc->EndFAD = disc->LeadOut.StartFAD = currentFAD;
 	}
 

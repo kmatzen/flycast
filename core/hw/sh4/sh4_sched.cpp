@@ -33,6 +33,8 @@ struct sched_list
 static u64 sh4_sched_ffb;
 static std::vector<sched_list> sch_list;
 static int sh4_sched_next_id = -1;
+static bool sh4_sched_dispatching;
+static int sh4_cpu_slice = SH4_TIMESLICE;
 
 static u32 sh4_sched_now();
 
@@ -117,12 +119,32 @@ u64 sh4_sched_now64()
 	return sh4_sched_ffb - Sh4cntx.sh4_sched_next;
 }
 
+int sh4_sched_cpu_slice()
+{
+	return sh4_cpu_slice;
+}
+
+void sh4_sched_set_cpu_slice(int cycles)
+{
+	sh4_cpu_slice = std::clamp(cycles, 1, SH4_TIMESLICE);
+}
+
 void sh4_sched_request(int id, int cycles)
 {
 	verify(cycles == -1 || (cycles >= 0 && cycles <= SH4_MAIN_CLOCK));
 
 	sched_list& sched = sch_list[id];
-	sched.start = sh4_sched_now();
+	u32 requestTime = sh4_sched_now();
+	int sliceProgress = 0;
+	if (!sh4_sched_dispatching && Sh4cntx.CpuRunning)
+	{
+		// sh4_sched_next advances at CPU slice boundaries, but MMIO can request
+		// an event partway through a slice. Anchor the request to that live CPU
+		// position so its deadline is not early by the cycles already executed.
+		sliceProgress = std::clamp(sh4_cpu_slice - Sh4cntx.cycle_counter, 0, sh4_cpu_slice);
+		requestTime += sliceProgress;
+	}
+	sched.start = requestTime;
 
 	if (cycles == -1)
 	{
@@ -136,11 +158,37 @@ void sh4_sched_request(int id, int cycles)
 	}
 
 	sh4_sched_ffts();
+
+	if (!sh4_sched_dispatching && Sh4cntx.CpuRunning)
+	{
+		// Do not knowingly execute the rest of a CPU slice past a deadline
+		// created by the instruction currently in flight. Recompiler blocks
+		// charge their cycles before executing, so this remains bounded by one
+		// already-entered block.
+		const int cyclesToDeadline = std::max(0, Sh4cntx.sh4_sched_next - sliceProgress);
+		if (Sh4cntx.cycle_counter > cyclesToDeadline)
+		{
+			Sh4cntx.cycle_counter = cyclesToDeadline;
+			sh4_sched_set_cpu_slice(sliceProgress + cyclesToDeadline);
+		}
+	}
 }
 
 bool sh4_sched_is_scheduled(int id)
 {
 	return sch_list[id].end != -1;
+}
+
+int sh4_sched_cycles_until(int id)
+{
+	verify(id >= 0 && id < (int)sch_list.size());
+	const sched_list& sched = sch_list[id];
+	if (sched.end == -1)
+		return -1;
+	u32 reference = sh4_sched_now();
+	if (!sh4_sched_dispatching && Sh4cntx.CpuRunning)
+		reference += std::max(0, sh4_cpu_slice - Sh4cntx.cycle_counter);
+	return (s32)(sched.end - reference);
 }
 
 /* Returns how much time has passed for this callback */
@@ -163,15 +211,17 @@ static void handle_cb(sched_list& sched)
 	int jitter = elapsd - remain;
 
 	sched.end = -1;
+	sh4_sched_dispatching = true;
 	int re_sch = sched.cb(sched.tag, remain, jitter, sched.arg);
 
 	if (re_sch > 0)
 		sh4_sched_request(&sched - &sch_list[0], std::max(0, re_sch - jitter));
+	sh4_sched_dispatching = false;
 }
 
 void sh4_sched_tick(int cycles)
 {
-	if (Sh4cntx.sh4_sched_next >= 0)
+	if (Sh4cntx.sh4_sched_next > 0)
 		return;
 
 	u32 fztime = sh4_sched_now() - cycles;
@@ -193,6 +243,8 @@ void sh4_sched_reset(bool hard)
 	{
 		sh4_sched_ffb = 0;
 		sh4_sched_next_id = -1;
+		sh4_sched_dispatching = false;
+		sh4_cpu_slice = SH4_TIMESLICE;
 		for (sched_list& sched : sch_list)
 			sched.start = sched.end = -1;
 		Sh4cntx.sh4_sched_next = 0;
@@ -218,6 +270,8 @@ namespace aica
 {
 // hw/aica/aica.cpp
 extern int aica_schid;
+extern int internalDmaSchedId;
+extern int midiOutSchedId;
 extern int rtc_schid;
 // hw/aica/aica_if.cpp
 extern int dma_sched_id;
@@ -229,18 +283,24 @@ extern int maple_schid;
 // hw/pvr/spg.cpp
 extern int render_end_schid;
 extern int vblank_schid;
+// hw/pvr/pvr_sb_regs.cpp
+extern int sort_dma_schid;
 // hw/sh4/modules/tmu.cpp
 extern int tmu_sched[3];
 
 void sh4_sched_serialize(Serializer& ser)
 {
 	ser << sh4_sched_ffb;
+	ser << sh4_cpu_slice;
 
 	sh4_sched_serialize(ser, aica::aica_schid);
+	sh4_sched_serialize(ser, aica::internalDmaSchedId);
+	sh4_sched_serialize(ser, aica::midiOutSchedId);
 	sh4_sched_serialize(ser, aica::rtc_schid);
 	sh4_sched_serialize(ser, gdrom_schid);
 	sh4_sched_serialize(ser, maple_schid);
 	sh4_sched_serialize(ser, aica::dma_sched_id);
+	sh4_sched_serialize(ser, sort_dma_schid);
 	sh4_sched_serialize(ser, render_end_schid);
 	sh4_sched_serialize(ser, vblank_schid);
 }
@@ -248,15 +308,25 @@ void sh4_sched_serialize(Serializer& ser)
 void sh4_sched_deserialize(Deserializer& deser)
 {
 	deser >> sh4_sched_ffb;
+	if (deser.version() >= Deserializer::V64)
+		deser >> sh4_cpu_slice;
+	else
+		sh4_cpu_slice = SH4_TIMESLICE;
 
 	if (deser.version() >= Deserializer::V19 && deser.version() <= Deserializer::V31)
 		deser.skip<u32>();		// sh4_sched_next_id
 
 	sh4_sched_deserialize(deser, aica::aica_schid);
+	if (deser.version() >= Deserializer::V111)
+		sh4_sched_deserialize(deser, aica::internalDmaSchedId);
+	if (deser.version() >= Deserializer::V132)
+		sh4_sched_deserialize(deser, aica::midiOutSchedId);
 	sh4_sched_deserialize(deser, aica::rtc_schid);
 	sh4_sched_deserialize(deser, gdrom_schid);
 	sh4_sched_deserialize(deser, maple_schid);
 	sh4_sched_deserialize(deser, aica::dma_sched_id);
+	if (deser.version() >= Deserializer::V92)
+		sh4_sched_deserialize(deser, sort_dma_schid);
 	if (deser.version() < Deserializer::V58) {
 		for (int id : tmu_sched)
 			sh4_sched_deserialize(deser, id);

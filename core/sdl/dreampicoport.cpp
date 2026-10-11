@@ -1137,17 +1137,16 @@ public:
 		return sent;
 	}
 
-	bool handleGetLastError(const MapleMsg& msg) override {
+	bool handleGetLastError(const MapleMsg& msg, MapleMsg& response) override {
 		// Ensure proper timing between write calls
 		std::this_thread::sleep_until(lastWriteTime + std::chrono::milliseconds(10));
 
-		MapleMsg rxMsg;
-		bool acknowledged = (dpp_comms->send(msg, rxMsg, timeout_ms) && rxMsg.command == MDRS_DeviceReply);
+		bool received = dpp_comms->send(msg, response, timeout_ms);
 
 		// Save time of last write operation
 		lastWriteTime = std::chrono::steady_clock::now();
 
-		return acknowledged;
+		return received;
 	}
 
 	//! Sends the current game id to a DreamLink backed expansion device if supported

@@ -53,10 +53,14 @@
 #include "serialize.h"
 #include "hw/sh4/sh4_sched.h"
 
+#include <algorithm>
+
 /* debug RTL8139 card */
 //#define DEBUG_RTL8139 1
 
 #define PCI_PERIOD 30    /* 30 ns period = 33.333333 Mhz frequency */
+static constexpr u32 PCI_TIMER_SH4_CYCLES = 6;
+static constexpr u64 PCI_TIMER_WRAP_SH4_CYCLES = (1ULL << 32) * PCI_TIMER_SH4_CYCLES;
 
 #define SET_MASKED(input, mask, curr) \
     ( ( (input) & ~(mask) ) | ( (curr) & (mask) ) )
@@ -103,7 +107,7 @@ enum RTL8139_registers {
     MediaStatus = 0x58,
     Config3 = 0x59,
     Config4 = 0x5A,        /* absent on RTL-8139A */
-    HltClk = 0x5B,
+    Reserved5B = 0x5B,      /* HltClk on older RTL8139 variants */
     MultiIntr = 0x5C,
     PCIRevisionID = 0x5E,
     TxSummary = 0x60, /* TSAD register. Transmit Status of All Descriptors*/
@@ -431,6 +435,32 @@ struct RTL8139State {
 
     /* C ring mode */
     uint32_t   currTxDesc;
+	struct PendingTx {
+		u16 size;
+		u16 dmaOffset;
+		u16 dmaCyclesRemaining;
+		u8 descriptor;
+		u32 address;
+		s32 wireCyclesRemaining;
+		bool fetched;
+		bool thresholdReached;
+		bool wireStarted;
+		bool legacyAtomic;
+		u8 data[0x2000];
+	} txPending[4];
+	u8 txPendingHead;
+	u8 txPendingCount;
+	struct PendingRx {
+		u16 size;
+		u16 dmaSize;
+		u16 dmaOffset;
+		bool doInterrupt;
+		bool prepared;
+		bool legacyAtomic;
+		u8 data[0x2000];
+	} rxPending[4];
+	u8 rxPendingHead;
+	u8 rxPendingCount;
 
     EEprom9346 eeprom;
 
@@ -439,14 +469,13 @@ struct RTL8139State {
     int64_t    TCTR_base;
 
     /* PCI interrupt timer */
-#ifdef RTL8139_TIMER
-    QEMUTimer *timer;
-#endif
-
     MemoryRegion bar_io;
     MemoryRegion bar_mem;
 
     int schedId;
+    int timerSchedId;
+	int txSchedId;
+	int rxSchedId;
 };
 
 static void rtl8139_set_next_tctr_time(RTL8139State *s);
@@ -701,9 +730,36 @@ static void rtl8139_write_buffer(RTL8139State *s, const void *buf, int size)
 
 #define MIN_BUF_SIZE 60
 
+static bool rtl8139_classify_receive(const RTL8139State *s, const u8 *buf,
+		u32& packetHeader)
+{
+	static const u8 broadcast[ETH_ALEN] { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+	const bool promiscuous = s->RxConfig & AcceptAllPhys;
+	if (memcmp(buf, broadcast, ETH_ALEN) == 0) {
+		packetHeader |= RxBroadcast;
+		return promiscuous || (s->RxConfig & AcceptBroadcast);
+	}
+	if (buf[0] & 1) {
+		packetHeader |= RxMulticast;
+		if (promiscuous)
+			return true;
+		if (!(s->RxConfig & AcceptMulticast))
+			return false;
+		const int index = net_crc32(buf, ETH_ALEN) >> 26;
+		return s->mult[index >> 3] & (1 << (index & 7));
+	}
+	if (memcmp(s->phys, buf, ETH_ALEN) == 0) {
+		packetHeader |= RxPhysical;
+		return promiscuous || (s->RxConfig & AcceptMyPhys);
+	}
+	return promiscuous;
+}
+
 bool rtl8139_can_receive(RTL8139State *s)
 {
     int avail;
+	if (s->rxPendingCount == 4)
+		return false;
 
     /* Receive (drop) packets if card is disabled.  */
     if (!s->clock_enabled) {
@@ -726,9 +782,6 @@ static ssize_t rtl8139_do_receive(RTL8139State *s, const uint8_t *buf, size_t si
     uint32_t packet_header = 0;
 
     uint8_t buf1[MIN_BUF_SIZE + VLAN_HLEN];
-    static const uint8_t broadcast_macaddr[6] =
-        { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-
     DPRINTF(">>> received len=%zu", size);
 
     /* test if board clock is stopped */
@@ -746,72 +799,8 @@ static ssize_t rtl8139_do_receive(RTL8139State *s, const uint8_t *buf, size_t si
         return -1;
     }
 
-    /* XXX: check this */
-    if (s->RxConfig & AcceptAllPhys) {
-        /* promiscuous: receive all */
-        DPRINTF(">>> packet received in promiscuous mode");
-
-    } else {
-        if (!memcmp(buf,  broadcast_macaddr, 6)) {
-            /* broadcast address */
-            if (!(s->RxConfig & AcceptBroadcast))
-            {
-                DPRINTF(">>> broadcast packet rejected");
-
-                return size;
-            }
-
-            packet_header |= RxBroadcast;
-
-            DPRINTF(">>> broadcast packet received");
-
-        } else if (buf[0] & 0x01) {
-            /* multicast */
-            if (!(s->RxConfig & AcceptMulticast))
-            {
-                DPRINTF(">>> multicast packet rejected");
-
-                return size;
-            }
-
-            int mcast_idx = net_crc32(buf, ETH_ALEN) >> 26;
-
-            if (!(s->mult[mcast_idx >> 3] & (1 << (mcast_idx & 7))))
-            {
-                DPRINTF(">>> multicast address mismatch");
-
-                return size;
-            }
-
-            packet_header |= RxMulticast;
-
-            DPRINTF(">>> multicast packet received");
-
-        } else if (s->phys[0] == buf[0] &&
-                   s->phys[1] == buf[1] &&
-                   s->phys[2] == buf[2] &&
-                   s->phys[3] == buf[3] &&
-                   s->phys[4] == buf[4] &&
-                   s->phys[5] == buf[5]) {
-            /* match */
-            if (!(s->RxConfig & AcceptMyPhys))
-            {
-                DPRINTF(">>> rejecting physical address matching packet");
-
-                return size;
-            }
-
-            packet_header |= RxPhysical;
-
-            DPRINTF(">>> physical address matching packet received");
-
-        } else {
-
-            DPRINTF(">>> unknown packet");
-
-            return size;
-        }
-    }
+	if (size < ETH_ALEN || !rtl8139_classify_receive(s, buf, packet_header))
+		return size;
 
     /* if too small buffer, then expand it
      * Include some tailroom in case a vlan tag is later removed. */
@@ -878,9 +867,133 @@ static ssize_t rtl8139_do_receive(RTL8139State *s, const uint8_t *buf, size_t si
     return size_;
 }
 
+static bool rtl8139_prepare_receive(RTL8139State *s, RTL8139State::PendingRx& rx)
+{
+	if (!s->clock_enabled || !rtl8139_receiver_enabled(s) || rx.size < ETH_ALEN)
+		return false;
+
+	u32 packetHeader = 0;
+	if (!rtl8139_classify_receive(s, rx.data, packetHeader))
+		return false;
+
+	const u32 frameSize = std::max<u32>(rx.size, MIN_BUF_SIZE);
+	/* Frames already accepted by the NIC reserve ring space immediately, even
+	 * while their PCI DMA is still in progress.  Start from the live DMA
+	 * pointer, then account for the unwritten part of each queued entry. */
+	u32 reservedAddr = s->RxBufAddr;
+	for (u32 i = 0; i < s->rxPendingCount; i++) {
+		const auto& pending = s->rxPending[(s->rxPendingHead + i) % 4];
+		reservedAddr = MOD2(reservedAddr + pending.dmaSize - pending.dmaOffset,
+				s->RxBufferSize);
+		reservedAddr = MOD2(RX_ALIGN(reservedAddr), s->RxBufferSize);
+	}
+	const u32 available = MOD2(s->RxBufferSize + s->RxBufPtr - reservedAddr,
+			s->RxBufferSize);
+	if (available != 0 && RX_ALIGN(frameSize + 8) >= available) {
+		s->IntrStatus |= RxOverflow;
+		++s->RxMissed;
+		rtl8139_update_irq(s);
+		return false;
+	}
+
+	if (frameSize > rx.size)
+		memset(rx.data + rx.size, 0, frameSize - rx.size);
+	const u32 checksum = cpu_to_le32(crc32(0, rx.data, frameSize));
+	memmove(rx.data + sizeof(u32), rx.data, frameSize);
+	packetHeader |= RxStatusOK | (((frameSize + 4) << 16) & 0xffff0000);
+	const u32 header = cpu_to_le32(packetHeader);
+	memcpy(rx.data, &header, sizeof(header));
+	memcpy(rx.data + sizeof(header) + frameSize, &checksum, sizeof(checksum));
+	rx.dmaSize = frameSize + 8;
+	rx.dmaOffset = 0;
+	rx.prepared = true;
+	return true;
+}
+
+static int rtl8139_rx_pci_cycles(u32 remaining)
+{
+	const u32 bytes = std::min(remaining, 32u);
+	return std::max(1u, ((bytes + 3) / 4) * PCI_TIMER_SH4_CYCLES);
+}
+
+static int rtl8139_rx_sched_callback(int tag, int cycles, int jitter, void *arg)
+{
+	RTL8139State *s = static_cast<RTL8139State *>(arg);
+	int remainingJitter = std::max(0, jitter);
+	for (;;)
+	{
+	if (s->rxPendingCount == 0)
+		return 0;
+
+	auto& rx = s->rxPending[s->rxPendingHead];
+	if (rx.legacyAtomic) {
+		rtl8139_do_receive(s, rx.data, rx.size, rx.doInterrupt);
+	}
+	else {
+		if (!rx.prepared && !rtl8139_prepare_receive(s, rx)) {
+			rx.dmaSize = 0;
+		}
+		if (rx.dmaOffset < rx.dmaSize) {
+			const u32 unit = std::min<u32>(rx.dmaSize - rx.dmaOffset, 32);
+			rtl8139_write_buffer(s, rx.data + rx.dmaOffset, unit);
+			rx.dmaOffset += unit;
+			if (rx.dmaOffset < rx.dmaSize)
+			{
+				const int nextCycles = rtl8139_rx_pci_cycles(rx.dmaSize - rx.dmaOffset);
+				if (nextCycles > remainingJitter)
+					return std::max(0, jitter) + nextCycles - remainingJitter;
+				remainingJitter -= nextCycles;
+				continue;
+			}
+			s->RxBufAddr = MOD2(RX_ALIGN(s->RxBufAddr), s->RxBufferSize);
+			s->IntrStatus |= RxOK;
+			if (rx.doInterrupt)
+				rtl8139_update_irq(s);
+		}
+	}
+	s->rxPendingHead = (s->rxPendingHead + 1) % 4;
+	s->rxPendingCount--;
+	if (s->rxPendingCount == 0)
+		return 0;
+	const auto& next = s->rxPending[s->rxPendingHead];
+	const int nextCycles = next.legacyAtomic
+			? std::max(1u, ((std::max<u32>(next.size, MIN_BUF_SIZE) + 11) / 4)
+					* PCI_TIMER_SH4_CYCLES)
+			: rtl8139_rx_pci_cycles(std::max<u32>(next.size, MIN_BUF_SIZE) + 8);
+	if (nextCycles > remainingJitter)
+		return std::max(0, jitter) + nextCycles - remainingJitter;
+	remainingJitter -= nextCycles;
+	}
+}
+
+static ssize_t rtl8139_queue_receive(RTL8139State *s, const uint8_t *buf,
+		size_t size, bool doInterrupt)
+{
+	if (size > sizeof(s->rxPending[0].data) - 8 || s->rxPendingCount == 4)
+		return 0;
+	const u32 tail = (s->rxPendingHead + s->rxPendingCount) % 4;
+	auto& rx = s->rxPending[tail];
+	rx.size = size;
+	rx.dmaSize = 0;
+	rx.dmaOffset = 0;
+	rx.doInterrupt = doInterrupt;
+	rx.prepared = false;
+	rx.legacyAtomic = false;
+	memcpy(rx.data, buf, size);
+	/* Destination filtering is decided when the frame reaches the NIC. RCR,
+	 * MAR, or IDR writes during the later PCI DMA must not change that result. */
+	if (!rtl8139_prepare_receive(s, rx))
+		return size;
+	s->rxPendingCount++;
+	if (s->rxPendingCount == 1)
+		sh4_sched_request(s->rxSchedId,
+				rtl8139_rx_pci_cycles(std::max<u32>(size, MIN_BUF_SIZE) + 8));
+	return size;
+}
+
 ssize_t rtl8139_receive(RTL8139State *s, const uint8_t *buf, size_t size)
 {
-    return rtl8139_do_receive(s, buf, size, 1);
+	return rtl8139_queue_receive(s, buf, size, true);
 }
 
 static void rtl8139_reset_rxring(RTL8139State *s, uint32_t bufferSize)
@@ -892,10 +1005,8 @@ static void rtl8139_reset_rxring(RTL8139State *s, uint32_t bufferSize)
 
 static void rtl8139_reset_phy(RTL8139State *s)
 {
+    s->BasicModeCtrl = 0x1000; /* auto-negotiation enabled */
     s->BasicModeStatus  = 0x7809;
-    s->BasicModeStatus |= 0x0020; /* autonegotiation completed */
-    /* preserve link state */
-	s->BasicModeStatus |= 0x04; // Link up;
 
     s->NWayAdvert    = 0x05e1; /* all modes, full duplex */
     s->NWayLPAR      = 0x05e1; /* all modes, full duplex */
@@ -909,6 +1020,14 @@ static void rtl8139_reset_phy(RTL8139State *s)
 void rtl8139_reset(RTL8139State *s)
 {
     int i;
+	if (s->txSchedId >= 0)
+		sh4_sched_request(s->txSchedId, -1);
+	if (s->rxSchedId >= 0)
+		sh4_sched_request(s->rxSchedId, -1);
+	s->txPendingHead = 0;
+	s->txPendingCount = 0;
+	s->rxPendingHead = 0;
+	s->rxPendingCount = 0;
 
     /* restore MAC address */
     memcpy(s->phys, s->conf.macaddr.a, 6);
@@ -917,6 +1036,7 @@ void rtl8139_reset(RTL8139State *s)
     /* reset interrupt mask */
     s->IntrStatus = 0;
     s->IntrMask = 0;
+	s->RxMissed = 0;
 
     rtl8139_update_irq(s);
 
@@ -930,6 +1050,8 @@ void rtl8139_reset(RTL8139State *s)
 
     s->RxBuf = 0;
 
+    /* RCR returns to its power-on default on a global software reset. */
+    s->RxConfig = 0;
     rtl8139_reset_rxring(s, 8192);
 
     /* ACK the reset */
@@ -939,7 +1061,8 @@ void rtl8139_reset(RTL8139State *s)
 //    s->TxConfig |= HW_REVID(1, 0, 0, 0, 0, 0, 0); // RTL-8139  HasHltClk
     s->clock_enabled = 0;
 #else
-    s->TxConfig |= HW_REVID(1, 1, 1, 0, 1, 1, 0); // RTL-8139C+ HasLWake
+    // RTL-8139C hardware-version signature (TCR bits 30:26 and 23:22).
+    s->TxConfig |= HW_REVID(1, 1, 1, 0, 1, 0, 0);
     s->clock_enabled = 1;
 #endif
 
@@ -951,16 +1074,12 @@ void rtl8139_reset(RTL8139State *s)
     s->Config3 = 0x1; /* fast back-to-back compatible */
     s->Config5 = 0x0;
 
-//    s->BasicModeCtrl = 0x3100; // 100Mbps, full duplex, autonegotiation
-//    s->BasicModeCtrl = 0x2100; // 100Mbps, full duplex
-    s->BasicModeCtrl = 0x1000; // autonegotiation
-
     rtl8139_reset_phy(s);
 
     /* also reset timer and disable timer interrupt */
     s->TCTR = 0;
     s->TimerInt = 0;
-    s->TCTR_base = 0;
+    s->TCTR_base = sh4_sched_now64();
     rtl8139_set_next_tctr_time(s);
 }
 
@@ -973,7 +1092,15 @@ static void rtl8139_ChipCmd_write(RTL8139State *s, uint32_t val)
     if (val & CmdReset)
     {
         DPRINTF("ChipCmd reset");
+		// A command-register software reset does not reload IDR0-5 from
+		// EEPROM. The Dreamcast driver also relies on RBSTART surviving its
+		// second reset, just like the transmit start-address registers.
+		uint8_t phys[sizeof(s->phys)];
+		memcpy(phys, s->phys, sizeof(phys));
+		const uint32_t rxBuf = s->RxBuf;
         rtl8139_reset(s);
+		memcpy(s->phys, phys, sizeof(s->phys));
+		s->RxBuf = rxBuf;
     }
     if (val & CmdRxEnb)
     {
@@ -1041,22 +1168,24 @@ static void rtl8139_BasicModeCtrl_write(RTL8139State *s, uint32_t val)
     /* mask unwritable bits */
     uint32_t mask = 0xccff;
 
-    if (true || !rtl8139_config_writable(s))
-    {
-        /* Speed setting and autonegotiation enable bits are read-only */
-        mask |= 0x3000;
-        /* Duplex mode setting is read-only */
-        mask |= 0x0100;
-    }
-
-    if (val & 0x8000) {
-        /* Reset PHY */
+    const bool reset = val & 0x8000;
+    const bool restartAutoNegotiation = val & 0x0200;
+    if (reset) {
+        /* Reset all PHY registers, including BMCR itself. */
         rtl8139_reset_phy(s);
+        return;
     }
-
     val = SET_MASKED(val, mask, s->BasicModeCtrl);
 
+    /* Restart auto-negotiation is a self-clearing command bit. */
+    val &= ~0x0200;
+
     s->BasicModeCtrl = val;
+	if (restartAutoNegotiation && (s->BasicModeCtrl & 0x1000)) {
+		/* Model the negotiation delay before reporting link change. */
+		s->BasicModeStatus &= ~(0x0020 | 0x0004);
+		sh4_sched_request(s->schedId, 2000000); /* 10 ms */
+	}
 }
 
 static uint32_t rtl8139_BasicModeCtrl_read(RTL8139State *s)
@@ -1066,18 +1195,6 @@ static uint32_t rtl8139_BasicModeCtrl_read(RTL8139State *s)
     DPRINTF("BasicModeCtrl register read(w) val=0x%04x", ret);
 
     return ret;
-}
-
-static void rtl8139_BasicModeStatus_write(RTL8139State *s, uint32_t val)
-{
-    val &= 0xffff;
-
-    DPRINTF("BasicModeStatus register write(w) val=0x%04x", val);
-
-    /* mask unwritable bits */
-    val = SET_MASKED(val, 0xff3f, s->BasicModeStatus);
-
-    s->BasicModeStatus = val;
 }
 
 static uint32_t rtl8139_BasicModeStatus_read(RTL8139State *s)
@@ -1247,6 +1364,9 @@ static void rtl8139_Config5_write(RTL8139State *s, uint32_t val)
 
     DPRINTF("Config5 write val=0x%02x", val);
 
+	if (!rtl8139_config_writable(s))
+		return;
+
     /* mask unwritable bits */
     val = SET_MASKED(val, 0x80, s->Config5);
 
@@ -1302,13 +1422,16 @@ static void rtl8139_RxConfig_write(RTL8139State *s, uint32_t val)
 
     /* mask unwritable bits */
     val = SET_MASKED(val, 0xf0fc0040, s->RxConfig);
+	const bool ringSizeChanged = ((val ^ s->RxConfig) & (3 << 11)) != 0;
 
     s->RxConfig = val;
 
-    /* reset buffer size and read/write pointers */
-    rtl8139_reset_rxring(s, 8192 << ((s->RxConfig >> 11) & 0x3));
-
-    DPRINTF("RxConfig write reset buffer size to %d", s->RxBufferSize);
+	/* Filter changes do not discard a live receive ring. Reinitialize it
+	 * when its size changes, or while software has the receiver stopped. */
+	if (ringSizeChanged || !rtl8139_receiver_enabled(s)) {
+		rtl8139_reset_rxring(s, 8192 << ((s->RxConfig >> 11) & 0x3));
+		DPRINTF("RxConfig write reset buffer size to %d", s->RxBufferSize);
+	}
 }
 
 static uint32_t rtl8139_RxConfig_read(RTL8139State *s)
@@ -1332,12 +1455,187 @@ static void rtl8139_transfer_frame(RTL8139State *s, uint8_t *buf, int size,
     if (TxLoopBack == (s->TxConfig & TxLoopBack))
     {
         DPRINTF("+++ transmit loopback mode");
-        rtl8139_do_receive(s, buf, size, do_interrupt);
+		rtl8139_queue_receive(s, buf, size, do_interrupt != 0);
     }
     else
     {
         qemu_send_packet(s, buf, size);
     }
+}
+
+static int rtl8139_tx_pci_cycles(u32 size)
+{
+	// PCI reads one 32-bit word per 33 MHz bus beat.
+	return std::max(1u, ((size + 3) / 4) * PCI_TIMER_SH4_CYCLES);
+}
+
+static int rtl8139_tx_wire_cycles(const RTL8139State *s, u32 size)
+{
+	// Account for minimum-frame padding, preamble/SFD, optional FCS, and
+	// the TCR-selected inter-frame gap (84, 88, 92, or 96 bit-times).
+	const u32 frameBits = (std::max(size, 60u) + 8 + ((s->TxConfig & TxCRC) ? 0 : 4)) * 8;
+	const u32 interFrameGapBits = 84 + ((s->TxConfig >> TxIFGShift) & 3) * 4;
+	const bool autoNegotiation = s->BasicModeCtrl & 0x1000;
+	const bool speed100 = autoNegotiation
+			? ((s->NWayAdvert & s->NWayLPAR & 0x0380) != 0)
+			: ((s->BasicModeCtrl & 0x2000) != 0);
+	return sh4CyclesForXfer(frameBits + interFrameGapBits,
+			speed100 ? 100'000'000 : 10'000'000);
+}
+
+static u32 rtl8139_tx_threshold_bytes(const RTL8139State *s, u32 descriptor,
+		u32 size)
+{
+	/* TSD.ERTXTH=0 starts the wire after 8 bytes; other values are in
+	 * 32-byte units. */
+	const u32 thresholdField = (s->TxStatus[descriptor] >> 16) & 0x3f;
+	return std::min(size, thresholdField == 0 ? 8u : thresholdField * 32);
+}
+
+static u32 rtl8139_tx_next_dma_bytes(const RTL8139State *s,
+		const RTL8139State::PendingTx& tx)
+{
+	if (tx.dmaOffset >= tx.size)
+		return 0;
+	u32 bytes = std::min<u32>(32, tx.size - tx.dmaOffset);
+	if (!tx.thresholdReached) {
+		const u32 threshold = rtl8139_tx_threshold_bytes(s, tx.descriptor, tx.size);
+		bytes = std::min(bytes, threshold - tx.dmaOffset);
+	}
+	return bytes;
+}
+
+static RTL8139State::PendingTx *rtl8139_tx_dma_pending(RTL8139State *s)
+{
+	for (u32 i = 0; i < s->txPendingCount; ++i) {
+		auto& tx = s->txPending[(s->txPendingHead + i) % 4];
+		if (!tx.fetched)
+			return &tx;
+	}
+	return nullptr;
+}
+
+static int rtl8139_tx_next_event_cycles(RTL8139State *s)
+{
+	if (s->txPendingCount == 0)
+		return 0;
+	const auto& head = s->txPending[s->txPendingHead];
+	int next = head.wireStarted ? head.wireCyclesRemaining : INT_MAX;
+	if (auto *dma = rtl8139_tx_dma_pending(s)) {
+		if (dma->dmaCyclesRemaining == 0)
+			dma->dmaCyclesRemaining = rtl8139_tx_pci_cycles(
+					rtl8139_tx_next_dma_bytes(s, *dma));
+		next = std::min(next, static_cast<int>(dma->dmaCyclesRemaining));
+	}
+	return next == INT_MAX ? 0 : std::max(1, next);
+}
+
+static void rtl8139_tx_start_wire(RTL8139State *s)
+{
+	if (s->txPendingCount == 0)
+		return;
+	auto& head = s->txPending[s->txPendingHead];
+	if (!head.legacyAtomic && head.thresholdReached && !head.wireStarted) {
+		head.wireStarted = true;
+		head.wireCyclesRemaining = rtl8139_tx_wire_cycles(s, head.size);
+	}
+}
+
+static void rtl8139_tx_complete_head(RTL8139State *s)
+{
+	auto& tx = s->txPending[s->txPendingHead];
+	s->TxStatus[tx.descriptor] |= TxStatOK;
+	u32 wireSize = tx.size;
+	if (wireSize != 0 && wireSize < 60) {
+		memset(tx.data + wireSize, 0, 60 - wireSize);
+		wireSize = 60;
+	}
+	rtl8139_transfer_frame(s, tx.data, wireSize, 0);
+	s->IntrStatus |= TxOK;
+	rtl8139_update_irq(s);
+	s->txPendingHead = (s->txPendingHead + 1) % 4;
+	s->txPendingCount--;
+}
+
+static int rtl8139_tx_sched_callback(int tag, int cycles, int jitter, void *arg)
+{
+	RTL8139State *s = static_cast<RTL8139State *>(arg);
+	int remainingJitter = std::max(0, jitter);
+	for (;;)
+	{
+	if (s->txPendingCount == 0)
+		return 0;
+
+	auto& tx = s->txPending[s->txPendingHead];
+	if (tx.legacyAtomic) {
+		if (!tx.fetched) {
+			pci_dma_read(PCI_DEVICE(s), tx.address, tx.data, tx.size);
+			tx.dmaOffset = tx.size;
+			tx.fetched = true;
+			s->TxStatus[tx.descriptor] |= TxHostOwns;
+			const u32 threshold = rtl8139_tx_threshold_bytes(s, tx.descriptor, tx.size);
+			const int overlap = rtl8139_tx_pci_cycles(tx.size)
+					- rtl8139_tx_pci_cycles(threshold);
+			const int nextCycles = std::max(1,
+					rtl8139_tx_wire_cycles(s, tx.size) - overlap);
+			if (nextCycles > remainingJitter)
+				return std::max(0, jitter) + nextCycles - remainingJitter;
+			remainingJitter -= nextCycles;
+			cycles = nextCycles;
+			continue;
+		}
+		rtl8139_tx_complete_head(s);
+		const int nextCycles = rtl8139_tx_next_event_cycles(s);
+		if (nextCycles == 0)
+			return 0;
+		if (nextCycles > remainingJitter)
+			return std::max(0, jitter) + nextCycles - remainingJitter;
+		remainingJitter -= nextCycles;
+		cycles = nextCycles;
+		continue;
+	}
+
+	if (tx.wireStarted)
+		tx.wireCyclesRemaining = std::max(0, tx.wireCyclesRemaining - cycles);
+	auto *dma = rtl8139_tx_dma_pending(s);
+	bool dmaDue = false;
+	if (dma != nullptr && dma->dmaCyclesRemaining != 0) {
+		dma->dmaCyclesRemaining = cycles >= dma->dmaCyclesRemaining
+				? 0 : dma->dmaCyclesRemaining - cycles;
+		dmaDue = dma->dmaCyclesRemaining == 0;
+	}
+	if (dmaDue) {
+		const u32 unit = rtl8139_tx_next_dma_bytes(s, *dma);
+		if (unit != 0) {
+			pci_dma_read(PCI_DEVICE(s), dma->address + dma->dmaOffset,
+					dma->data + dma->dmaOffset, unit);
+			dma->dmaOffset += unit;
+		}
+		if (dma->dmaOffset >= rtl8139_tx_threshold_bytes(s,
+					dma->descriptor, dma->size))
+			dma->thresholdReached = true;
+		if (dma->dmaOffset == dma->size) {
+			dma->fetched = true;
+			s->TxStatus[dma->descriptor] |= TxHostOwns;
+		}
+	}
+
+	rtl8139_tx_start_wire(s);
+	if (s->txPendingCount != 0) {
+		auto& head = s->txPending[s->txPendingHead];
+		if (head.wireStarted && head.wireCyclesRemaining == 0) {
+			rtl8139_tx_complete_head(s);
+			rtl8139_tx_start_wire(s);
+		}
+	}
+	const int nextCycles = rtl8139_tx_next_event_cycles(s);
+	if (nextCycles == 0)
+		return 0;
+	if (nextCycles > remainingJitter)
+		return std::max(0, jitter) + nextCycles - remainingJitter;
+	remainingJitter -= nextCycles;
+	cycles = nextCycles;
+	}
 }
 
 static int rtl8139_transmit_one(RTL8139State *s, int descriptor)
@@ -1358,27 +1656,40 @@ static int rtl8139_transmit_one(RTL8139State *s, int descriptor)
 
     DPRINTF("+++ transmitting from descriptor %d", descriptor);
 
-    PCIDevice *d = PCI_DEVICE(s);
     int txsize = s->TxStatus[descriptor] & 0x1fff;
-    uint8_t txbuffer[0x2000];
+    if (s->txPendingCount == 4)
+        return 0;
+	const bool dmaWasIdle = rtl8139_tx_dma_pending(s) == nullptr;
+	bool startNewDma = dmaWasIdle;
+	if (s->txPendingCount != 0 && dmaWasIdle) {
+		auto& head = s->txPending[s->txPendingHead];
+		startNewDma = !head.legacyAtomic;
+		if (startNewDma && head.wireStarted) {
+			const int remaining = sh4_sched_cycles_until(s->txSchedId);
+			if (remaining >= 0)
+				head.wireCyclesRemaining = std::min(
+						head.wireCyclesRemaining, remaining);
+		}
+	}
+	const u32 tail = (s->txPendingHead + s->txPendingCount) % 4;
+	auto& pending = s->txPending[tail];
+	pending.size = txsize;
+	pending.dmaOffset = 0;
+	pending.dmaCyclesRemaining = 0;
+	pending.descriptor = descriptor;
+	pending.address = s->TxAddr[descriptor];
+	pending.wireCyclesRemaining = 0;
+	pending.fetched = false;
+	pending.thresholdReached = false;
+	pending.wireStarted = false;
+	pending.legacyAtomic = false;
 
     DPRINTF("+++ transmit reading %d bytes from host memory at 0x%08x",
         txsize, s->TxAddr[descriptor]);
 
-    pci_dma_read(d, s->TxAddr[descriptor], txbuffer, txsize);
-
-    /* Mark descriptor as transferred */
-    s->TxStatus[descriptor] |= TxHostOwns;
-    s->TxStatus[descriptor] |= TxStatOK;
-
-    rtl8139_transfer_frame(s, txbuffer, txsize, 0);
-
-    DPRINTF("+++ transmitted %d bytes from descriptor %d", txsize,
-        descriptor);
-
-    /* update interrupt */
-    s->IntrStatus |= TxOK;
-    rtl8139_update_irq(s);
+	s->txPendingCount++;
+	if (s->txPendingCount == 1 || startNewDma)
+		sh4_sched_request(s->txSchedId, rtl8139_tx_next_event_cycles(s));
 
     return 1;
 }
@@ -1598,10 +1909,8 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
     /* mask unwritable bits */
     newStatus = SET_MASKED(newStatus, 0x1e00, s->IntrStatus);
 
-    /* writing 1 to interrupt status register bit clears it */
-    s->IntrStatus = 0;
-    rtl8139_update_irq(s);
-
+    /* Writing one clears only the selected status bits.  Do not pulse the
+     * level-sensitive PCI interrupt low while another enabled cause remains. */
     s->IntrStatus = newStatus;
     rtl8139_set_next_tctr_time(s);
     rtl8139_update_irq(s);
@@ -1657,16 +1966,9 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
         case MAC0 + 2:
         case MAC0 + 3:
         case MAC0 + 4:
-            s->phys[addr - MAC0] = val;
-            break;
         case MAC0+5:
-            s->phys[addr - MAC0] = val;
-            //qemu_format_nic_info_str(qemu_get_queue(s->nic), s->phys);
-            break;
         case MAC0+6:
         case MAC0+7:
-            /* reserved */
-            break;
         case MAR0:
         case MAR0 + 1:
         case MAR0 + 2:
@@ -1675,7 +1977,7 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
         case MAR0 + 5:
         case MAR0 + 6:
         case MAR0 + 7:
-            s->mult[addr - MAR0] = val;
+			/* IDR and MAR are writable only by aligned 32-bit accesses. */
             break;
         case ChipCmd:
             rtl8139_ChipCmd_write(s, val);
@@ -1706,18 +2008,8 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
             DPRINTF("not implemented write(b) to MediaStatus val=0x%02x",
                 val);
             break;
-
-        case HltClk:
-            DPRINTF("HltClk write val=0x%08x", val);
-            if (val == 'R')
-            {
-                s->clock_enabled = 1;
-            }
-            else if (val == 'H')
-            {
-                s->clock_enabled = 0;
-            }
-            break;
+		case Reserved5B:
+			break;
 
         case TxThresh:
             DPRINTF("not implemented write(b) to TxThresh val=0x%02x", val);
@@ -1759,7 +2051,7 @@ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
             rtl8139_BasicModeCtrl_write(s, val);
             break;
         case BasicModeStatus:
-            rtl8139_BasicModeStatus_write(s, val);
+			DPRINTF("forbidden BasicModeStatus write(w) val=0x%04x", val);
             break;
         case NWayAdvert:
             DPRINTF("NWayAdvert write(w) val=0x%04x", val);
@@ -1769,8 +2061,7 @@ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
             DPRINTF("forbidden NWayLPAR write(w) val=0x%04x", val);
             break;
         case NWayExpansion:
-            DPRINTF("NWayExpansion write(w) val=0x%04x", val);
-            s->NWayExpansion = val;
+			DPRINTF("forbidden NWayExpansion write(w) val=0x%04x", val);
             break;
 
         case CpCmd:
@@ -1793,32 +2084,18 @@ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
 
 static void rtl8139_set_next_tctr_time(RTL8139State *s)
 {
-#ifdef RTL8139_TIMER
-    const uint64_t ns_per_period = (uint64_t)PCI_PERIOD << 32;
+	if (s->TimerInt == 0 || !s->clock_enabled)
+	{
+		sh4_sched_request(s->timerSchedId, -1);
+		return;
+	}
 
-    DPRINTF("entered rtl8139_set_next_tctr_time");
-
-    /* This function is called at least once per period, so it is a good
-     * place to update the timer base.
-     *
-     * After one iteration of this loop the value in the Timer register does
-     * not change, but the device model is counting up by 2^32 ticks (approx.
-     * 130 seconds).
-     */
-    while (s->TCTR_base + ns_per_period <= qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
-        s->TCTR_base += ns_per_period;
-    }
-
-    if (!s->TimerInt) {
-        timer_del(s->timer);
-    } else {
-        uint64_t delta = (uint64_t)s->TimerInt * PCI_PERIOD;
-        if (s->TCTR_base + delta <= qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
-            delta += ns_per_period;
-        }
-        timer_mod(s->timer, s->TCTR_base + delta);
-    }
-#endif
+	const u64 now = sh4_sched_now64();
+	u64 deadline = s->TCTR_base + (u64)s->TimerInt * PCI_TIMER_SH4_CYCLES;
+	while (deadline <= now)
+		deadline += PCI_TIMER_WRAP_SH4_CYCLES;
+	const u64 remaining = deadline - now;
+	sh4_sched_request(s->timerSchedId, std::min<u64>(remaining, SH4_MAIN_CLOCK));
 }
 
 static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
@@ -1827,6 +2104,22 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
 
     switch (addr)
     {
+		case MAC0:
+			s->phys[0] = val;
+			s->phys[1] = val >> 8;
+			s->phys[2] = val >> 16;
+			s->phys[3] = val >> 24;
+			break;
+		case MAC0 + 4:
+			s->phys[4] = val;
+			s->phys[5] = val >> 8;
+			break;
+		case MAR0:
+		case MAR0 + 4:
+			for (unsigned i = 0; i < 4; ++i)
+				s->mult[addr - MAR0 + i] = val >> (i * 8);
+			break;
+
         case RxMissed:
             DPRINTF("RxMissed clearing on write");
             s->RxMissed = 0;
@@ -1841,40 +2134,16 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
             break;
 
         case TxStatus0:
-        case TxStatus0 + 1:
-        case TxStatus0 + 2:
-        case TxStatus0 + 3:
         case TxStatus0 + 4:
-        case TxStatus0 + 5:
-        case TxStatus0 + 6:
-        case TxStatus0 + 7:
         case TxStatus0 + 8:
-        case TxStatus0 + 9:
-        case TxStatus0 + 10:
-        case TxStatus0 + 11:
         case TxStatus0 + 12:
-        case TxStatus0 + 13:
-        case TxStatus0 + 14:
-        case TxStatus0 + 15:
             rtl8139_TxStatus_write(s, addr-TxStatus0, val);
             break;
 
         case TxAddr0:
-        case TxAddr0 + 1:
-        case TxAddr0 + 2:
-        case TxAddr0 + 3:
         case TxAddr0 + 4:
-        case TxAddr0 + 5:
-        case TxAddr0 + 6:
-        case TxAddr0 + 7:
         case TxAddr0 + 8:
-        case TxAddr0 + 9:
-        case TxAddr0 + 10:
-        case TxAddr0 + 11:
         case TxAddr0 + 12:
-        case TxAddr0 + 13:
-        case TxAddr0 + 14:
-        case TxAddr0 + 15:
             rtl8139_TxAddr_write(s, addr-TxAddr0, val);
             break;
 
@@ -1892,9 +2161,7 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
 
         case Timer:
             DPRINTF("TCTR Timer reset on write");
-#ifdef RTL8139_TIMER
-            s->TCTR_base = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-#endif
+			s->TCTR_base = sh4_sched_now64();
             rtl8139_set_next_tctr_time(s);
             break;
 
@@ -1944,25 +2211,6 @@ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
         case MAR0 + 7:
             ret = s->mult[addr - MAR0];
             break;
-        case TxStatus0:
-        case TxStatus0 + 1:
-        case TxStatus0 + 2:
-        case TxStatus0 + 3:
-        case TxStatus0 + 4:
-        case TxStatus0 + 5:
-        case TxStatus0 + 6:
-        case TxStatus0 + 7:
-        case TxStatus0 + 8:
-        case TxStatus0 + 9:
-        case TxStatus0 + 10:
-        case TxStatus0 + 11:
-        case TxStatus0 + 12:
-        case TxStatus0 + 13:
-        case TxStatus0 + 14:
-        case TxStatus0 + 15:
-            ret = rtl8139_TxStatus_TxAddr_read(s, s->TxStatus, TxStatus0,
-                                               addr, 1);
-            break;
         case ChipCmd:
             ret = rtl8139_ChipCmd_read(s);
             break;
@@ -1990,11 +2238,9 @@ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
             ret = 0xd0 | (~s->BasicModeStatus & 0x04);
             DPRINTF("MediaStatus read 0x%x", ret);
             break;
-
-        case HltClk:
-            ret = s->clock_enabled;
-            DPRINTF("HltClk read 0x%x", ret);
-            break;
+		case Reserved5B:
+			ret = 0;
+			break;
 
         case PCIRevisionID:
             ret = RTL8139_PCI_REVID;
@@ -2027,24 +2273,6 @@ static uint32_t rtl8139_io_readw(void *opaque, uint8_t addr)
 
     switch (addr)
     {
-        case TxAddr0:
-        case TxAddr0 + 1:
-        case TxAddr0 + 2:
-        case TxAddr0 + 3:
-        case TxAddr0 + 4:
-        case TxAddr0 + 5:
-        case TxAddr0 + 6:
-        case TxAddr0 + 7:
-        case TxAddr0 + 8:
-        case TxAddr0 + 9:
-        case TxAddr0 + 10:
-        case TxAddr0 + 11:
-        case TxAddr0 + 12:
-        case TxAddr0 + 13:
-        case TxAddr0 + 14:
-        case TxAddr0 + 15:
-            ret = rtl8139_TxStatus_TxAddr_read(s, s->TxAddr, TxAddr0, addr, 2);
-            break;
         case IntrMask:
             ret = rtl8139_IntrMask_read(s);
             break;
@@ -2137,41 +2365,17 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
             break;
 
         case TxStatus0:
-        case TxStatus0 + 1:
-        case TxStatus0 + 2:
-        case TxStatus0 + 3:
         case TxStatus0 + 4:
-        case TxStatus0 + 5:
-        case TxStatus0 + 6:
-        case TxStatus0 + 7:
         case TxStatus0 + 8:
-        case TxStatus0 + 9:
-        case TxStatus0 + 10:
-        case TxStatus0 + 11:
         case TxStatus0 + 12:
-        case TxStatus0 + 13:
-        case TxStatus0 + 14:
-        case TxStatus0 + 15:
             ret = rtl8139_TxStatus_TxAddr_read(s, s->TxStatus, TxStatus0,
                                                addr, 4);
             break;
 
         case TxAddr0:
-        case TxAddr0 + 1:
-        case TxAddr0 + 2:
-        case TxAddr0 + 3:
         case TxAddr0 + 4:
-        case TxAddr0 + 5:
-        case TxAddr0 + 6:
-        case TxAddr0 + 7:
         case TxAddr0 + 8:
-        case TxAddr0 + 9:
-        case TxAddr0 + 10:
-        case TxAddr0 + 11:
         case TxAddr0 + 12:
-        case TxAddr0 + 13:
-        case TxAddr0 + 14:
-        case TxAddr0 + 15:
             ret = rtl8139_TxAddr_read(s, addr-TxAddr0);
             break;
 
@@ -2180,12 +2384,7 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
             break;
 
         case Timer:
-#ifdef RTL8139_TIMER
-            ret = (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->TCTR_base) /
-                  PCI_PERIOD;
-#else
-			ret = 0;
-#endif
+			ret = (sh4_sched_now64() - s->TCTR_base) / PCI_TIMER_SH4_CYCLES;
             DPRINTF("TCTR Timer read val=0x%08x", ret);
             break;
 
@@ -2250,40 +2449,34 @@ uint64_t rtl8139_ioport_read(void *opaque, hwaddr addr, unsigned size)
     return -1;
 }
 
-#ifdef RTL8139_TIMER
-static void rtl8139_timer(void *opaque)
+static int rtl8139_timer_sched_callback(int tag, int cycles, int jitter, void *arg)
 {
-    RTL8139State *s = (RTL8139State *)opaque;
+	RTL8139State *s = static_cast<RTL8139State *>(arg);
+	if (s->TimerInt == 0 || !s->clock_enabled)
+		return 0;
 
-    if (!s->clock_enabled)
-    {
-        DPRINTF(">>> timer: clock is not running");
-        return;
-    }
+	const u64 now = sh4_sched_now64();
+	u64 deadline = s->TCTR_base + (u64)s->TimerInt * PCI_TIMER_SH4_CYCLES;
+	while (deadline + PCI_TIMER_WRAP_SH4_CYCLES <= now)
+		deadline += PCI_TIMER_WRAP_SH4_CYCLES;
+	if (now >= deadline)
+	{
+		s->IntrStatus |= PCSTimeout;
+		rtl8139_update_irq(s);
+		deadline += PCI_TIMER_WRAP_SH4_CYCLES;
+	}
 
-    s->IntrStatus |= PCSTimeout;
-    rtl8139_update_irq(s);
-    rtl8139_set_next_tctr_time(s);
+	return std::min<u64>(deadline - now, SH4_MAIN_CLOCK);
 }
-#endif
 
 static int rtl8139_sched_callback(int tag, int cycles, int jitter, void *arg)
 {
 	RTL8139State *state = (RTL8139State *)arg;
+	state->BasicModeStatus |= 0x0020 | 0x0004; /* AN complete, link up */
 	state->IntrStatus |= RxUnderrun;	// Link change
     rtl8139_update_irq(state);
 
 	return 0;
-}
-
-static void pci_rtl8139_uninit(PCIDevice *dev)
-{
-#ifdef RTL8139_TIMER
-    RTL8139State *s = RTL8139(dev);
-
-    timer_del(s->timer);
-    timer_free(s->timer);
-#endif
 }
 
 void pci_rtl8139_realize(PCIDevice *dev)
@@ -2292,10 +2485,21 @@ void pci_rtl8139_realize(PCIDevice *dev)
     uint8_t *pci_conf;
 
     pci_conf = dev->config;
+	/* GAPS exposes the BBA under Sega's custom PCI identity rather than the
+	 * RTL8139C's stock Realtek IDs. */
+    pci_conf[0x00] = PCI_VENDOR_ID_SEGA & 0xff;
+    pci_conf[0x01] = PCI_VENDOR_ID_SEGA >> 8;
+    pci_conf[0x02] = PCI_DEVICE_ID_SEGA_BBA & 0xff;
+    pci_conf[0x03] = PCI_DEVICE_ID_SEGA_BBA >> 8;
+    pci_conf[PCI_REVISION_ID] = RTL8139_PCI_REVID;
+    pci_conf[PCI_CLASS_PROG] = 0;
+    pci_conf[PCI_CLASS_DEVICE] = PCI_CLASS_NETWORK_ETHERNET & 0xff;
+    pci_conf[PCI_CLASS_DEVICE + 1] = PCI_CLASS_NETWORK_ETHERNET >> 8;
+	pci_conf[PCI_STATUS] = 0;
+	pci_conf[PCI_STATUS + 1] = 0x02; /* DEVSEL timing: medium */
     pci_conf[PCI_INTERRUPT_PIN] = 1;    /* interrupt pin A */
-    /* TODO: start of capability list, but no capability
-     * list bit in status register, and offset 0xdc seems unused. */
-    pci_conf[PCI_CAPABILITY_LIST] = 0xdc;
+	pci_conf[PCI_MIN_GNT] = 0x20;
+	pci_conf[PCI_MAX_LAT] = 0x20;
 
     s->bar_io.size = 0x100;
     s->bar_mem.size = 0x100;
@@ -2304,20 +2508,24 @@ void pci_rtl8139_realize(PCIDevice *dev)
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->bar_io);
     pci_register_bar(dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar_mem);
 
+    /* Type-0 header fields writable by the PCI host. GAPS keeps Fast
+     * Back-to-Back disabled. Status is write-one-to-clear in bba.cpp. */
+    dev->wmask[PCI_COMMAND] = 0x47;
+    dev->wmask[PCI_COMMAND + 1] = 0x01;
+    dev->wmask[PCI_LATENCY_TIMER] = 0xff;
+    dev->wmask[PCI_INTERRUPT_LINE] = 0xff;
+
     /* prepare eeprom */
     s->eeprom.contents[0] = 0x8129;
 #if 1
     /* PCI vendor and device ID should be mirrored here */
-    s->eeprom.contents[1] = PCI_VENDOR_ID_REALTEK;
-    s->eeprom.contents[2] = PCI_DEVICE_ID_REALTEK_8139;
+    s->eeprom.contents[1] = PCI_VENDOR_ID_SEGA;
+    s->eeprom.contents[2] = PCI_DEVICE_ID_SEGA_BBA;
 #endif
     s->eeprom.contents[7] = s->conf.macaddr.a[0] | s->conf.macaddr.a[1] << 8;
     s->eeprom.contents[8] = s->conf.macaddr.a[2] | s->conf.macaddr.a[3] << 8;
     s->eeprom.contents[9] = s->conf.macaddr.a[4] | s->conf.macaddr.a[5] << 8;
 
-#ifdef RTL8139_TIMER
-    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rtl8139_timer, s);
-#endif
 }
 
 RTL8139State *rtl8139_init(NICConf *conf)
@@ -2329,13 +2537,18 @@ RTL8139State *rtl8139_init(NICConf *conf)
 	state->parent_obj.wmask = (uint8_t *)calloc(256, 1);
 	state->parent_obj.cmask = (uint8_t *)calloc(256, 1);
 	state->schedId = sh4_sched_register(0, rtl8139_sched_callback, state);
+	state->timerSchedId = sh4_sched_register(0, rtl8139_timer_sched_callback, state);
+	state->txSchedId = sh4_sched_register(0, rtl8139_tx_sched_callback, state);
+	state->rxSchedId = sh4_sched_register(0, rtl8139_rx_sched_callback, state);
 	
 	return state;
 }
 
 void rtl8139_destroy(RTL8139State *state)
 {
-	pci_rtl8139_uninit(PCI_DEVICE(state));
+	sh4_sched_unregister(state->rxSchedId);
+	sh4_sched_unregister(state->txSchedId);
+	sh4_sched_unregister(state->timerSchedId);
 	sh4_sched_unregister(state->schedId);
 	free(state->parent_obj.config);
 	free(state->parent_obj.wmask);
@@ -2389,6 +2602,22 @@ void rtl8139_serialize(RTL8139State *s, Serializer& ser)
 	ser << s->conf.macaddr;
 
 	ser << s->currTxDesc;
+	ser << s->txPendingCount;
+	for (u32 i = 0; i < s->txPendingCount; ++i) {
+		const auto& tx = s->txPending[(s->txPendingHead + i) % 4];
+		ser << tx.size << tx.descriptor << tx.address << tx.fetched
+				<< tx.dmaOffset << tx.wireCyclesRemaining << tx.wireStarted
+				<< tx.legacyAtomic << tx.dmaCyclesRemaining
+				<< tx.thresholdReached;
+		ser.serialize(tx.data, tx.dmaOffset);
+	}
+	ser << s->rxPendingCount;
+	for (u32 i = 0; i < s->rxPendingCount; ++i) {
+		const auto& rx = s->rxPending[(s->rxPendingHead + i) % 4];
+		ser << rx.size << rx.dmaSize << rx.dmaOffset << rx.doInterrupt
+				<< rx.prepared << rx.legacyAtomic;
+		ser.serialize(rx.data, rx.prepared ? rx.dmaSize : rx.size);
+	}
 
 	ser << s->eeprom.contents;
 	ser << s->eeprom.mode;
@@ -2407,6 +2636,8 @@ void rtl8139_serialize(RTL8139State *s, Serializer& ser)
 	ser << s->TCTR_base;
 
 	sh4_sched_serialize(ser, s->schedId);
+	sh4_sched_serialize(ser, s->txSchedId);
+	sh4_sched_serialize(ser, s->rxSchedId);
 }
 
 bool rtl8139_deserialize(RTL8139State *s, Deserializer& deser)
@@ -2455,6 +2686,91 @@ bool rtl8139_deserialize(RTL8139State *s, Deserializer& deser)
 	deser >> s->conf.macaddr;
 
 	deser >> s->currTxDesc;
+	sh4_sched_request(s->txSchedId, -1);
+	s->txPendingHead = 0;
+	s->txPendingCount = 0;
+	if (deser.version() >= Deserializer::V105) {
+		u8 count;
+		deser >> count;
+		if (count > 4)
+			throw Deserializer::Exception("Invalid RTL8139 transmit queue size");
+		for (u32 i = 0; i < count; ++i) {
+			auto& tx = s->txPending[i];
+			deser >> tx.size >> tx.descriptor;
+			if (tx.size > sizeof(tx.data) || tx.descriptor >= 4)
+				throw Deserializer::Exception("Invalid RTL8139 transmit descriptor");
+			if (deser.version() >= Deserializer::V107) {
+				deser >> tx.address >> tx.fetched;
+				if (deser.version() >= Deserializer::V119) {
+					deser >> tx.dmaOffset >> tx.wireCyclesRemaining
+							>> tx.wireStarted >> tx.legacyAtomic;
+					if (deser.version() >= Deserializer::V120)
+						deser >> tx.dmaCyclesRemaining >> tx.thresholdReached;
+					else {
+						tx.dmaCyclesRemaining = 0;
+						tx.thresholdReached = tx.wireStarted;
+					}
+					if (tx.dmaOffset > tx.size
+							|| (tx.fetched && tx.dmaOffset != tx.size)
+							|| tx.wireCyclesRemaining < 0)
+						throw Deserializer::Exception("Invalid RTL8139 transmit DMA state");
+					deser.deserialize(tx.data, tx.dmaOffset);
+				}
+				else {
+					tx.dmaOffset = tx.fetched ? tx.size : 0;
+					tx.dmaCyclesRemaining = 0;
+					tx.wireCyclesRemaining = 0;
+					tx.thresholdReached = tx.fetched;
+					tx.wireStarted = tx.fetched;
+					tx.legacyAtomic = true;
+					if (tx.fetched)
+						deser.deserialize(tx.data, tx.size);
+				}
+			}
+			else {
+				tx.address = 0;
+				tx.fetched = true;
+				tx.dmaOffset = tx.size;
+				tx.dmaCyclesRemaining = 0;
+				tx.wireCyclesRemaining = 0;
+				tx.thresholdReached = true;
+				tx.wireStarted = true;
+				tx.legacyAtomic = true;
+				deser.deserialize(tx.data, tx.size);
+			}
+		}
+		s->txPendingCount = count;
+	}
+	sh4_sched_request(s->rxSchedId, -1);
+	s->rxPendingHead = 0;
+	s->rxPendingCount = 0;
+	if (deser.version() >= Deserializer::V108) {
+		u8 count;
+		deser >> count;
+		if (count > 4)
+			throw Deserializer::Exception("Invalid RTL8139 receive queue size");
+		for (u32 i = 0; i < count; ++i) {
+			auto& rx = s->rxPending[i];
+			if (deser.version() >= Deserializer::V110) {
+				deser >> rx.size >> rx.dmaSize >> rx.dmaOffset >> rx.doInterrupt
+						>> rx.prepared >> rx.legacyAtomic;
+			}
+			else {
+				deser >> rx.size >> rx.doInterrupt;
+				rx.dmaSize = 0;
+				rx.dmaOffset = 0;
+				rx.prepared = false;
+				rx.legacyAtomic = true;
+			}
+			const size_t maxFrameSize = sizeof(rx.data) - (rx.legacyAtomic ? 0 : 8);
+			if (rx.size > maxFrameSize
+					|| rx.dmaSize > sizeof(rx.data) || rx.dmaOffset > rx.dmaSize
+					|| (!rx.prepared && rx.dmaSize != 0))
+				throw Deserializer::Exception("Invalid RTL8139 receive frame");
+			deser.deserialize(rx.data, rx.prepared ? rx.dmaSize : rx.size);
+		}
+		s->rxPendingCount = count;
+	}
 
 	deser >> s->eeprom.contents;
 	deser >> s->eeprom.mode;
@@ -2474,6 +2790,17 @@ bool rtl8139_deserialize(RTL8139State *s, Deserializer& deser)
 
 	if (deser.version() >= Deserializer::V38)
 		sh4_sched_deserialize(deser, s->schedId);
+	if (deser.version() >= Deserializer::V105)
+		sh4_sched_deserialize(deser, s->txSchedId);
+	if (deser.version() == Deserializer::V119 && s->txPendingCount != 0) {
+		auto& head = s->txPending[s->txPendingHead];
+		if (!head.fetched)
+			head.dmaCyclesRemaining = std::max(0,
+					sh4_sched_cycles_until(s->txSchedId));
+	}
+	if (deser.version() >= Deserializer::V108)
+		sh4_sched_deserialize(deser, s->rxSchedId);
+	rtl8139_set_next_tctr_time(s);
 
 	return s->bChipCmdState & CmdRxEnb;
 }

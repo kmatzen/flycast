@@ -18,11 +18,12 @@
 #include "hw/sh4/modules/mmu.h"
 
 #include <algorithm>
+#include <limits>
 
 #define SWAP32(a) ((((a) & 0xff) << 24)  | (((a) & 0xff00) << 8) | (((a) >> 8) & 0xff00) | (((a) >> 24) & 0xff))
 
 #define debugf(...) DEBUG_LOG(REIOS, __VA_ARGS__)
-static void readSectors(u32 addr, u32 sector, u32 count, bool virtualAddr);
+static bool readSectors(u32 addr, u32 sector, u32 count, u32 sectorSize, bool virtualAddr);
 
 struct gdrom_hle_state_t
 {
@@ -43,6 +44,8 @@ struct gdrom_hle_state_t
 	u32 multi_callback_arg = 0;
 	bool dma_trans_ended = false;
 	u64 xfer_end_time = 0;
+	u32 multi_sector_size = 2048;
+	u32 transfer_remaining = 0;
 
 	void Serialize(Serializer& ser)
 	{
@@ -61,6 +64,8 @@ struct gdrom_hle_state_t
 		ser << multi_callback_arg;
 		ser << dma_trans_ended;
 		ser << xfer_end_time;
+		ser << multi_sector_size;
+		ser << transfer_remaining;
 
 	}
 	void Deserialize(Deserializer& deser)
@@ -80,37 +85,230 @@ struct gdrom_hle_state_t
 		deser >> multi_callback_arg;
 		deser >> dma_trans_ended;
 		deser >> xfer_end_time;
+		if (deser.version() >= Deserializer::V88)
+			deser >> multi_sector_size;
+		else
+			multi_sector_size = 2048;
+		if (deser.version() >= Deserializer::V109)
+			deser >> transfer_remaining;
+		else
+			transfer_remaining = command == GDCC_REQ_PIO_TRANS ? params[1] : 0;
 	}
 };
 static gdrom_hle_state_t gd_hle_state;
+static u32 SecMode[4] = { 0, 8192, 0, 2048 };
+
+static void setReadError(u32 fad)
+{
+	gd_hle_state.status = GDC_ERR;
+	gd_hle_state.result[0] = 3; // MEDIUM ERROR
+	gd_hle_state.result[1] = 0x11; // Unrecoverable read error
+	gd_hle_state.result[2] = fad;
+	gd_hle_state.result[3] = 0;
+}
+
+static void setIllegalRequest()
+{
+	gd_hle_state.status = GDC_ERR;
+	gd_hle_state.result[0] = 5; // ILLEGAL REQUEST
+	gd_hle_state.result[1] = 0x24; // Invalid field in CDB
+	gd_hle_state.result[2] = 0;
+	gd_hle_state.result[3] = 0;
+}
+
+static void setInvalidParameter()
+{
+	gd_hle_state.status = GDC_ERR;
+	gd_hle_state.result[0] = 5; // ILLEGAL REQUEST
+	gd_hle_state.result[1] = 0x26; // Invalid field in parameter list
+	gd_hle_state.result[2] = 0;
+	gd_hle_state.result[3] = 0;
+}
+
+static void setNoMedia()
+{
+	gd_hle_state.status = GDC_ERR;
+	gd_hle_state.result[0] = 2; // NOT READY
+	gd_hle_state.result[1] = 0x3a; // Medium not present
+	gd_hle_state.result[2] = 0;
+	gd_hle_state.result[3] = 0;
+}
+
+static u32 getDiscEndFad()
+{
+	u8 sessionInfo[6] {};
+	libGDR_GetSessionInfo(sessionInfo, 0);
+	return (sessionInfo[3] << 16) | (sessionInfo[4] << 8) | sessionInfo[5];
+}
+
+static void setInvalidAddress(u32 fad)
+{
+	gd_hle_state.status = GDC_ERR;
+	gd_hle_state.result[0] = 5; // ILLEGAL REQUEST
+	gd_hle_state.result[1] = 0x21; // Invalid address
+	gd_hle_state.result[2] = fad;
+	gd_hle_state.result[3] = 0;
+}
+
+static bool validateMediaReady()
+{
+	const u32 discType = libGDR_GetDiscType();
+	if (discType != Open && discType != NoDisk)
+		return true;
+	setNoMedia();
+	return false;
+}
+
+static bool validatePositionRequest(u32 fad, u32 sectors)
+{
+	if (!validateMediaReady())
+		return false;
+
+	const u32 endFad = getDiscEndFad();
+	if (fad < 150 || fad >= endFad || (sectors != 0 && sectors > endFad - fad))
+	{
+		setInvalidAddress(fad);
+		return false;
+	}
+	return true;
+}
+
+static bool validateReadRequest(u32 fad, u32 sectors)
+{
+	if (!validatePositionRequest(fad, sectors))
+		return false;
+	u32 elapsed;
+	if (libGDR_GetTrackNumber(fad, elapsed) == 0xaa)
+	{
+		setInvalidAddress(fad);
+		return false;
+	}
+	return true;
+}
+
+static bool normalizeStreamReadRequest(u32 fad, u32 requestedSectors, u32& sectors)
+{
+	sectors = requestedSectors;
+	if (requestedSectors != 0x1ff)
+		return validateReadRequest(fad, sectors);
+
+	if (!validateReadRequest(fad, 1))
+		return false;
+	const u32 endFad = getDiscEndFad();
+	sectors = endFad - fad;
+	return true;
+}
+
+static bool sectorsToBytes(u32 sectors, u32 sectorSize, u32& bytes)
+{
+	if (sectorSize == 0 || sectors > std::numeric_limits<u32>::max() / sectorSize)
+		return false;
+	bytes = sectors * sectorSize;
+	return true;
+}
+
+static bool supportedSectorSize(u32 size)
+{
+	switch (size)
+	{
+	case 4:
+	case 8:
+	case 12:
+	case 2048:
+	case 2052:
+	case 2084:
+	case 2088:
+	case 2324:
+	case 2328:
+	case 2336:
+	case 2340:
+	case 2352:
+		return true;
+	default:
+		return false;
+	}
+}
 
 static int schedId = -1;
 
+static void resetSectorMode()
+{
+	SecMode[0] = 0;
+	SecMode[1] = 8192;
+	SecMode[2] = 0;
+	SecMode[3] = 2048;
+}
+
+static void cancelActiveTransfer()
+{
+	if (schedId != -1)
+		sh4_sched_request(schedId, -1);
+	gd_hle_state.multi_read_sector = 0;
+	gd_hle_state.multi_read_offset = 0;
+	gd_hle_state.multi_read_count = 0;
+	gd_hle_state.multi_read_total = 0;
+	gd_hle_state.transfer_remaining = 0;
+	gd_hle_state.dma_trans_ended = false;
+	gd_hle_state.xfer_end_time = 0;
+}
+
+static void resetDriveState()
+{
+	cancelActiveTransfer();
+	gd_hle_state = {};
+	resetSectorMode();
+	cdda.status = cdda_t::NoInfo;
+	switch (libGDR_GetDiscType())
+	{
+	case Open:
+		SecNumber.Status = GD_OPEN;
+		break;
+	case NoDisk:
+		SecNumber.Status = GD_NODISC;
+		break;
+	default:
+		SecNumber.Status = GD_STANDBY;
+		break;
+	}
+	asic_CancelInterrupt(holly_GDROM_DMA);
+}
+
 static int getGdromTicks()
 {
-	u32 len = gd_hle_state.multi_read_count * 2048;
-	if (len > 10240)
-		return 1000000;			// Large transfers: GD-ROM transfer rate 1.8 MB/s
-	else
-		return len * 2;			// Small transfers: Max G1 bus rate: 50 MHz x 16 bits
+	const u64 bytes = (u64)std::min(gd_hle_state.multi_read_count, 5u)
+			* gd_hle_state.multi_sector_size;
+	const u64 busCycles = bytes * 2; // Maximum G1 rate: 50 MHz x 16 bits.
+	if (config::FastGDRomLoad)
+		return busCycles;
+	const u32 rate = gdromReadRate(GD_HardwareInfo.speed);
+	const u64 mediaCycles = ((u64)SH4_MAIN_CLOCK * bytes + rate - 1) / rate;
+	return std::min<u64>(std::numeric_limits<int>::max(), std::max(busCycles, mediaCycles));
 }
 
 static int schedCallback(int tag, int cycles, int jitter, void *arg)
 {
 	const u32 sect = std::min(gd_hle_state.multi_read_count, 5u);
-	readSectors(gd_hle_state.multi_read_offset, gd_hle_state.multi_read_sector, sect, false);
+	if (!readSectors(gd_hle_state.multi_read_offset, gd_hle_state.multi_read_sector, sect,
+			gd_hle_state.multi_sector_size, false))
+	{
+		setReadError(gd_hle_state.multi_read_sector);
+		gd_hle_state.multi_read_count = 0;
+		return 0;
+	}
 	gd_hle_state.multi_read_count -= sect;
 	gd_hle_state.multi_read_sector += sect;
-	gd_hle_state.cur_sector = gd_hle_state.multi_read_sector;
-	gd_hle_state.multi_read_offset += sect * 2048;
+	gd_hle_state.cur_sector = gd_hle_state.multi_read_sector - 1;
+	gd_hle_state.multi_read_offset += sect * gd_hle_state.multi_sector_size;
 
 	if (gd_hle_state.multi_read_count == 0)
 	{
 		gd_hle_state.result[3] = GDC_WAIT_INTERNAL;
-		SecNumber.Status = GD_STANDBY;
+		SecNumber.Status = GD_PAUSE;
+		gd_schedule_standby();
 		gd_hle_state.status = GDC_COMPLETE;
 	}
-	gd_hle_state.result[2] = (gd_hle_state.multi_read_total - gd_hle_state.multi_read_count) * 2048;
+	gd_hle_state.result[2] = (gd_hle_state.multi_read_total - gd_hle_state.multi_read_count)
+			* gd_hle_state.multi_sector_size;
 
 	return getGdromTicks();
 }
@@ -123,6 +321,7 @@ void reios_init() {
 void reios_serialize(Serializer& ser) {
 	gd_hle_state.Serialize(ser);
 	sh4_sched_serialize(ser, schedId);
+	ser << SecMode;
 }
 
 void reios_deserialize(Deserializer& deser)
@@ -130,10 +329,14 @@ void reios_deserialize(Deserializer& deser)
 	gd_hle_state.Deserialize(deser);
 	if (deser.version() >= Deserializer::V54)
 		sh4_sched_deserialize(deser, schedId);
+	if (deser.version() >= Deserializer::V88)
+		deser >> SecMode;
+	else
+		resetSectorMode();
 }
 
 void gdrom_hle_reset() {
-	gd_hle_state = {};
+	resetDriveState();
 }
 
 void reios_term()
@@ -145,8 +348,37 @@ void reios_term()
 
 static void GDROM_HLE_ReadSES()
 {
-	auto [s, b, ba, bb] = gd_hle_state.params;
-	INFO_LOG(REIOS, "GDROM_HLE_ReadSES: doing nothing w/ %d, %d, %d, %d", s, b, ba, bb);
+	const u32 session = gd_hle_state.params[0];
+	const u32 dest = gd_hle_state.params[1];
+	DEBUG_LOG(REIOS, "GDROM: REQ_SES session %u dest %08x", session, dest);
+
+	if (libGDR_GetDiscType() == Open || libGDR_GetDiscType() == NoDisk)
+	{
+		gd_hle_state.status = GDC_ERR;
+		gd_hle_state.result[0] = 2; // NOT READY
+		gd_hle_state.result[1] = 0x3a; // Medium not present
+		gd_hle_state.result[2] = 0;
+		gd_hle_state.result[3] = 0;
+		return;
+	}
+	u8 summary[6] {};
+	libGDR_GetSessionInfo(summary, 0);
+	if (session > 99 || (session != 0 && session > summary[2]))
+	{
+		gd_hle_state.status = GDC_ERR;
+		gd_hle_state.result[0] = 5; // ILLEGAL REQUEST
+		gd_hle_state.result[1] = 0x26; // Invalid field in parameter list
+		gd_hle_state.result[2] = 0;
+		gd_hle_state.result[3] = 0;
+		return;
+	}
+
+	u8 response[6] {};
+	libGDR_GetSessionInfo(response, session);
+	response[0] = SecNumber.Status;
+	for (u32 i = 0; i < std::size(response); i++)
+		WriteMem8(dest + i, response[i]);
+	gd_hle_state.result[2] = sizeof(response);
 }
 
 static void GDROM_HLE_ReadTOC()
@@ -155,6 +387,18 @@ static void GDROM_HLE_ReadTOC()
 	u32 dest = gd_hle_state.params[1];
 
 	debugf("GDROM READ TOC : %X %X", area, dest);
+	if (libGDR_GetDiscType() == Open || libGDR_GetDiscType() == NoDisk)
+	{
+		gd_hle_state.status = GDC_ERR;
+		gd_hle_state.result[0] = 2; // NOT READY
+		gd_hle_state.result[1] = 0x3a; // Medium not present
+		return;
+	}
+	if (area > DoubleDensity)
+	{
+		setIllegalRequest();
+		return;
+	}
 	if (area == DoubleDensity && libGDR_GetDiscType() != GdRom)
 	{
 		// Only GD-ROM has a high-density area but no error is reported
@@ -175,50 +419,63 @@ static void GDROM_HLE_ReadTOC()
 		if (pDst != NULL)
 		{
 			memcpy(pDst, toc, sizeof(toc));
+			gd_hle_state.result[2] = sizeof(toc);
 			return;
 		}
 	}
 	for (std::size_t i = 0; i < std::size(toc); i++, dest += 4)
 		WriteMem32(dest, toc[i]);
+	gd_hle_state.result[2] = sizeof(toc);
 }
 
-static void readSectors(u32 addr, u32 sector, u32 count, bool virtualAddr)
+static bool readSectors(u32 addr, u32 sector, u32 count, u32 sectorSize, bool virtualAddr)
 {
+	if (count == 0)
+		return true;
+	u32 byteCount;
+	if (!sectorsToBytes(count, sectorSize, byteCount))
+		return false;
 	gd_hle_state.cur_sector = sector + count - 1;
 	if (!virtualAddr || !mmu_enabled())
 	{
-		u8 * pDst = GetMemPtr(addr, 0);
+		u8 * pDst = GetMemPtr(addr, byteCount);
 
 		if (pDst != NULL)
 		{
-			libGDR_ReadSector(pDst, sector, count, 2048);
-			return;
+			const bool form2 = sectorSize == 2324 || sectorSize == 2336;
+			for (u32 i = 0; i < count; i++)
+				if (!gd_read_sector(pDst + i * sectorSize, sector + i, sectorSize, form2))
+					return false;
+			return true;
 		}
 	}
-	u32 temp[2048 / 4];
+	u8 temp[2352];
+	const bool form2 = sectorSize == 2324 || sectorSize == 2336;
 
 	while (count > 0)
 	{
-		libGDR_ReadSector((u8 *)temp, sector, 1, sizeof(temp));
+		if (!gd_read_sector(temp, sector, sectorSize, form2))
+			return false;
 
-		for (std::size_t i = 0; i < std::size(temp); i++)
+		for (u32 i = 0; i < sectorSize; i++)
 		{
 			if (virtualAddr)
-				WriteMem32(addr, temp[i]);
+				WriteMem8(addr, temp[i]);
 			else
-				WriteMem32_nommu(addr, temp[i]);
-			addr += 4;
+				WriteMem8_nommu(addr, temp[i]);
+			addr++;
 		}
 
 		sector++;
 		count--;
 	}
+	return true;
 }
 
-static void read_pio_sectors(u32 addr, u32 sector, u32 count)
+static bool read_pio_sectors(u32 addr, u32 sector, u32 count, u32 sectorSize)
 {
 	gd_hle_state.xfer_end_time = 0;
-	readSectors(addr, sector, count, true);
+	return readSectors(addr, sector, count, sectorSize, true);
 }
 
 static void GDROM_HLE_ReadDMA()
@@ -229,16 +486,34 @@ static void GDROM_HLE_ReadDMA()
 	// params[3] 0
 
 	debugf("GDROM: DMA READ Sector=%d, Num=%d, Buffer=%08x, zero=%x", fad, nsect, buffer, gd_hle_state.params[3]);
+	if (!validateReadRequest(fad, nsect))
+		return;
+	u32 byteCount;
+	if (!sectorsToBytes(nsect, SecMode[3], byteCount))
+	{
+		setIllegalRequest();
+		return;
+	}
 
-	gd_hle_state.cur_sector = fad;
 	gd_hle_state.multi_read_sector = fad;
 	gd_hle_state.multi_read_offset = buffer;
 	gd_hle_state.multi_read_count = nsect;
 	gd_hle_state.multi_read_total = nsect;
-	sh4_sched_request(schedId, getGdromTicks());
+	gd_hle_state.multi_sector_size = SecMode[3];
 
 	gd_hle_state.result[2] = 0;
 	gd_hle_state.result[3] = 0;
+	if (nsect == 0)
+	{
+		gd_hle_state.status = GDC_COMPLETE;
+		SecNumber.Status = GD_PAUSE;
+		gd_schedule_standby();
+	}
+	else
+	{
+		gd_hle_state.cur_sector = fad;
+		sh4_sched_request(schedId, getGdromTicks());
+	}
 }
 
 static void GDROM_HLE_ReadPIO()
@@ -249,10 +524,29 @@ static void GDROM_HLE_ReadPIO()
 	// params[3] seekAhead (wince) or 0
 
 	debugf("GDROM: PIO READ Sector=%d, Num=%d, Buffer=%08x, SeekAhead=%x", fad, nsect, buffer, gd_hle_state.params[3]);
+	if (!validateReadRequest(fad, nsect))
+		return;
+	u32 byteCount;
+	if (!sectorsToBytes(nsect, SecMode[3], byteCount))
+	{
+		setIllegalRequest();
+		return;
+	}
 
-	read_pio_sectors(buffer, fad, nsect);
-	gd_hle_state.result[2] = nsect * 2048;
+	if (!read_pio_sectors(buffer, fad, nsect, SecMode[3]))
+	{
+		setReadError(fad);
+		return;
+	}
+	gd_hle_state.result[2] = byteCount;
 	gd_hle_state.result[3] = 0;
+}
+
+static u32 currentHeadFad()
+{
+	if (cdda.status != cdda_t::NoInfo && cdda.CurrAddr.FAD >= 150)
+		return cdda.CurrAddr.FAD;
+	return gd_hle_state.cur_sector;
 }
 
 static void GDCC_HLE_GETSCD()
@@ -285,22 +579,30 @@ static void GDCC_HLE_GETSCD()
 		gd_hle_state.result[3] = 0;
 		return;
 	}
-	if (cdda.status == cdda_t::Playing)
-		gd_hle_state.cur_sector = cdda.CurrAddr.FAD;
-	u8 scd[100];
-	gd_get_subcode(format, gd_hle_state.cur_sector, scd);
-	verify(scd[3] == size);
+	if (format > 3)
+	{
+		gd_hle_state.status = GDC_ERR;
+		gd_hle_state.result[0] = 5;
+		gd_hle_state.result[1] = 0x24;
+		gd_hle_state.result[2] = 0;
+		gd_hle_state.result[3] = 0;
+		return;
+	}
+	u8 scd[100] {};
+	const u32 available = gd_get_subcode(format, currentHeadFad(), scd);
+	const u32 transferSize = std::min(size, available);
 
-	if (!mmu_enabled() && GetMemPtr(dest, size) != NULL)
-		memcpy(GetMemPtr(dest, size), scd, size);
+	if (!mmu_enabled() && GetMemPtr(dest, transferSize) != NULL)
+		memcpy(GetMemPtr(dest, transferSize), scd, transferSize);
 	else
 	{
-		for (u32 i = 0; i < size; i++)
+		for (u32 i = 0; i < transferSize; i++)
 			WriteMem8(dest++, scd[i]);
 	}
+	gd_subcode_status_transferred(transferSize);
 
 	// record size of pio transfer to gdrom
-	gd_hle_state.result[2] = size;
+	gd_hle_state.result[2] = transferSize;
 }
 
 template<bool dma>
@@ -312,17 +614,27 @@ static void multi_xfer()
 	size = std::min(size, gd_hle_state.multi_read_count);
 	while (size > 0)
 	{
-		u8 buf[2048];
-		libGDR_ReadSector(buf, gd_hle_state.multi_read_sector, 1, 2048);
+		u8 buf[2352];
+		const bool form2 = gd_hle_state.multi_sector_size == 2324
+				|| gd_hle_state.multi_sector_size == 2336;
+		if (!gd_read_sector(buf, gd_hle_state.multi_read_sector,
+				gd_hle_state.multi_sector_size, form2))
+		{
+			setReadError(gd_hle_state.multi_read_sector);
+			gd_hle_state.multi_read_count = 0;
+			return;
+		}
 		while (size > 0)
 		{
-			int remaining = 2048 - gd_hle_state.multi_read_offset;
+			int remaining = gd_hle_state.multi_sector_size - gd_hle_state.multi_read_offset;
 			if (size >= 4 && remaining >= 4 && (dest & 3) == 0)
 			{
+				u32 value;
+				memcpy(&value, &buf[gd_hle_state.multi_read_offset], sizeof(value));
 				if constexpr (dma)
-					WriteMem32_nommu(dest, *(u32*)&buf[gd_hle_state.multi_read_offset]);
+					WriteMem32_nommu(dest, value);
 				else
-					WriteMem32(dest, *(u32*)&buf[gd_hle_state.multi_read_offset]);
+					WriteMem32(dest, value);
 				dest += 4;
 				gd_hle_state.multi_read_offset += 4;
 				gd_hle_state.multi_read_count -= 4;
@@ -330,10 +642,12 @@ static void multi_xfer()
 			}
 			else if (size >= 2 && remaining >= 2 && (dest & 1) == 0)
 			{
+				u16 value;
+				memcpy(&value, &buf[gd_hle_state.multi_read_offset], sizeof(value));
 				if constexpr (dma)
-					WriteMem16_nommu(dest, *(u16*)&buf[gd_hle_state.multi_read_offset]);
+					WriteMem16_nommu(dest, value);
 				else
-					WriteMem16(dest, *(u16*)&buf[gd_hle_state.multi_read_offset]);
+					WriteMem16(dest, value);
 				dest += 2;
 				gd_hle_state.multi_read_offset += 2;
 				gd_hle_state.multi_read_count -= 2;
@@ -350,15 +664,16 @@ static void multi_xfer()
 				gd_hle_state.multi_read_count--;
 				size--;
 			}
-			if (gd_hle_state.multi_read_offset >= 2048)
+			if (gd_hle_state.multi_read_offset >= gd_hle_state.multi_sector_size)
 			{
-				verify(gd_hle_state.multi_read_offset == 2048);
+				verify(gd_hle_state.multi_read_offset == gd_hle_state.multi_sector_size);
 				gd_hle_state.multi_read_sector++;
 				gd_hle_state.multi_read_offset = 0;
 				break;
 			}
 		}
 	}
+	gd_hle_state.transfer_remaining = 0;
 	if (!dma)
 	{
 		gd_hle_state.result[2] = gd_hle_state.multi_read_total - gd_hle_state.multi_read_count;
@@ -371,7 +686,7 @@ static void multi_xfer()
 	}
 	else
 	{
-		gd_hle_state.result[2] = 2048;
+		gd_hle_state.result[2] = gd_hle_state.multi_read_total - gd_hle_state.multi_read_count;
 		gd_hle_state.result[3] = gd_hle_state.multi_read_count > 0 ? GDC_WAIT_IRQ : GDC_WAIT_INTERNAL;
 		gd_hle_state.dma_trans_ended = true;
 		if (gd_hle_state.multi_read_count == 0)
@@ -380,16 +695,11 @@ static void multi_xfer()
 	}
 }
 
-u32 SecMode[4];
-
 static void GD_HLE_Command(gd_command cc)
 {
 	switch(cc)
 	{
 	case GDCC_GETTOC:
-		WARN_LOG(REIOS, "GDROM: *FIXME* CMD GETTOC");
-		break;
-
 	case GDCC_GETTOC2:
 		GDROM_HLE_ReadTOC();
 		break;
@@ -400,28 +710,94 @@ static void GD_HLE_Command(gd_command cc)
 
 	case GDCC_INIT:
 		DEBUG_LOG(REIOS, "GDROM: CMD INIT");
+		// The BIOS reports a pending disc-change notification through INIT.
+		// Callers retry the command after receiving UNIT ATTENTION, so consume
+		// it only after publishing the sense data for this request.
+		if (sns_key == 6)
+		{
+			gd_hle_state.status = GDC_ERR;
+			gd_hle_state.result[0] = sns_key;
+			gd_hle_state.result[1] = sns_asc | (sns_ascq << 8);
+			gd_hle_state.result[2] = 0;
+			gd_hle_state.result[3] = 0;
+			sns_key = 0;
+			sns_asc = 0;
+			sns_ascq = 0;
+			break;
+		}
+		if (!validateMediaReady())
+			break;
 		gd_hle_state.multi_callback = 0;
 		gd_hle_state.multi_read_count = 0;
 		cdda.status = cdda_t::NoInfo;
 		break;
 
+	case GDCC_NOP:
+		DEBUG_LOG(REIOS, "GDROM: CMD NOP");
+		break;
+
+	case GDCC_OPEN:
+		DEBUG_LOG(REIOS, "GDROM: CMD OPEN");
+		cdda.status = cdda_t::NoInfo;
+		cdda.EndAddr.FAD = 0;
+		cdda.repeats = 0;
+		if (libGDR_GetDiscType() != Open)
+		{
+			// The console has a manual top-loading lid. Keep this request active
+			// until the frontend reports that the lid has actually been opened.
+			SecNumber.Status = GD_BUSY;
+			return;
+		}
+		SecNumber.Status = GD_OPEN;
+		break;
+
+	case GDCC_READABORT:
+		DEBUG_LOG(REIOS, "GDROM: CMD DMA ABORT");
+		cancelActiveTransfer();
+		asic_CancelInterrupt(holly_GDROM_DMA);
+		break;
+
 	case GDCC_PIOREAD:
 		GDROM_HLE_ReadPIO();
-		SecNumber.Status = GD_PAUSE;
-		cdda.status = cdda_t::NoInfo;
+		if (gd_hle_state.status != GDC_ERR)
+		{
+			SecNumber.Status = GD_PAUSE;
+			gd_schedule_standby();
+			cdda.status = cdda_t::NoInfo;
+		}
 		break;
 
 	case GDCC_DMAREAD:
-		cdda.status = cdda_t::NoInfo;
 		if (gd_hle_state.multi_read_count == 0)
+		{
 			GDROM_HLE_ReadDMA();
+			if (gd_hle_state.status != GDC_ERR)
+				cdda.status = cdda_t::NoInfo;
+		}
 		return;
 
 	case GDCC_PLAY2:
 		{
-			cdda.StartAddr.FAD = gd_hle_state.params[0] & 0xffffff;
-			cdda.EndAddr.FAD = gd_hle_state.params[1] & 0xffffff;
-			cdda.repeats = gd_hle_state.params[2];
+			u32 startFad = gd_hle_state.params[0] & 0xffffff;
+			u32 endFad = gd_hle_state.params[1] & 0xffffff;
+			if (!validatePositionRequest(startFad, 1))
+				break;
+			if (!gd_normalize_playback_start(startFad))
+			{
+				setInvalidAddress(startFad);
+				break;
+			}
+			const u32 leadOutFad = gd_get_playback_area_end(startFad);
+			if (endFad != 0 && endFad <= startFad)
+			{
+				setInvalidAddress(endFad);
+				break;
+			}
+			const bool endsAtLeadOut = endFad == 0 || endFad >= leadOutFad;
+			endFad = endsAtLeadOut ? leadOutFad : endFad;
+			cdda.StartAddr.FAD = startFad;
+			cdda.EndAddr.FAD = endFad;
+			cdda.repeats = endsAtLeadOut ? 0 : gd_hle_state.params[2] & 0xf;
 			// params[3] debug (0)
 			DEBUG_LOG(REIOS, "GDROM: CMD PLAYSEC from %d to %d repeats %d", cdda.StartAddr.FAD, cdda.EndAddr.FAD, cdda.repeats);
 			cdda.status = cdda_t::Playing;
@@ -434,23 +810,44 @@ static void GD_HLE_Command(gd_command cc)
 		DEBUG_LOG(REIOS, "GDROM: CMD RELEASE");
 		// params[0] reptime (ignored)
 		// params[1] debug (0)
-		if (cdda.status == cdda_t::Paused)
+		if (!validateMediaReady())
+			break;
+		if (cdda.status == cdda_t::Paused || cdda.status == cdda_t::Scanning)
+		{
+			if (cdda.StartAddr.FAD < 150 || cdda.CurrAddr.FAD >= cdda.EndAddr.FAD)
+			{
+				setInvalidParameter();
+				break;
+			}
 			cdda.status = cdda_t::Playing;
-		SecNumber.Status = GD_PLAY;
+			SecNumber.Status = GD_PLAY;
+		}
+		else if (cdda.status != cdda_t::Playing)
+			setInvalidParameter();
 		break;
 
 	case GDCC_STOP:
 		DEBUG_LOG(REIOS, "GDROM: CMD STOP");
+		if (!validateMediaReady())
+			break;
 		cdda.status = cdda_t::NoInfo;
+		cdda.StartAddr.FAD = cdda.CurrAddr.FAD = 150;
+		cdda.EndAddr.FAD = 0;
+		cdda.repeats = 0;
 		SecNumber.Status = GD_STANDBY;
 		break;
 
 	case GDCC_SEEK:
 		DEBUG_LOG(REIOS, "GDROM: CMD SEEK");
+		if (!validatePositionRequest(gd_hle_state.params[0] & 0xffffff, 1))
+			break;
 		cdda.CurrAddr.FAD = cdda.StartAddr.FAD = gd_hle_state.params[0] & 0xffffff;
+		cdda.EndAddr.FAD = 0;
+		cdda.repeats = 0;
 		// params[1] debug (0)
-		cdda.status = cdda_t::Paused;
+		cdda.status = cdda_t::Seeked;
 		SecNumber.Status = GD_PAUSE;
+		gd_schedule_standby();
 		break;
 
 	case GDCC_PLAY:
@@ -458,17 +855,23 @@ static void GD_HLE_Command(gd_command cc)
 		{
 			u32 first_track = gd_hle_state.params[0];
 			u32 last_track = gd_hle_state.params[1];
-			cdda.repeats = gd_hle_state.params[2];
-			// params[3] debug (0)
-			if (first_track == last_track) {
-				libGDR_GetTrack(first_track, cdda.StartAddr.FAD, cdda.EndAddr.FAD);
-			}
-			else
+			u32 firstEnd;
+			u32 lastStart;
+			u32 lastEnd;
+			if (first_track > last_track
+					|| !libGDR_GetTrack(first_track, cdda.StartAddr.FAD, firstEnd)
+					|| !libGDR_GetTrack(last_track, lastStart, lastEnd))
 			{
-				u32 dummy;
-				libGDR_GetTrack(first_track, cdda.StartAddr.FAD, dummy);
-				libGDR_GetTrack(last_track, dummy, cdda.EndAddr.FAD);
+				setIllegalRequest();
+				break;
 			}
+			// Track end FADs are inclusive; CDDA playback ranges are exclusive.
+			cdda.EndAddr.FAD = lastEnd + 1;
+			const u32 areaEndFad = gd_get_playback_area_end(cdda.StartAddr.FAD);
+			const bool endsAtLeadOut = cdda.EndAddr.FAD >= areaEndFad;
+			cdda.EndAddr.FAD = std::min(cdda.EndAddr.FAD, areaEndFad);
+			cdda.repeats = endsAtLeadOut ? 0 : gd_hle_state.params[2] & 0xf;
+			// params[3] debug (0)
 			DEBUG_LOG(REIOS, "GDROM: CMD PLAY first_track %x last_track %x repeats %x start_fad %x end_fad %x", first_track, last_track, cdda.repeats,
 					cdda.StartAddr.FAD, cdda.EndAddr.FAD);
 			cdda.status = cdda_t::Playing;
@@ -477,31 +880,42 @@ static void GD_HLE_Command(gd_command cc)
 		}
 		else
 		{
-			gd_hle_state.status = GDC_ERR;
-			cdda.status = cdda_t::NoInfo;
-			SecNumber.Status = GD_STANDBY;
+			setNoMedia();
 		}
 		break;
 
 	case GDCC_PAUSE:
 		DEBUG_LOG(REIOS, "GDROM: CMD PAUSE");
-		if (cdda.status == cdda_t::Playing)
-			cdda.status = cdda_t::Paused;
-		SecNumber.Status = GD_PAUSE;
+		if (!validateMediaReady())
+			break;
+		gd_pause_cdda();
 		break;
 
 	case GDCC_DMA_READ_REQ:
+	case GDCC_PIOREADREQ:
 		{
 			u32 sector = gd_hle_state.params[0] & 0xffffff;
-			u32 num = gd_hle_state.params[1];
+			const u32 requested = gd_hle_state.params[1];
+			u32 num;
 
-			DEBUG_LOG(REIOS, "GDROM: CMD READ Sector=%d, Num=%d", sector, num);
+			if (!normalizeStreamReadRequest(sector, requested, num))
+				break;
+			DEBUG_LOG(REIOS, "GDROM: CMD %s STREAM Sector=%d, Num=%d (requested %d)",
+					cc == GDCC_DMA_READ_REQ ? "DMA" : "PIO", sector, num, requested);
+			u32 byteCount;
+			if (!sectorsToBytes(num, SecMode[3], byteCount))
+			{
+				setIllegalRequest();
+				break;
+			}
 			gd_hle_state.status = GDC_CONTINUE;
 			gd_hle_state.multi_read_sector = sector;
-			gd_hle_state.multi_read_count = num * 2048;
+			gd_hle_state.multi_read_count = byteCount;
 			gd_hle_state.multi_read_total = gd_hle_state.multi_read_count;
 			gd_hle_state.multi_read_offset = 0;
-			gd_hle_state.result[2] = 2048;
+			gd_hle_state.multi_sector_size = SecMode[3];
+			gd_hle_state.transfer_remaining = 0;
+			gd_hle_state.result[2] = SecMode[3];
 			gd_hle_state.result[3] = num > 0 ? GDC_WAIT_IRQ : GDC_WAIT_INTERNAL;
 		}
 		break;
@@ -529,15 +943,50 @@ static void GD_HLE_Command(gd_command cc)
 			auto [speed, standby, read_flags, read_retry] = gd_hle_state.params;
 
 			debugf("GDROM: SET_MODE speed %x standby %x read_flags %x read_retry %x", speed, standby, read_flags, read_retry);
+			if (speed > 7 || standby > 0xffff || read_flags > 0xff
+					|| (read_flags & ~0x39) != 0 || read_retry > 0xff)
+			{
+				setInvalidParameter();
+				break;
+			}
 
 			GD_HardwareInfo.speed = speed;
 			GD_HardwareInfo.standby_hi = (standby & 0xff00) >> 8;
 			GD_HardwareInfo.standby_lo = standby & 0xff;
 			GD_HardwareInfo.read_flags = read_flags;
 			GD_HardwareInfo.read_retry = read_retry;
+			if (SecNumber.Status == GD_PAUSE)
+				gd_schedule_standby();
 
 			// record size of pio transfer to gdrom
 			gd_hle_state.result[2] = 0xa;
+		}
+		break;
+
+	case GDCC_SCAN:
+		{
+			const u32 direction = gd_hle_state.params[0];
+			const u32 speed = gd_hle_state.params[1];
+			DEBUG_LOG(REIOS, "GDROM: CMD SCAN direction %u speed %u", direction, speed);
+			if (libGDR_GetDiscType() == Open || libGDR_GetDiscType() == NoDisk)
+			{
+				gd_hle_state.status = GDC_ERR;
+				gd_hle_state.result[0] = 2;
+				gd_hle_state.result[1] = 0x3a;
+			}
+			else if (direction > 1
+					|| (cdda.status != cdda_t::Playing && cdda.status != cdda_t::Paused
+							&& cdda.status != cdda_t::Scanning)
+					|| cdda.StartAddr.FAD < 150 || cdda.CurrAddr.FAD >= cdda.EndAddr.FAD)
+			{
+				gd_hle_state.status = GDC_ERR;
+				gd_hle_state.result[0] = 5;
+				gd_hle_state.result[1] = 0x26;
+			}
+			else
+			{
+				gd_start_cdda_scan(direction != 0, speed);
+			}
 		}
 		break;
 
@@ -579,7 +1028,7 @@ static void GD_HLE_Command(gd_command cc)
 			// 1     |  0  |  0  |  0  |  0  | repeat count
 			// ------------------------------------------------------
 			// 2-3   |  0  |  0  |  0  |  0  |  0  |  0  |  0  |  0
-			WriteMem32(dst0, (cdda.repeats << 8) | (SecNumber.Status == GD_STANDBY ? GD_PAUSE : SecNumber.Status));
+			WriteMem32(dst0, (cdda.repeats << 8) | SecNumber.Status);
 
 			// bit   |  7  |  6  |  5  |  4  |  3  |  2  |  1  |  0
 			// byte  |     |     |     |     |     |     |     |
@@ -587,7 +1036,7 @@ static void GD_HLE_Command(gd_command cc)
 			// 0     | subcode q track number
 			// ------------------------------------------------------
 			// 1-3   |  0  |  0  |  0  |  0  |  0  |  0  |  0  |  0
-			const u32 fad = cdda.status == cdda_t::Paused || cdda.status == cdda_t::Playing ? cdda.CurrAddr.FAD : gd_hle_state.cur_sector;
+			const u32 fad = currentHeadFad();
 			u32 elapsed;
 			u32 tracknum = libGDR_GetTrackNumber(fad, elapsed);
 			WriteMem32(dst1, tracknum);
@@ -599,7 +1048,7 @@ static void GD_HLE_Command(gd_command cc)
 			// ------------------------------------------------------
 			// 3    | ADR                    | Control
 			u8 adr, ctrl;
-			libGDR_GetTrackAdrAndControl(tracknum, adr, ctrl);
+			libGDR_GetTrackAdrAndControlAtFad(fad, adr, ctrl);
 			u32 out = (adr << 28) | (ctrl << 24) | (fad & 0x00ffffff);
 			WriteMem32(dst2, out);
 
@@ -620,17 +1069,29 @@ static void GD_HLE_Command(gd_command cc)
 	case GDCC_MULTI_PIOREAD:
 		{
 			u32 sector = gd_hle_state.params[0] & 0xffffff;
-			u32 num = gd_hle_state.params[1];
+			const u32 requested = gd_hle_state.params[1];
+			u32 num;
 			// params[2] seekAhead (wince)
 			bool dma = cc == GDCC_MULTI_DMAREAD;
 
-			DEBUG_LOG(REIOS, "GDROM: MULTI_%sREAD Sector=%d, Num=%d SeekAhead=%d", dma ? "DMA" : "PIO", sector, num, gd_hle_state.params[2]);
+			if (!normalizeStreamReadRequest(sector, requested, num))
+				break;
+			DEBUG_LOG(REIOS, "GDROM: MULTI_%sREAD Sector=%d, Num=%d (requested %d) SeekAhead=%d",
+					dma ? "DMA" : "PIO", sector, num, requested, gd_hle_state.params[2]);
 
+			u32 byteCount;
+			if (!sectorsToBytes(num, SecMode[3], byteCount))
+			{
+				setIllegalRequest();
+				break;
+			}
 			gd_hle_state.status = GDC_CONTINUE;
 			gd_hle_state.multi_read_sector = sector;
-			gd_hle_state.multi_read_count = num * 2048;
+			gd_hle_state.multi_read_count = byteCount;
 			gd_hle_state.multi_read_total = gd_hle_state.multi_read_count;
 			gd_hle_state.multi_read_offset = 0;
+			gd_hle_state.multi_sector_size = SecMode[3];
+			gd_hle_state.transfer_remaining = 0;
 
 			// wild guesses here
 			gd_hle_state.result[2] = 0;
@@ -655,6 +1116,7 @@ static void GD_HLE_Command(gd_command cc)
 
 	default:
 		WARN_LOG(REIOS, "GDROM: Unknown GDROM CC:%X", cc);
+		setIllegalRequest();
 		break;
 	}
 	if (gd_hle_state.status == GDC_BUSY)
@@ -701,6 +1163,7 @@ void gdrom_hle_op()
 				gd_hle_state.status = GDC_BUSY;
 				gd_hle_state.command = (gd_command)r[4];
 				gd_hle_state.multi_read_count = 0;
+				gd_hle_state.transfer_remaining = 0;
 			}
 			break;
 
@@ -729,37 +1192,45 @@ void gdrom_hle_op()
 			//	GDC_CONTINUE - multi request has data available
 			//  GDC_SMPHR_BUSY ?
 			//	GDC_ERR - request has failed (examine extended status information for cause of failure)
-			try {
-				WriteMem32(r[5], gd_hle_state.result[0]);		// error
-				WriteMem32(r[5] + 4, gd_hle_state.result[1]);	// error1
-				WriteMem32(r[5] + 8, gd_hle_state.result[2]);	// size
-				WriteMem32(r[5] + 12, gd_hle_state.result[3]);	// wait state (if busy)
-			} catch (SH4ThrownException&) {
-			}
-			if (gd_hle_state.status == GDC_OK || gd_hle_state.status == GDC_BUSY)
-			{
-				r[0] = gd_hle_state.status;
-			}
-			else if (r[4] != gd_hle_state.last_request_id)
+			if (r[4] != gd_hle_state.last_request_id)
 			{
 				r[0] = GDC_OK; // no such request active
+				try {
+					for (u32 i = 0; i < std::size(gd_hle_state.result); i++)
+						WriteMem32(r[5] + i * 4, 0);
+				} catch (SH4ThrownException&) {
+				}
 			}
 			else
 			{
-				if (gd_hle_state.status == GDC_CONTINUE && gd_hle_state.command == GDCC_REQ_PIO_TRANS)
-					r[0] = GDC_BUSY;	// Bust-a-move 4 likes this
-				else
-					r[0] = gd_hle_state.status;	// completed or error
-				// Fixes NBA 2K
-				if (gd_hle_state.status == GDC_CONTINUE && gd_hle_state.multi_read_count == 0)
-				{
-					gd_hle_state.status = GDC_COMPLETE;
-					gd_hle_state.result[3] = 0;
+				try {
+					WriteMem32(r[5], gd_hle_state.result[0]);		// error
+					WriteMem32(r[5] + 4, gd_hle_state.result[1]);	// error1
+					WriteMem32(r[5] + 8, gd_hle_state.result[2]);	// size
+					WriteMem32(r[5] + 12, gd_hle_state.result[3]);	// wait state (if busy)
+				} catch (SH4ThrownException&) {
 				}
-				else if (gd_hle_state.status != GDC_CONTINUE)
+				if (gd_hle_state.status == GDC_OK || gd_hle_state.status == GDC_BUSY)
 				{
-					gd_hle_state.status = GDC_OK;
-					gd_hle_state.last_request_id = 0xFFFFFFFF;
+					r[0] = gd_hle_state.status;
+				}
+				else
+				{
+					if (gd_hle_state.status == GDC_CONTINUE && gd_hle_state.command == GDCC_REQ_PIO_TRANS)
+						r[0] = GDC_BUSY;	// Bust-a-move 4 likes this
+					else
+						r[0] = gd_hle_state.status;	// completed or error
+					// Fixes NBA 2K
+					if (gd_hle_state.status == GDC_CONTINUE && gd_hle_state.multi_read_count == 0)
+					{
+						gd_hle_state.status = GDC_COMPLETE;
+						gd_hle_state.result[3] = 0;
+					}
+					else if (gd_hle_state.status != GDC_CONTINUE)
+					{
+						gd_hle_state.status = GDC_OK;
+						gd_hle_state.last_request_id = 0xFFFFFFFF;
+					}
 				}
 			}
 			debugf("GDROM: HLE GET_CMD_STAT REQID:%X  param ptr: %X -> %X : %x %x %x %x", r[4], r[5], r[0],
@@ -778,14 +1249,20 @@ void gdrom_hle_op()
 		case GDROM_INIT_SYSTEM:
 			// Initialize the GDROM subsystem. Should be called before any requests are enqueued.
 			DEBUG_LOG(REIOS, "GDROM: HLE INIT_SYSTEM");
-			gd_hle_state = {};
+			resetDriveState();
 			break;
 
 		case GDROM_RESET:
 			// Resets the drive.
 			DEBUG_LOG(REIOS, "GDROM: HLE RESET");
-			gd_hle_state.last_request_id = 0xFFFFFFFF;
-			gd_hle_state.status = GDC_OK;
+			resetDriveState();
+			// A drive reset invalidates the initiator's previous view of the
+			// device. Match the ATA soft-reset path by reporting this once on
+			// the next command (normally INIT).
+			sns_key = 6; // UNIT ATTENTION
+			sns_asc = 0x29; // Power on, reset, or bus device reset occurred
+			sns_ascq = 0;
+			r[0] = GDC_OK;
 			break;
 
 		case GDROM_GET_DRV_STAT:
@@ -818,10 +1295,25 @@ void gdrom_hle_op()
 						discType = 0;
 						break;
 					default:
-						if (gd_hle_state.status == GDC_CONTINUE || SecNumber.Status == GD_PLAY)
+						switch (SecNumber.Status)
+						{
+						case GD_STANDBY:
+							status = GD_STAT_STANDBY;
+							break;
+						case GD_PLAY:
 							status = GD_STAT_PLAY;
-						else
-							status = GD_STAT_PAUSE;
+							break;
+						case GD_SEEK:
+							status = GD_STAT_SEEK;
+							break;
+						case GD_SCAN:
+							status = GD_STAT_SCAN;
+							break;
+						case GD_PAUSE:
+						default:
+							status = gd_hle_state.status == GDC_CONTINUE ? GD_STAT_PLAY : GD_STAT_PAUSE;
+							break;
+						}
 						if (ip_meta.isGDROM())
 							discType = GdRom;
 						break;
@@ -846,8 +1338,11 @@ void gdrom_hle_op()
 					&& (gd_hle_state.status == GDC_CONTINUE || gd_hle_state.status == GDC_BUSY || gd_hle_state.status == GDC_COMPLETE))
 			{
 				r[0] = GDC_OK;
-				gd_hle_state.multi_read_count = 0;
-				gd_hle_state.xfer_end_time = 0;
+				cancelActiveTransfer();
+				gd_hle_state.status = GDC_OK;
+				gd_hle_state.command = GDCC_NONE;
+				gd_hle_state.last_request_id = 0xFFFFFFFF;
+				memset(gd_hle_state.result, 0, sizeof(gd_hle_state.result));
 			}
 			else
 			{
@@ -863,17 +1358,49 @@ void gdrom_hle_op()
 			//	r4 = pointer to a struct of four 32 bit integers containing new values, or to receive the old values
 			//	Field	Function
 			//	0 	Get/Set, if 0 the mode will be set, if 1 it will be queried.
-			//	1 	? (always 8192)
+			//	1 	Sector part: 0x1000 whole sector, 0x2000 data area
 			//	2 	1024 = mode 1, 2048 = mode 2, 0 = auto detect
 			//	3 	Sector size in bytes (normally 2048)
 			//
 			// Returns: GDC_OK, GDC_ERR
-			DEBUG_LOG(REIOS, "GDROM: HLE CHANGE_DATA_TYPE PTR_r4:%X",r[4]);
-			for(std::size_t i = 0; i < std::size(SecMode); i++) {
-				SecMode[i] = ReadMem32(r[4]+(i<<2));
-				DEBUG_LOG(REIOS, "%08X", SecMode[i]);
+			DEBUG_LOG(REIOS, "GDROM: HLE CHANGE_DATA_TYPE PTR_r4:%X", r[4]);
+			try
+			{
+				const u32 operation = ReadMem32(r[4]);
+				if (operation == 1)
+				{
+					WriteMem32(r[4], 1);
+					for (u32 i = 1; i < std::size(SecMode); i++)
+						WriteMem32(r[4] + i * 4, SecMode[i]);
+					r[0] = GDC_OK;
+				}
+				else if (operation == 0)
+				{
+					u32 newMode[4];
+					for (u32 i = 0; i < std::size(newMode); i++)
+						newMode[i] = ReadMem32(r[4] + i * 4);
+
+					if ((newMode[1] != 0x1000 && newMode[1] != 0x2000)
+							|| (newMode[2] != 0 && newMode[2] != 1024 && newMode[2] != 2048)
+							|| !supportedSectorSize(newMode[3]))
+					{
+						r[0] = GDC_ERR;
+					}
+					else
+					{
+						std::copy(std::begin(newMode), std::end(newMode), std::begin(SecMode));
+						r[0] = GDC_OK;
+					}
+				}
+				else
+				{
+					r[0] = GDC_ERR;
+				}
 			}
-			r[0] = GDC_OK;
+			catch (SH4ThrownException&)
+			{
+				r[0] = GDC_ERR;
+			}
 			break;
 
 		case GDROM_G1_DMA_END:
@@ -891,35 +1418,48 @@ void gdrom_hle_op()
 			break;
 
 		case GDROM_REQ_DMA_TRANS:
-			gd_hle_state.params[0] = ReadMem32(r[5]);		// buffer
-			gd_hle_state.params[1] = ReadMem32(r[5] + 4);	// size
-			DEBUG_LOG(REIOS, "GDROM: REQ_DMA_TRANS req_id %x dest %x size %x",
-					r[4], gd_hle_state.params[0], gd_hle_state.params[1]);
-
-			if (gd_hle_state.status != GDC_CONTINUE || gd_hle_state.params[1] > gd_hle_state.multi_read_count || gd_hle_state.params[1] == 0)
 			{
-				r[0] = GDC_ERR;
-			}
-			else
-			{
-				multi_xfer<true>();
-				r[0] = GDC_OK;
+				if (r[4] != gd_hle_state.last_request_id || gd_hle_state.status != GDC_CONTINUE)
+				{
+					r[0] = GDC_ERR;
+					break;
+				}
+				gd_hle_state.params[0] = ReadMem32(r[5]);		// buffer
+				gd_hle_state.params[1] = ReadMem32(r[5] + 4);	// size
+				DEBUG_LOG(REIOS, "GDROM: REQ_DMA_TRANS req_id %x dest %x size %x",
+						r[4], gd_hle_state.params[0], gd_hle_state.params[1]);
+				if ((gd_hle_state.params[0] & 31) != 0 || gd_hle_state.params[1] < 32
+						|| gd_hle_state.params[1] > gd_hle_state.multi_read_count)
+					r[0] = GDC_ERR;
+				else
+				{
+					gd_hle_state.transfer_remaining = gd_hle_state.params[1];
+					multi_xfer<true>();
+					r[0] = GDC_OK;
+				}
 			}
 			break;
 
 		case GDROM_REQ_PIO_TRANS:
-			gd_hle_state.params[0] = ReadMem32(r[5]);
-			gd_hle_state.params[1] = ReadMem32(r[5] + 4);
-			DEBUG_LOG(REIOS, "GDROM: REQ_PIO_TRANS req_id %x dest %x size %x",
-					r[4], gd_hle_state.params[0], gd_hle_state.params[1]);
-			if (gd_hle_state.status != GDC_CONTINUE || gd_hle_state.params[1] > gd_hle_state.multi_read_count)
 			{
-				r[0] = GDC_ERR;
-			}
-			else
-			{
-				gd_hle_state.command = GDCC_REQ_PIO_TRANS;
-				r[0] = GDC_OK;
+				if (r[4] != gd_hle_state.last_request_id || gd_hle_state.status != GDC_CONTINUE)
+				{
+					r[0] = GDC_ERR;
+					break;
+				}
+				gd_hle_state.params[0] = ReadMem32(r[5]);
+				gd_hle_state.params[1] = ReadMem32(r[5] + 4);
+				DEBUG_LOG(REIOS, "GDROM: REQ_PIO_TRANS req_id %x dest %x size %x",
+						r[4], gd_hle_state.params[0], gd_hle_state.params[1]);
+				if ((gd_hle_state.params[0] & 1) != 0 || gd_hle_state.params[1] < 2
+						|| gd_hle_state.params[1] > gd_hle_state.multi_read_count)
+					r[0] = GDC_ERR;
+				else
+				{
+					gd_hle_state.transfer_remaining = gd_hle_state.params[1];
+					gd_hle_state.command = GDCC_REQ_PIO_TRANS;
+					r[0] = GDC_OK;
+				}
 			}
 			break;
 
@@ -927,15 +1467,18 @@ void gdrom_hle_op()
 			{
 				// r4 handle
 				u32 len_addr = r[5];
-				DEBUG_LOG(REIOS, "GDROM: CHECK_DMA_TRANS req_id %x len_addr %x -> %x", r[4], len_addr, gd_hle_state.multi_read_count);
-				WriteMem32(len_addr, gd_hle_state.multi_read_count);
-				if (gd_hle_state.status == GDC_CONTINUE)
+				DEBUG_LOG(REIOS, "GDROM: CHECK_DMA_TRANS req_id %x len_addr %x -> %x", r[4], len_addr, gd_hle_state.transfer_remaining);
+				if (r[4] != gd_hle_state.last_request_id)
 				{
-					r[0] = GDC_OK;
+					r[0] = GDC_ERR;
+					break;
 				}
-				else
-				{
-					r[0] = GDC_BUSY;
+				try {
+					WriteMem32(len_addr, gd_hle_state.transfer_remaining);
+					r[0] = gd_hle_state.status == GDC_CONTINUE || gd_hle_state.status == GDC_COMPLETE
+							? GDC_OK : GDC_ERR;
+				} catch (SH4ThrownException&) {
+					r[0] = GDC_ERR;
 				}
 			}
 			break;
@@ -950,11 +1493,19 @@ void gdrom_hle_op()
 		case GDROM_CHECK_PIO_TRANS:
 			{
 				u32 len_addr = r[5];
-				DEBUG_LOG(REIOS, "GDROM: CHECK_PIO_TRANS req_id %x len_addr %x -> %x", r[4], len_addr, gd_hle_state.multi_read_count);
-				if (gd_hle_state.status == GDC_CONTINUE)
+				DEBUG_LOG(REIOS, "GDROM: CHECK_PIO_TRANS req_id %x len_addr %x -> %x", r[4], len_addr, gd_hle_state.transfer_remaining);
+				if (r[4] != gd_hle_state.last_request_id)
 				{
-					WriteMem32(len_addr, gd_hle_state.multi_read_count);
-					r[0] = GDC_OK;
+					r[0] = GDC_ERR;
+				}
+				else if (gd_hle_state.status == GDC_CONTINUE || gd_hle_state.status == GDC_COMPLETE)
+				{
+					try {
+						WriteMem32(len_addr, gd_hle_state.transfer_remaining);
+						r[0] = GDC_OK;
+					} catch (SH4ThrownException&) {
+						r[0] = GDC_ERR;
+					}
 				}
 				else
 				{

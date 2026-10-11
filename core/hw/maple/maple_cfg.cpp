@@ -12,8 +12,19 @@
 
 MapleInputState mapleInputState[4];
 extern bool maple_ddt_pending_reset;
+extern bool maple_dma_pending_start;
 extern std::vector<std::pair<u32, std::vector<u32>>> mapleDmaOut;
+extern std::vector<u32> mapleDmaDelays;
+extern std::vector<MapleDmaRequest> mapleDmaRequests;
+extern u32 mapleDmaIndex;
+extern u32 mapleDmaTailCycles;
+extern bool mapleDmaResponsePending;
+extern u32 mapleDmaResponseOffset;
+extern bool mapleDmaResponseBurstPending;
+extern bool mapleDmaResponseLegacyAtomic;
+extern u32 mapleDmaJitterCycles;
 extern bool SDCKBOccupied;
+extern u64 maple_reconnect_time;
 
 void (*MapleConfigMap::UpdateVibration)(u32 port, float power, float inclination, u32 duration_ms);
 
@@ -501,6 +512,7 @@ void mcfg_DestroyDevices(bool full)
 void mcfg_SerializeDevices(Serializer& ser)
 {
 	ser << maple_ddt_pending_reset;
+	ser << maple_dma_pending_start;
 	ser << SDCKBOccupied;
 	ser << (u32)mapleDmaOut.size();
 	for (const auto& pair : mapleDmaOut)
@@ -509,6 +521,19 @@ void mcfg_SerializeDevices(Serializer& ser)
 		ser << (u32)pair.second.size();
 		ser.serialize(pair.second.data(), pair.second.size());
 	}
+	ser << mapleDmaIndex << mapleDmaTailCycles << (u32)mapleDmaDelays.size();
+	for (u32 delay : mapleDmaDelays)
+		ser << delay;
+	ser << mapleDmaResponsePending << mapleDmaResponseOffset
+			<< mapleDmaResponseBurstPending << mapleDmaJitterCycles
+			<< (u32)mapleDmaRequests.size();
+	for (const MapleDmaRequest& request : mapleDmaRequests) {
+		ser << request.pattern << request.destination << request.bus << request.port << request.swapWords
+				<< request.hostCycles << (u32)request.data.size();
+		ser.serialize(request.data.data(), request.data.size());
+		ser << request.source;
+	}
+	ser << maple_reconnect_time;
 	for (int i = 0; i < MAPLE_PORTS; i++)
 		for (int j = 0; j < 6; j++)
 		{
@@ -534,6 +559,10 @@ void mcfg_DeserializeDevices(Deserializer& deser)
 		deser.skip<bool>(); // EEPROM_loaded
 	}
 	deser >> maple_ddt_pending_reset;
+	if (deser.version() >= Deserializer::V89)
+		deser >> maple_dma_pending_start;
+	else
+		maple_dma_pending_start = false;
 	if (deser.version() >= Deserializer::V47)
 		deser >> SDCKBOccupied;
 	mapleDmaOut.clear();
@@ -551,6 +580,65 @@ void mcfg_DeserializeDevices(Deserializer& deser)
 			deser.deserialize(mapleDmaOut.back().second.data(), dataSize);
 		}
 	}
+	mapleDmaDelays.clear();
+	if (deser.version() >= Deserializer::V93) {
+		u32 delayCount;
+		deser >> mapleDmaIndex >> mapleDmaTailCycles >> delayCount;
+		mapleDmaDelays.resize(delayCount);
+		for (u32& delay : mapleDmaDelays)
+			deser >> delay;
+	}
+	else {
+		mapleDmaIndex = 0;
+		mapleDmaTailCycles = 0;
+		mapleDmaDelays.resize(mapleDmaOut.size(), 1);
+	}
+	mapleDmaRequests.clear();
+	if (deser.version() >= Deserializer::V95) {
+		u32 requestCount;
+		deser >> mapleDmaResponsePending;
+		if (deser.version() >= Deserializer::V124) {
+			deser >> mapleDmaResponseOffset >> mapleDmaResponseBurstPending;
+			if (deser.version() >= Deserializer::V127)
+				deser >> mapleDmaJitterCycles;
+			else
+				mapleDmaJitterCycles = 0;
+			mapleDmaResponseLegacyAtomic = false;
+		}
+		else {
+			mapleDmaResponseOffset = 0;
+			mapleDmaResponseBurstPending = false;
+			mapleDmaJitterCycles = 0;
+			// Older states already reserved the complete SDRAM write duration in
+			// their pending scheduler event; preserve their atomic completion.
+			mapleDmaResponseLegacyAtomic = mapleDmaResponsePending;
+		}
+		deser >> requestCount;
+		for (u32 i = 0; i < requestCount; ++i) {
+			MapleDmaRequest request{};
+			u32 dataSize;
+			if (deser.version() >= Deserializer::V99)
+				deser >> request.pattern;
+			deser >> request.destination >> request.bus >> request.port >> request.swapWords
+					>> request.hostCycles >> dataSize;
+			request.data.resize(dataSize);
+			deser.deserialize(request.data.data(), dataSize);
+			if (deser.version() >= Deserializer::V117)
+				deser >> request.source;
+			mapleDmaRequests.emplace_back(std::move(request));
+		}
+	}
+	else {
+		mapleDmaResponsePending = !mapleDmaOut.empty();
+		mapleDmaResponseOffset = 0;
+		mapleDmaResponseBurstPending = false;
+		mapleDmaJitterCycles = 0;
+		mapleDmaResponseLegacyAtomic = mapleDmaResponsePending;
+	}
+	if (deser.version() >= Deserializer::V62)
+		deser >> maple_reconnect_time;
+	else
+		maple_reconnect_time = 0;
 
 	for (int i = 0; i < MAPLE_PORTS; i++)
 		for (int j = 0; j < 6; j++)

@@ -73,12 +73,12 @@ struct CdioDrive;
 
 struct CdioTrack : public TrackFile
 {
-	CdioTrack(CdioDrive& disk, bool audio)
-		: disk(disk), audio(audio) {}
+	CdioTrack(CdioDrive& disk, track_format_t format)
+		: disk(disk), format(format) {}
 	bool Read(u32 FAD, u8 *dst, SectorFormat *sector_type, u8 *subcode, SubcodeFormat *subcode_type);
 
 	CdioDrive& disk;
-	bool audio;
+	track_format_t format;
 };
 
 struct CdioDrive : public Disc
@@ -120,62 +120,139 @@ struct CdioDrive : public Disc
 		}
 
 		Session session;
+		firstTrack = firstTrk;
 		session.StartFAD = 150;
 		session.FirstTrack = firstTrk;
 		sessions.push_back(session);
+		if (char *mcn = cdio_get_mcn(pCdio); mcn != nullptr)
+		{
+			catalog = mcn;
+			cdio_free(mcn);
+		}
 		type = CdDA;	// TODO more CD types
+		bool hasAudio = false;
+		bool hasData = false;
+		bool hasXa = false;
+		bool hasCdi = false;
 
 		for (int i = firstTrk; i <= lastTrk; i++)
 		{
 			lba_t lba = cdio_get_track_lba(pCdio, i);
-			if (lba == CDIO_INVALID_LBA)
+			if (lba == CDIO_INVALID_LBA || lba < 0 || static_cast<u64>(lba) > 0xffffff)
 			{
-				WARN_LOG(GDROM, "Can't find track %d", i);
+				WARN_LOG(GDROM, "Invalid start address for track %d: %d", i, lba);
 				close();
 				return false;
 			}
 			track_format_t format = cdio_get_track_format(pCdio, i);
-			bool copy = true;
-			if (format == TRACK_FORMAT_AUDIO) {
-				track_flag_t copyFlag = cdio_get_track_copy_permit(pCdio, i);
-				copy = copyFlag == CDIO_TRACK_FLAG_TRUE;
-			}
-			else if (!tracks.empty() && !tracks.back().isDataTrack())
+			if (format == TRACK_FORMAT_ERROR)
 			{
-				// session 1 lead-out & session 2 lead-in and pre-gap
-				tracks.back().EndFAD -= 11400;
-
-				type = CdRom_XA;
-				Session session;
-				session.StartFAD = lba;
-				session.FirstTrack = i;
-				sessions.push_back(session);
+				WARN_LOG(GDROM, "Can't determine format of track %d", i);
+				close();
+				return false;
 			}
+			hasAudio |= format == TRACK_FORMAT_AUDIO;
+			hasData |= format != TRACK_FORMAT_AUDIO;
+			hasXa |= format == TRACK_FORMAT_XA;
+			hasCdi |= format == TRACK_FORMAT_CDI;
 			Track t;
-			t.ADR = 1;			// FIXME correct?
+			t.ADR = 1;	// Current-position Q mode.
 			t.CTRL = format == TRACK_FORMAT_AUDIO ? 0 : CDIO_CDROM_DATA_TRACK;
+			if (char *isrc = cdio_get_track_isrc(pCdio, i); isrc != nullptr)
+			{
+				t.isrc = isrc;
+				cdio_free(isrc);
+			}
+			if (format == TRACK_FORMAT_AUDIO)
+			{
+				if (cdio_get_track_preemphasis(pCdio, i) == CDIO_TRACK_FLAG_TRUE)
+					t.CTRL |= CDIO_TRACK_FLAG_PRE_EMPHASIS;
+				if (cdio_get_track_copy_permit(pCdio, i) == CDIO_TRACK_FLAG_TRUE)
+					t.CTRL |= CDIO_TRACK_FLAG_COPY_PERMITTED;
+				if (cdio_get_track_channels(pCdio, i) == 4)
+					t.CTRL |= CDIO_TRACK_FLAG_FOUR_CHANNEL_AUDIO;
+			}
 			t.StartFAD = lba;
 			lsn_t last = cdio_get_track_last_lsn(pCdio, i);
 			if (last == CDIO_INVALID_LSN)
-				WARN_LOG(GDROM, "Can't get last lsn of track %d", i);
-			else
-				t.EndFAD = cdio_lsn_to_lba(last);
+			{
+				WARN_LOG(GDROM, "Can't get last address of track %d", i);
+				close();
+				return false;
+			}
+			lba_t end = cdio_lsn_to_lba(last);
+			if (end < lba || static_cast<u64>(end) > 0xffffff)
+			{
+				WARN_LOG(GDROM, "Invalid end address for track %d: %d", i, end);
+				close();
+				return false;
+			}
+			t.EndFAD = end;
 			if (i == firstTrk)
 				sessions.front().StartFAD = t.StartFAD;
-			INFO_LOG(GDROM, "Track #%d: start %d end %d format %d copy %d", i, t.StartFAD, t.EndFAD, format, copy);
-			t.file = new CdioTrack(*this, format == TRACK_FORMAT_AUDIO);
+			INFO_LOG(GDROM, "Track #%d: start %d end %d format %d control %x", i,
+					t.StartFAD, t.EndFAD, format, t.CTRL);
+			t.file = new CdioTrack(*this, format);
 			tracks.push_back(t);
 		}
-		lba_t leadout = cdio_get_track_lba(pCdio, CDIO_CDROM_LEADOUT_TRACK);
-		if (leadout == CDIO_INVALID_LBA)
+
+		// Some physical-device backends can report the first sector of the
+		// last session directly. Use it to expose CD Extra/MIL-CD session data
+		// through REQ_SES. Backends such as macOS do not implement this query,
+		// so fall back to the characteristic audio-to-data track transition.
+		size_t lastSessionTrack = 0;
+		lsn_t lastSessionLsn;
+		if (cdio_get_last_session(pCdio, &lastSessionLsn) == DRIVER_OP_SUCCESS
+				&& lastSessionLsn != CDIO_INVALID_LSN)
 		{
-			WARN_LOG(GDROM, "Can't find leadout track");
+			const lba_t lastSessionFad = cdio_lsn_to_lba(lastSessionLsn);
+			for (size_t i = 0; i < tracks.size(); i++)
+			{
+				if (lastSessionFad >= static_cast<lba_t>(tracks[i].StartFAD)
+						&& lastSessionFad <= static_cast<lba_t>(tracks[i].EndFAD))
+				{
+					lastSessionTrack = i;
+					break;
+				}
+				if (lastSessionFad < static_cast<lba_t>(tracks[i].StartFAD))
+				{
+					lastSessionTrack = i;
+					break;
+				}
+			}
+		}
+		else
+		{
+			for (size_t i = 1; i < tracks.size(); i++)
+				if (!tracks[i - 1].isDataTrack() && tracks[i].isDataTrack())
+				{
+					lastSessionTrack = i;
+					break;
+				}
+		}
+		if (lastSessionTrack != 0)
+		{
+			Session lastSession;
+			lastSession.StartFAD = tracks[lastSessionTrack].StartFAD;
+			lastSession.FirstTrack = static_cast<u8>(firstTrack + lastSessionTrack);
+			sessions.push_back(lastSession);
+			INFO_LOG(GDROM, "Last session: track %u FAD %u", lastSession.FirstTrack,
+					lastSession.StartFAD);
+		}
+
+		lba_t leadout = cdio_get_track_lba(pCdio, CDIO_CDROM_LEADOUT_TRACK);
+		if (leadout == CDIO_INVALID_LBA || leadout < 0 || static_cast<u64>(leadout) > 0xffffff
+				|| leadout <= static_cast<lba_t>(tracks.back().EndFAD))
+		{
+			WARN_LOG(GDROM, "Invalid leadout address: %d", leadout);
 			close();
 			return false;
 		}
 		LeadOut.StartFAD = leadout;
 		LeadOut.ADR = 1;
-		LeadOut.CTRL = CDIO_CDROM_DATA_TRACK;
+		LeadOut.CTRL = tracks.back().CTRL;
+		EndFAD = leadout;
+		type = hasCdi ? CdRom_CDI : !hasData ? CdDA : hasAudio || hasXa ? CdRom_XA : CdRom;
 
 		return true;
 	}
@@ -197,7 +274,7 @@ struct CdioDrive : public Disc
 bool CdioTrack::Read(u32 FAD, u8 *dst, SectorFormat *sector_type, u8 *subcode, SubcodeFormat *subcode_type)
 {
 	lsn_t lsn = cdio_lba_to_lsn(FAD);
-	if (audio)
+	if (format == TRACK_FORMAT_AUDIO)
 	{
 		*sector_type = SECFMT_2352;
 		if (cdio_read_audio_sector(disk.pCdio, dst, lsn) != DRIVER_OP_SUCCESS) {
@@ -205,16 +282,31 @@ bool CdioTrack::Read(u32 FAD, u8 *dst, SectorFormat *sector_type, u8 *subcode, S
 			return false;
 		}
 	}
+	else if (format == TRACK_FORMAT_DATA)
+	{
+		*sector_type = SECFMT_2048_MODE1;
+		if (cdio_read_mode1_sector(disk.pCdio, dst, lsn, false) != DRIVER_OP_SUCCESS)
+		{
+			WARN_LOG(GDROM, "Read mode 1 data fad %d failed", FAD);
+			return false;
+		}
+	}
 	else
 	{
-		*sector_type = SECFMT_2048_MODE2_FORM1;
-		if (cdio_read_mode2_sector(disk.pCdio, dst, lsn, false) != DRIVER_OP_SUCCESS)
+		if (cdio_read_mode2_sector(disk.pCdio, dst, lsn, false) == DRIVER_OP_SUCCESS)
 		{
-			if (cdio_read_mode1_sector(disk.pCdio, dst, lsn, false) != DRIVER_OP_SUCCESS) {
-				WARN_LOG(GDROM, "Read data fad %d failed", FAD);
-				return false;
-			}
-			*sector_type = SECFMT_2048_MODE1;
+			*sector_type = SECFMT_2048_MODE2_FORM1;
+		}
+		else if (cdio_read_mode2_sector(disk.pCdio, dst, lsn, true) == DRIVER_OP_SUCCESS)
+		{
+			// libcdio requests the cooked Mode 2 Form 2 user-data area from
+			// physical-device backends (2324 bytes, without the XA subheader).
+			*sector_type = SECFMT_2324_MODE2_FORM2;
+		}
+		else
+		{
+			WARN_LOG(GDROM, "Read mode 2 data fad %d failed", FAD);
+			return false;
 		}
 	}
 

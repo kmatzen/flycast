@@ -83,6 +83,7 @@ public:
 			line.valid = true;
 			line.address = tag;
 			const u32 line_addr = physAddr & ~0x1f;
+			sh4cycles.addReadAccessCycles(physAddr, 32);
 			u8* const memPtr = GetMemPtr(line_addr, sizeof(line.data));
 			if (memPtr != nullptr)
 				memcpy(line.data, memPtr, sizeof(line.data));
@@ -92,10 +93,11 @@ public:
 				for (int i = 0; i < 32; i += 4)
 					*p++ = addrspace::read32(line_addr + i);
 			}
-			sh4cycles.addReadAccessCycles(physAddr, 32);
 		}
 
-		return *(u16*)&line.data[physAddr & 0x1f];
+		u16 data;
+		memcpy(&data, &line.data[physAddr & 0x1f], sizeof(data));
+		return data;
 	}
 
 	void Invalidate()
@@ -158,14 +160,16 @@ public:
 	{
 		u32 index = (addr >> 5) & 0xFF;
 		cache_line& line = lines[index];
-		return *(u32 *)&line.data[addr & 0x1C];
+		u32 data;
+		memcpy(&data, &line.data[addr & 0x1c], sizeof(data));
+		return data;
 	}
 
 	void WriteDataArray(u32 addr, u32 data)
 	{
 		u32 index = (addr >> 5) & 0xFF;
 		cache_line& line = lines[index];
-		*(u32 *)&line.data[addr & 0x1C] = data;
+		memcpy(&line.data[addr & 0x1c], &data, sizeof(data));
 	}
 
 private:
@@ -188,12 +192,6 @@ private:
 		{
 			// kernel mem protected in user mode
 			if (address & 0x80000000)
-				return MmuError::BADADDR;
-		}
-		else
-		{
-			// P4 not executable
-			if (area == 7)
 				return MmuError::BADADDR;
 		}
 		cached = CCN_CCR.ICE == 1 && cachedArea(area);
@@ -221,6 +219,8 @@ private:
 					return MmuError::PROTECTED;
 			}
 			cached = cached && entry->Data.C == 1;
+			if ((physAddr & 0x1c000000) == 0x1c000000)
+				physAddr |= 0xf0000000;
 		}
 		return MmuError::NONE;
 	}
@@ -264,14 +264,18 @@ public:
 		if (!line.valid || tag != line.address)
 		{
 			// miss
-			if (line.dirty && line.valid)
-				// write-back needed
-				doWriteBack(index, line);
+			const bool writeBack = line.dirty && line.valid;
+			const cache_line evicted = line;
 			line.address = tag;
 			readCacheLine(physAddr, line);
+			if (writeBack)
+				// Reads have priority; drain the saved dirty line after the fill.
+				doWriteBack(index, evicted);
 		}
 
-		return *(T*)&line.data[physAddr & 0x1f];
+		T data;
+		memcpy(&data, &line.data[physAddr & 0x1f], sizeof(data));
+		return data;
 	}
 
 	template<class T>
@@ -299,23 +303,24 @@ public:
 			// miss and copy-back => read cache line
 			if (copyBack)
 			{
-				if (line.dirty && line.valid)
-					// write-back needed
-					doWriteBack(index, line);
+				const bool writeBack = line.dirty && line.valid;
+				const cache_line evicted = line;
 				line.address = tag;
 				readCacheLine(physAddr, line);
+				if (writeBack)
+					doWriteBack(index, evicted);
 			}
 		}
 		else if (!copyBack)
 		{
 			// hit and write-through => update cache
-			*(T*)&line.data[physAddr & 0x1f] = data;
+			memcpy(&line.data[physAddr & 0x1f], &data, sizeof(data));
 		}
 		if (copyBack)
 		{
 			// copy-back => update cache and mark line as dirty
 			line.dirty = true;
-			*(T*)&line.data[physAddr & 0x1f] = data;
+			memcpy(&line.data[physAddr & 0x1f], &data, sizeof(data));
 		}
 		else
 		{
@@ -325,15 +330,82 @@ public:
 		}
 	}
 
+	void Movca(u32 address, u32 data)
+	{
+		u32 physAddr = 0;
+		bool cacheOn = false;
+		bool copyBack = false;
+		MmuError err = translateAddress<u32, MMU_TT_DWRITE>(address, physAddr, cacheOn, copyBack);
+		if (err != MmuError::NONE)
+			mmu_raise_exception(err, address, MMU_TT_DWRITE);
+
+#ifndef STRICT_MODE
+		// Fast mode does not retain cache contents, but MOVCA still performs the
+		// translated longword store and its architectural exception checks.
+		addWriteThroughCycles(physAddr, sizeof(data));
+		addrspace::write32(physAddr, data);
+		return;
+#endif
+		if (!cacheOn)
+		{
+			addWriteThroughCycles(physAddr, sizeof(data));
+			addrspace::write32(physAddr, data);
+			return;
+		}
+
+		const u32 index = lineIndex(address);
+		cache_line& line = lines[index];
+		const u32 tag = (physAddr >> 10) & 0x7ffff;
+		if ((!line.valid || tag != line.address) && copyBack)
+		{
+			// Unlike an ordinary write miss, MOVCA allocates without fetching the
+			// block. Preserve the unspecified remaining bytes and only install the
+			// new tag; a dirty victim still has to be drained.
+			const bool writeBack = line.dirty && line.valid;
+			const cache_line evicted = line;
+			line.valid = true;
+			line.dirty = false;
+			line.address = tag;
+			if (writeBack)
+				doWriteBack(index, evicted);
+		}
+		else if (line.valid && tag == line.address && !copyBack)
+		{
+			memcpy(&line.data[physAddr & 0x1f], &data, sizeof(data));
+		}
+
+		if (copyBack)
+		{
+			line.dirty = true;
+			memcpy(&line.data[physAddr & 0x1f], &data, sizeof(data));
+		}
+		else
+		{
+			addrspace::write32(physAddr, data);
+			addWriteThroughCycles(physAddr, sizeof(data));
+		}
+	}
+
 	void WriteBack(u32 address, bool write_back, bool invalidate)
 	{
 		u32 physAddr;
 		bool cached = false;
 		bool copyBack;
-		MmuError err = translateAddress<u8, MMU_TT_DWRITE>(address, physAddr, cached, copyBack);
+		// OCBI is checked as a write and can raise an initial-page-write
+		// exception. OCBP/OCBWB merely maintain an existing cache line and are
+		// checked as reads; writing a dirty line back does not dirty the virtual
+		// page.
+		MmuError err = write_back
+				? translateAddress<u8, MMU_TT_DREAD>(address, physAddr, cached, copyBack)
+				: translateAddress<u8, MMU_TT_DWRITE>(address, physAddr, cached, copyBack);
 		if (err != MmuError::NONE)
-			mmu_raise_exception(err, address, MMU_TT_DWRITE);
+			mmu_raise_exception(err, address, write_back ? MMU_TT_DREAD : MMU_TT_DWRITE);
 
+#ifndef STRICT_MODE
+		// Cache contents are not modeled in the fast build, but the translation
+		// and its architectural exceptions above still apply.
+		return;
+#endif
 		if (!cached)
 			return;
 
@@ -355,8 +427,18 @@ public:
 		bool cached;
 		bool copyBack;
 		MmuError err = translateAddress<u8, MMU_TT_DREAD>(address, physAddr, cached, copyBack);
+		// PREF suppresses ordinary translation and address errors, but a TLB
+		// multiple hit is a reset-class exception even for this speculative
+		// access.
+		if (err == MmuError::TLB_MHIT)
+			mmu_raise_exception(err, address, MMU_TT_DREAD);
+
+#ifndef STRICT_MODE
+		// Preserve PREF's architectural multiple-hit check without populating a
+		// cache which ordinary fast-mode loads and stores do not consult.
+		return;
+#endif
 		if (err != MmuError::NONE || !cached)
-			// ignore address translation errors
 			return;
 
 		const u32 index = lineIndex(address);
@@ -364,10 +446,12 @@ public:
 		const u32 tag = (physAddr >> 10) & 0x7ffff;
 		if (line.valid && tag == line.address)
 			return;
-		if (line.valid && line.dirty)
-			doWriteBack(index, line);
+		const bool writeBack = line.valid && line.dirty;
+		const cache_line evicted = line;
 		line.address = tag;
 		readCacheLine(physAddr, line);
+		if (writeBack)
+			doWriteBack(index, evicted);
 	}
 
 	void Invalidate()
@@ -381,8 +465,11 @@ public:
 
 	void Reset(bool hard)
 	{
-		if (hard)
+		if (hard) {
 			memset(&lines[0], 0, sizeof(lines));
+			writeBackBufferCycles = 0;
+			writeThroughBufferCycles = 0;
+		}
 	}
 
 	void Serialize(Serializer& ser)
@@ -397,6 +484,10 @@ public:
 		if (deser.version() >= Serializer::V55) {
 			deser >> writeBackBufferCycles;
 			deser >> writeThroughBufferCycles;
+		}
+		else {
+			writeBackBufferCycles = 0;
+			writeThroughBufferCycles = 0;
 		}
 	}
 
@@ -434,7 +525,7 @@ public:
 			if (!line.valid || tag != line.address)
 				// Ignore the write
 				return;
-			if ((data & 3) != 0 && line.dirty)
+			if ((data & 3) != 3 && line.dirty)
 				doWriteBack(index, line);
 		}
 		line.valid = data & 1;
@@ -445,14 +536,16 @@ public:
 	{
 		u32 index = (addr >> 5) & 0x1FF;
 		cache_line& line = lines[index];
-		return *(u32 *)&line.data[addr & 0x1C];
+		u32 data;
+		memcpy(&data, &line.data[addr & 0x1c], sizeof(data));
+		return data;
 	}
 
 	void WriteDataArray(u32 addr, u32 data)
 	{
 		u32 index = (addr >> 5) & 0x1FF;
 		cache_line& line = lines[index];
-		*(u32 *)&line.data[addr & 0x1C] = data;
+		memcpy(&line.data[addr & 0x1c], &data, sizeof(data));
 	}
 
 	void WriteBackAll()
@@ -489,6 +582,7 @@ private:
 		line.valid = true;
 		line.dirty = false;
 		const u32 line_addr = address & ~0x1f;
+		sh4cycles.addReadAccessCycles(address, 32);
 		u8* memPtr = GetMemPtr(line_addr, sizeof(line.data));
 		if (memPtr != nullptr)
 			memcpy(line.data, memPtr, sizeof(line.data));
@@ -498,14 +592,14 @@ private:
 			for (int i = 0; i < 32; i += 4)
 				*p++ = addrspace::read32(line_addr + i);
 		}
-		sh4cycles.addReadAccessCycles(address, 32);
 	}
 
-	void doWriteBack(u32 index, cache_line& line)
+	void doWriteBack(u32 index, const cache_line& line)
 	{
 		if (CCN_CCR.ORA && (index & 0x80))
 			return;
 		u32 line_addr = (line.address << 10) | ((index & 0x1F) << 5);
+		addWriteBackCycles(line_addr);
 		u8* memPtr = GetMemPtr(line_addr, sizeof(line.data));
 		if (memPtr != nullptr)
 			memcpy(memPtr, line.data, sizeof(line.data));
@@ -515,14 +609,12 @@ private:
 			for (int i = 0; i < 32; i += 4)
 				addrspace::write32(line_addr + i, *p++);
 		}
-		addWriteBackCycles(line_addr);
 	}
 
 	template<class T, u32 ACCESS>
 	MmuError translateAddress(u32 address, u32& physAddr, bool& cached, bool& copyBack)
 	{
-		// Alignment errors
-		if (address & (sizeof(T) - 1))
+		if (sh4DataAddressError(address, sizeof(T), ACCESS == MMU_TT_DWRITE))
 			return MmuError::BADADDR;
 		if (ACCESS == MMU_TT_DWRITE && (address & 0xFC000000) == 0xE0000000)
 		{
@@ -591,7 +683,10 @@ private:
 		u64 now = sh4cycles.now();
 		if (writeBackBufferCycles > now)
 			sh4cycles.addCycles(writeBackBufferCycles - now);
-		writeBackBufferCycles = now + sh4cycles.writeAccessCycles(addr, 32);
+		// The transfer starts only after any preceding buffered write has
+		// completed.  Re-read the clock after charging that wait; using the
+		// pre-wait value makes the new transfer appear to complete too early.
+		writeBackBufferCycles = sh4cycles.now() + sh4cycles.writeAccessCycles(addr, 32);
 	}
 
 	void addWriteThroughCycles(u32 addr, int size)
@@ -602,7 +697,7 @@ private:
 		int cycles = sh4cycles.writeAccessCycles(addr, std::min(size, 8));
 		if (size == 32)
 			sh4cycles.addCycles(cycles * 3);
-		writeThroughBufferCycles = now + cycles;
+		writeThroughBufferCycles = sh4cycles.now() + cycles;
 	}
 
 	std::array<cache_line, 512> lines;

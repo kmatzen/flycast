@@ -27,6 +27,10 @@ void sh4_sched_unregister(int id);
 */
 u64 sh4_sched_now64();
 
+/* Current CPU execution budget, shortened to the next scheduler deadline. */
+int sh4_sched_cpu_slice();
+void sh4_sched_set_cpu_slice(int cycles);
+
 /*
 	Schedule a callback to be called sh4 *cycles* after the
 	invocation of this function. *Cycles* range is (0, 200M].
@@ -40,6 +44,9 @@ void sh4_sched_request(int id, int cycles);
 	Returns true if the callback is scheduled to be called in the future.
  */
 bool sh4_sched_is_scheduled(int id);
+
+/* Cycles from the live CPU position to a callback, or -1 if disabled. */
+int sh4_sched_cycles_until(int id);
 
 /*
 	Tick for *cycles*
@@ -55,5 +62,36 @@ void sh4_sched_serialize(Serializer& ser, int id);
 void sh4_sched_deserialize(Deserializer& deser, int id);
 
 constexpr u32 sh4CyclesForXfer(u32 sizeUnit, u32 unitPerSecond) {
-	return (u64)SH4_MAIN_CLOCK * sizeUnit / unitPerSecond;
+	// Completion cannot be observed until the final fractional SH-4 cycle has
+	// elapsed. This also keeps small transfers from collapsing to zero cycles.
+	return ((u64)SH4_MAIN_CLOCK * sizeUnit + unitPerSecond - 1) / unitPerSecond;
 }
+
+template<u32 Frequency>
+class FixedFrequencyClock
+{
+public:
+	static_assert(Frequency > 0 && Frequency <= SH4_MAIN_CLOCK);
+	static constexpr u32 BaseCycles = SH4_MAIN_CLOCK / Frequency;
+	static constexpr u32 CycleRemainder = SH4_MAIN_CLOCK % Frequency;
+	static constexpr u32 InitialPhase = CycleRemainder == 0
+			? 0 : Frequency - CycleRemainder;
+
+	int nextCycles()
+	{
+		phase_ += CycleRemainder;
+		if (phase_ >= Frequency)
+		{
+			phase_ -= Frequency;
+			return BaseCycles + 1;
+		}
+		return BaseCycles;
+	}
+
+	void reset() { phase_ = InitialPhase; }
+	u32 phase() const { return phase_; }
+	void setPhase(u32 phase) { phase_ = phase % Frequency; }
+
+private:
+	u32 phase_ = InitialPhase;
+};

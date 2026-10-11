@@ -47,6 +47,19 @@ static X76F100SerialFlash romSerialId;
 
 static int dmaSchedId = -1;
 static int dmaXferDelay = 10;	// cart dma xfer speed, in cycles/byte (default 20 MB/s)
+static constexpr u32 G1DmaUnit = 32;
+static u32 dmaTransferLength;
+static u32 dmaTransferred;
+
+static constexpr u32 getNaomiDmaTransferLength(u32 programmedLength)
+{
+	return programmedLength == 0 ? 0x02000000
+			: (programmedLength + 31) & ~31u;
+}
+static_assert(getNaomiDmaTransferLength(0) == 0x02000000);
+static_assert(getNaomiDmaTransferLength(1) == 0x20);
+static_assert(getNaomiDmaTransferLength(0x21) == 0x40);
+static_assert(getNaomiDmaTransferLength(0x01ffffff) == 0x02000000);
 
 void NaomiBoardIDWrite(const u16 data)
 {
@@ -117,34 +130,42 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
 
 static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
 {
-	u32 start = SB_GDSTARD;
-	u32 len = std::min<int>(((SB_GDLEN + 31) & ~31) - SB_GDLEND, 1024);
-	SB_GDLEND += len;
-	while (len > 0)
+	int remainingJitter = std::max(0, jitter);
+	for (;;)
 	{
-		u32 block_len = len;
-		void* ptr = CurrentCartridge->GetDmaPtr(block_len);
-		if (block_len == 0)
+		u32 start = SB_GDSTARD;
+		u32 len = std::min<u32>(dmaTransferLength - dmaTransferred, G1DmaUnit);
+		dmaTransferred += len;
+		SB_GDLEND = dmaTransferred & 0x01ffffe0;
+		while (len > 0)
 		{
-			INFO_LOG(NAOMI, "Aborted DMA transfer. Read past end of cart?");
-			for (u32 i = 0; i < len; i += 8, start += 8)
-				addrspace::write64(start, 0);
-			break;
+			u32 block_len = len;
+			void* ptr = CurrentCartridge->GetDmaPtr(block_len);
+			if (block_len == 0)
+			{
+				INFO_LOG(NAOMI, "Aborted DMA transfer. Read past end of cart?");
+				for (u32 i = 0; i < len; i += 8, start += 8)
+					addrspace::write64(start, 0);
+				break;
+			}
+			WriteMemBlock_nommu_ptr(start, (u32*)ptr, block_len);
+			CurrentCartridge->AdvancePtr(block_len);
+			len -= block_len;
+			start += block_len;
 		}
-		WriteMemBlock_nommu_ptr(start, (u32*)ptr, block_len);
-		CurrentCartridge->AdvancePtr(block_len);
-		len -= block_len;
-		start += block_len;
-	}
-	SB_GDSTARD = start;
-	if (SB_GDLEN <= SB_GDLEND)
-	{
-		SB_GDST = 0;
-		asic_RaiseInterrupt(holly_GDROM_DMA);
-		return 0;
-	}
-	else {
-		return std::min<int>(SB_GDLEN - SB_GDLEND, 1024) * dmaXferDelay;
+		SB_GDSTARD = start;
+		if (dmaTransferLength <= dmaTransferred)
+		{
+			SB_GDST = 0;
+			asic_RaiseInterrupt(holly_GDROM_DMA);
+			return 0;
+		}
+
+		const int nextCycles = std::min<u32>(dmaTransferLength - dmaTransferred,
+				G1DmaUnit) * dmaXferDelay;
+		if (nextCycles > remainingJitter)
+			return std::max(0, jitter) + nextCycles - remainingJitter;
+		remainingJitter -= nextCycles;
 	}
 }
 
@@ -169,10 +190,13 @@ static void Naomi_DmaStart(u32 addr, u32 data)
 		SB_GDST = 1;
 		SB_GDSTARD = SB_GDSTAR & 0x1FFFFFE0;
 		SB_GDLEND = 0;
+		dmaTransferLength = getNaomiDmaTransferLength(SB_GDLEN);
+		dmaTransferred = 0;
 		// Max G1 bus rate: 50 MHz x 16 bits
 		// SH4_access990312_e.xls: 14.4 MB/s from GD-ROM to system RAM
 		// Here: 20 MB/s
-		sh4_sched_request(dmaSchedId, std::min<int>(SB_GDLEN, 1024) * dmaXferDelay);
+		sh4_sched_request(dmaSchedId,
+				std::min(dmaTransferLength, G1DmaUnit) * dmaXferDelay);
 		return;
 	}
 	else
@@ -251,6 +275,8 @@ void naomi_reg_Reset(bool hard)
 	hollyRegs.setWriteHandler<SB_GDEN_addr>(Naomi_DmaEnable);
 	SB_GDST = 0;
 	SB_GDEN = 0;
+	dmaTransferLength = 0;
+	dmaTransferred = 0;
 	sh4_sched_request(dmaSchedId, -1);
 
 	atomiswave::reset();
@@ -285,6 +311,8 @@ void naomi_Serialize(Serializer& ser)
 	atomiswave::serialize(ser);
 	// TODO serialize m3comm?
 	midiffb::serialize(ser);
+	ser << dmaTransferLength;
+	ser << dmaTransferred;
 	sh4_sched_serialize(ser, dmaSchedId);
 }
 void naomi_Deserialize(Deserializer& deser)
@@ -325,6 +353,14 @@ void naomi_Deserialize(Deserializer& deser)
 	}
 	atomiswave::deserialize(deser);
 	midiffb::deserialize(deser);
+	if (deser.version() >= Deserializer::V136)
+		deser >> dmaTransferLength >> dmaTransferred;
+	else
+	{
+		dmaTransferLength = SB_GDST != 0
+				? getNaomiDmaTransferLength(SB_GDLEN) : 0;
+		dmaTransferred = SB_GDLEND;
+	}
 	if (deser.version() >= Deserializer::V45)
 		sh4_sched_deserialize(deser, dmaSchedId);
 }

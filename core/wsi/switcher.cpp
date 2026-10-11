@@ -73,7 +73,7 @@ void initRenderApi(void *window, void *display)
 	}
 #endif
 #ifdef USE_OPENGL
-	if (!isOpenGL(config::RendererType))
+	if (!isOpenGL(config::RendererType) && !isSoftware(config::RendererType))
 		config::RendererType = RenderType::OpenGL;
 	try {
 		GLGraphicsContext::Create(window, display);

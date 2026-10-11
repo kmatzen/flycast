@@ -31,6 +31,7 @@
 #include "stdclass.h"
 #include "v42.h"
 #include <cassert>
+#include <cmath>
 #include <map>
 #include <deque>
 
@@ -88,7 +89,22 @@ static ConnectState connect_state = DISCONNECTED;
 static float txFifoSize = 0.f;
 static std::deque<u8> rxFifo;
 static int cyclesPerByte;
+static int byteCycleRemainder;
+static int byteCycleDivisor = 1;
+static int byteCyclePhase;
 static float txRxRatio = 1.f;
+
+static int nextByteCycles()
+{
+	int cycles = cyclesPerByte;
+	byteCyclePhase += byteCycleRemainder;
+	if (byteCyclePhase >= byteCycleDivisor)
+	{
+		byteCyclePhase -= byteCycleDivisor;
+		cycles++;
+	}
+	return cycles;
+}
 
 static void schedule_callback(int ms);
 static const char *getDSPRamLabel(u32 addr);
@@ -308,6 +324,9 @@ static bool setModemSpeedFromCONF()
 	{
 		modem_regs.reg0e.SPEED = 0;
 		cyclesPerByte = SH4_MAIN_CLOCK * 8 / 300;
+		byteCycleRemainder = SH4_MAIN_CLOCK * 8 % 300;
+		byteCycleDivisor = 300;
+		byteCyclePhase = byteCycleDivisor - 1;
 		txRxRatio = 1.f;
 	}
 	else
@@ -328,6 +347,10 @@ static bool setModemSpeedFromCONF()
 			}
 		}
 		cyclesPerByte = SH4_MAIN_CLOCK * 8 / speed;
+		byteCycleRemainder = SH4_MAIN_CLOCK * 8 % speed;
+		byteCycleDivisor = speed;
+		// Bias the first interval so no byte completes before its wire time.
+		byteCyclePhase = byteCycleDivisor - 1;
 		txRxRatio = (float)speed / rxSpeed;
 	}
 	NOTICE_LOG(MODEM, "MODEM Connected %s %d/%d bps", modem_regs.reg08.ASYN ? "ASYNC" : "SYNC", rxSpeed, speed);
@@ -508,21 +531,38 @@ static int modem_sched_func(int tag, int cycles, int jitter, void *arg)
 					LOG("modem_regs %02x == %02x", i, modem_regs.ptr[i]);
 			}
 #endif
-			callback_cycles = cyclesPerByte;
-			txFifoSize = std::max(txFifoSize - txRxRatio, 0.f);
-			modem_regs.reg1e.TDBE = txFifoSize == 0.f;
-
-			if (v8bis && v8bisProto.completed()) {
-				connect_state = NEGO_COMPLETE;
-				v8bis = false;
-				configureStreams();
-			}
-			if (rxFifo.size() < 16)
 			{
-				int c = curInput->read();
-				if (c >= 0) {
-					rxFifo.push_back(c);
-					updateRxFifoStatus();
+				int remainingJitter = std::max(0, jitter);
+				for (;;)
+				{
+					txFifoSize = std::max(txFifoSize - txRxRatio, 0.f);
+					modem_regs.reg1e.TDBE = txFifoSize == 0.f;
+
+					if (v8bis && v8bisProto.completed()) {
+						connect_state = NEGO_COMPLETE;
+						v8bis = false;
+						configureStreams();
+					}
+					if (rxFifo.size() < 16)
+					{
+						int c = curInput->read();
+						if (c >= 0) {
+							rxFifo.push_back(c);
+							updateRxFifoStatus();
+						}
+					}
+
+					const int byteCycles = nextByteCycles();
+					callback_cycles = byteCycles;
+					if (connect_state != CONNECTED)
+						break;
+					if (byteCycles > remainingJitter) {
+						// handle_cb subtracts the original jitter from this value.
+						callback_cycles = std::max(0, jitter) + byteCycles
+								- remainingJitter;
+						break;
+					}
+					remainingJitter -= byteCycles;
 				}
 			}
 			break;
@@ -1045,9 +1085,28 @@ void ModemSerialize(Serializer& ser)
 	ser << state;
 	ser << connect_state;
 	ser << last_dial_time;
+	ser << cyclesPerByte;
+	ser << byteCycleRemainder;
+	ser << byteCycleDivisor;
+	ser << byteCyclePhase;
+	ser << txRxRatio;
+	ser << txFifoSize;
+	ser << (u32)rxFifo.size();
+	for (u8 value : rxFifo)
+		ser << value;
 }
 void ModemDeserialize(Deserializer& deser)
 {
+	auto reconstructLegacyTiming = []()
+	{
+		const u8 savedSpeed = modem_regs.reg0e.SPEED;
+		const u8 savedRxRate = dspram[0x2e4];
+		const u8 savedTxRate = dspram[0x2e5];
+		setModemSpeedFromCONF();
+		modem_regs.reg0e.SPEED = savedSpeed;
+		dspram[0x2e4] = savedRxRate;
+		dspram[0x2e5] = savedTxRate;
+	};
 	if (!config::EmulateBBA || deser.version() > Deserializer::V31)
 		sh4_sched_deserialize(deser, modem_sched);
 	if (deser.version() >= Deserializer::V20)
@@ -1058,8 +1117,50 @@ void ModemDeserialize(Deserializer& deser)
 		deser >> connect_state;
 		deser >> last_dial_time;
 		deser.skip<bool>(Deserializer::V58);
+		if (deser.version() >= Deserializer::V141)
+		{
+			deser >> cyclesPerByte;
+			if (deser.version() >= Deserializer::V147)
+				deser >> byteCycleRemainder >> byteCycleDivisor >> byteCyclePhase;
+			else
+			{
+				byteCycleRemainder = 0;
+				byteCycleDivisor = 1;
+				byteCyclePhase = 0;
+			}
+			deser >> txRxRatio >> txFifoSize;
+			if (cyclesPerByte <= 0 || !std::isfinite(txRxRatio) || txRxRatio <= 0.f
+					|| !std::isfinite(txFifoSize) || txFifoSize < 0.f)
+				throw Deserializer::Exception("Invalid modem timing state");
+			if (byteCycleRemainder < 0 || byteCycleDivisor <= 0
+					|| byteCycleRemainder >= byteCycleDivisor || byteCyclePhase < 0
+					|| byteCyclePhase >= byteCycleDivisor)
+				throw Deserializer::Exception("Invalid modem byte clock state");
+			u32 size;
+			deser >> size;
+			if (size > 16)
+				throw Deserializer::Exception("Invalid modem receive FIFO size");
+			rxFifo.clear();
+			for (u32 i = 0; i < size; ++i)
+			{
+				u8 value;
+				deser >> value;
+				rxFifo.push_back(value);
+			}
+		}
+		else
+		{
+			reconstructLegacyTiming();
+			txFifoSize = modem_regs.reg1e.TDBE ? 0.f : 1.f;
+			rxFifo.clear();
+		}
 	}
-	rxFifo.clear();
+	else
+	{
+		reconstructLegacyTiming();
+		txFifoSize = 0.f;
+		rxFifo.clear();
+	}
 	v42Proto.reset();
 	v8bis = false;
 	v8bisProto.reset();

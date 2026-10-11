@@ -73,13 +73,20 @@ static void handle_sh4_exception(Sh4Context *ctx, SH4ThrownException& ex, u32 pc
 		pc--;
 	}
 	Do_Exception(pc, ex.expEvn);
-	ctx->cycle_counter += 4;	// probably more is needed
 	handleException();
 }
 
 static void interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 {
 	try {
+		if (ctx->sr.MD == 0 && OpDesc[op]->IsPrivileged(op))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
+			throw SH4ThrownException(pc & ~1, Sh4Ex_FpuDisabled);
+		if (OpDesc[op]->IsIllegalFpuMode(op, ctx->fpscr.PR, ctx->fpscr.SZ))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (OpDesc[op]->ClearsFpuCause(op))
+			ctx->fpscr.full &= ~0x3f000u;
 		oph(ctx, op);
 	} catch (SH4ThrownException& ex) {
 		handle_sh4_exception(ctx, ex, pc);
@@ -133,17 +140,48 @@ public:
 
 		sub(rsp, STACK_ALIGN);
 
-		if (mmu_enabled() && block->has_fpu_op)
+		// A device access in the preceding translated block may have made an
+		// interrupt eligible. Sample it before retiring this block's first
+		// instruction, just as the interpreter does at instruction boundaries.
+		mov(rax, (uintptr_t)&sh4ctx.interrupt_pend);
+		cmp(dword[rax], 0);
+		Xbyak::Label no_pending_interrupt;
+		je(no_pending_interrupt, T_SHORT);
+		mov(rax, (uintptr_t)&sh4ctx.pc);
+		mov(dword[rax], block->vaddr);
+		GenCall(UpdateINTC);
+		jmp(exit_block, T_NEAR);
+		L(no_pending_interrupt);
+
+		// SR.FD is architectural in both MMU modes; cached blocks can outlive a
+		// change to it, so every FPU block needs a runtime entry guard.
+		if (block->has_fpu_op)
 		{
 			Xbyak::Label fpu_enabled;
 			mov(rax, (uintptr_t)&sh4ctx.sr.status);
 			test(dword[rax], 0x8000);			// test SR.FD bit
 			jz(fpu_enabled);
+			mov(rax, (uintptr_t)&sh4ctx.cycle_counter);
+			sub(dword[rax], block->entry_cycles);
 			mov(call_regs[0], block->vaddr);	// pc
 			mov(call_regs[1], Sh4Ex_FpuDisabled);// exception code
 			GenCall((void (*)())Do_Exception);
 			jmp(exit_block, T_NEAR);
 			L(fpu_enabled);
+
+			// PR, SZ and RM affect SHIL selection. A direct block link can
+			// bypass the dispatcher after FPSCR changes, so validate the mode
+			// before executing code specialized for it.
+			Xbyak::Label fpscr_matches;
+			mov(rax, (uintptr_t)&sh4ctx.fpscr.full);
+			mov(ecx, dword[rax]);
+			xor_(ecx, block->fpu_cfg.full);
+			test(ecx, RuntimeBlockInfo::FpscrDecodeMask);
+			jz(fpscr_matches);
+			mov(rax, (uintptr_t)&sh4ctx.pc);
+			mov(dword[rax], block->vaddr);
+			jmp(exit_block, T_NEAR);
+			L(fpscr_matches);
 		}
 		mov(rax, (uintptr_t)&sh4ctx.cycle_counter);
 		sub(dword[rax], block->guest_cycles);
@@ -159,11 +197,8 @@ public:
 			switch (op.op)
 			{
 			case shop_ifb:
-				if (mmu_enabled())
-				{
-					mov(call_regs64[2], reinterpret_cast<uintptr_t>(*OpDesc[op.rs3._imm]->oph));	// op handler
-					mov(call_regs[3], block->vaddr + op.guest_offs - (op.delay_slot ? 1 : 0));	// pc
-				}
+				mov(call_regs64[2], reinterpret_cast<uintptr_t>(*OpDesc[op.rs3._imm]->oph));	// op handler
+				mov(call_regs[3], block->vaddr + op.guest_offs - (op.delay_slot ? 1 : 0));	// pc
 
 				if (op.rs1._imm)
 				{
@@ -174,10 +209,7 @@ public:
 				mov(call_regs[1], op.rs3._imm);
 				mov(call_regs64[0], (uintptr_t)&sh4ctx);
 
-				if (!mmu_enabled())
-					GenCall(OpDesc[op.rs3._imm]->oph);
-				else
-					GenCall(interpreter_fallback);
+				GenCall(interpreter_fallback);
 
 				break;
 
@@ -214,7 +246,32 @@ public:
 			break;
 
 			case shop_readm:
-				if (!GenReadMemImmediate(op, block))
+				if (op.size == 8 && mmu_enabled())
+				{
+					shil_param_to_host_reg(op.rs1, call_regs[0]);
+					if (!op.rs3.is_null())
+					{
+						if (op.rs3.is_imm())
+							add(call_regs[0], op.rs3._imm);
+						else if (regalloc.IsAllocg(op.rs3))
+							add(call_regs[0], regalloc.MapRegister(op.rs3));
+						else
+						{
+							mov(rax, (uintptr_t)op.rs3.reg_ptr(sh4ctx));
+							add(call_regs[0], dword[rax]);
+						}
+					}
+					mov(call_regs[1], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+					GenCall(mmuDynarecRead64);
+#if ALLOC_F64 == false
+					mov(rcx, (uintptr_t)op.rd.reg_ptr(sh4ctx));
+					mov(qword[rcx], rax);
+#else
+					mov(rcx, rax);
+					host_reg_to_shil_param(op.rd, rcx);
+#endif
+				}
+				else if (!GenReadMemImmediate(op, block))
 				{
 					// Not an immediate address
 					shil_param_to_host_reg(op.rs1, call_regs[0]);
@@ -252,7 +309,33 @@ public:
 
 			case shop_writem:
 			{
-				if (!GenWriteMemImmediate(op, block))
+				if (op.size == 8 && mmu_enabled())
+				{
+					shil_param_to_host_reg(op.rs1, call_regs[0]);
+					if (!op.rs3.is_null())
+					{
+						if (op.rs3.is_imm())
+							add(call_regs[0], op.rs3._imm);
+						else if (regalloc.IsAllocg(op.rs3))
+							add(call_regs[0], regalloc.MapRegister(op.rs3));
+						else
+						{
+							mov(rax, (uintptr_t)op.rs3.reg_ptr(sh4ctx));
+							add(call_regs[0], dword[rax]);
+						}
+					}
+#if ALLOC_F64 == false
+					mov(rax, (uintptr_t)op.rs2.reg_ptr(sh4ctx));
+					mov(call_regs64[1], qword[rax]);
+#else
+					shil_param_to_host_reg(op.rs2, call_regs64[1]);
+#endif
+					mov(call_regs64[2], call_regs64[1]);
+					shr(call_regs64[2], 32);
+					mov(call_regs[3], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+					GenCall(mmuDynarecWrite64);
+				}
+				else if (!GenWriteMemImmediate(op, block))
 				{
 					shil_param_to_host_reg(op.rs1, call_regs[0]);
 					if (!op.rs3.is_null())
@@ -702,6 +785,8 @@ public:
 		mov(call_regs[0], dword[rax]);
 		call(bm_GetCodeByVAddr);
 		call(rax);
+		Xbyak::Label block_complete;
+		L(block_complete);
 		mov(rax, (uintptr_t)&sh4ctx.cycle_counter);
 		mov(ecx, dword[rax]);
 		test(ecx, ecx);
@@ -744,7 +829,10 @@ public:
 		Xbyak::Label handleExceptionLabel;
 		L(handleExceptionLabel);
 		mov(rsp, qword[rip + &jmp_rsp]);
-		jmp(run_loop);
+		// A fault abandons the generated block without returning through its
+		// normal epilogue. Resume at the common completion point so elapsed
+		// cycles and due scheduler events are processed before handler code.
+		jmp(block_complete);
 
 		genMemHandlers();
 
@@ -812,42 +900,47 @@ public:
 private:
 	void genMmuLookup(const RuntimeBlockInfo* block, const shil_opcode& op, u32 write)
 	{
-		if (mmu_enabled())
+		if (!mmu_enabled())
 		{
-#ifdef FAST_MMU
-			Xbyak::Label inCache;
+			Xbyak::Label lookup;
 			Xbyak::Label done;
-
-			mov(eax, call_regs[0]);
-			shr(eax, 12);
-			if ((uintptr_t)mmuAddressLUT >> 32 != 0)
+			if (op.size > 1)
 			{
-				mov(r9, (uintptr_t)mmuAddressLUT);
-				mov(eax, dword[r9 + rax * 4]);
+				test(call_regs[0], op.size - 1);
+				jnz(lookup);
 			}
-			else
+			if (op.size == 8)
 			{
-				mov(eax, dword[(uintptr_t)mmuAddressLUT + rax * 4]);
+				cmp(call_regs[0], 0x7ffffffc);
+				jae(lookup);
 			}
-			test(eax, eax);
-			jne(inCache);
-#endif
+			test(call_regs[0], 0x80000000);
+			jnz(lookup);
+			jmp(done);
+			L(lookup);
 			mov(call_regs[1], write);
-			mov(call_regs[2], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
+			mov(call_regs[2], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+			mov(call_regs[3], op.size);
 			GenCall(mmuDynarecLookup);
 			mov(call_regs[0], eax);
-#ifdef FAST_MMU
-			jmp(done);
-			L(inCache);
-			and_(call_regs[0], 0xFFF);
-			or_(call_regs[0], eax);
 			L(done);
-#endif
+			return;
+		}
+		else
+		{
+			mov(call_regs[1], write);
+			mov(call_regs[2], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
+			mov(call_regs[3], op.size);
+			GenCall(mmuDynarecLookup);
+			mov(call_regs[0], eax);
 		}
 	}
 	bool GenReadMemImmediate(const shil_opcode& op, RuntimeBlockInfo* block)
 	{
 		if (!op.rs1.is_imm())
+			return false;
+		if ((op.rs1._imm & 0x80000000) != 0 || (op.size == 8 && op.rs1._imm == 0x7ffffffc)
+				|| (op.size > 1 && (op.rs1._imm & (op.size - 1)) != 0))
 			return false;
 		void *ptr;
 		bool isram;
@@ -972,6 +1065,9 @@ private:
 	{
 		if (!op.rs1.is_imm())
 			return false;
+		if ((op.rs1._imm & 0x80000000) != 0 || (op.size == 8 && op.rs1._imm == 0x7ffffffc)
+				|| (op.size > 1 && (op.rs1._imm & (op.size - 1)) != 0))
+			return false;
 		void *ptr;
 		bool isram;
 		u32 addr;
@@ -1071,7 +1167,7 @@ private:
 		if (!force_checks)
 			return;
 
-		s32 sz=block->sh4_code_size;
+		s32 sz=block->contiguousCodeSize();
 		u32 sa=block->addr;
 
 		void* ptr = (void*)GetMemPtr(sa, sz > 8 ? 8 : sz);
@@ -1102,6 +1198,16 @@ private:
 				}
 				jne(reinterpret_cast<const void*>(CC_RX2RW(&ngen_blockcheckfail)));
 				ptr = (void*)GetMemPtr(sa, sz > 8 ? 8 : sz);
+			}
+		}
+		if (block->tail_addr != NullAddress)
+		{
+			u16 *tail = (u16 *)GetMemPtr(block->tail_addr, sizeof(*tail));
+			if (tail != nullptr)
+			{
+				mov(rax, reinterpret_cast<uintptr_t>(tail));
+				cmp(word[rax], block->tail_opcode);
+				jne(reinterpret_cast<const void*>(CC_RX2RW(&ngen_blockcheckfail)));
 			}
 		}
 	}

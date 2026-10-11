@@ -65,7 +65,7 @@ public:
 		const Xbyak::Reg32 X = r10d;		// 24 bits
 		const Xbyak::Reg32 Y = r11d;		// 13 bits
 		const Xbyak::Reg32 Y_REG = r13d;	// 24 bits - saved
-		const Xbyak::Reg32 ADRS_REG = r14d;	// 13 bits unsigned - saved
+		const Xbyak::Reg32 ADRS_REG = r14d;	// 12 bits unsigned - saved
 		const Xbyak::Reg32 MDEC_CT = r15d;	// saved
 #ifdef _WIN32
 		const Xbyak::Reg32 call_arg0 = ecx;
@@ -81,6 +81,14 @@ public:
 
 		for (int step = 0; step < 128; ++step)
 		{
+			if (step != 0 && (step & 1) == 0)
+			{
+				Instruction previous;
+				DecodeInst(&DSPData->MPRO[(step - 1) * 4], &previous);
+				if (previous.MWT)
+					GenCall(commitMemoryWrite);
+			}
+
 			u32 *mpro = &DSPData->MPRO[step * 4];
 			Instruction op;
 			DecodeInst(mpro, &op);
@@ -100,7 +108,7 @@ public:
 				else if (op.IRA <= 0x31)
 				{
 					//INPUTS = DSPData->EXTS[op.IRA - 0x30] << 8;	// EXTS is 16 bits
-					mov(INPUTS, dword[rbx + dsp_operand(DSPData->EXTS, op.IRA - 0x30)]);
+					movsx(INPUTS, word[rbx + dsp_operand(DSPData->EXTS, op.IRA - 0x30)]);
 					shl(INPUTS, 8);
 				}
 				else
@@ -219,11 +227,15 @@ public:
 					//SHIFTED = ACC << 1;	// x2 scale
 					mov(edx, ACC);
 					shl(edx, 1);
+					shl(edx, 8);
+					sar(edx, 8);
 				}
 				else if (op.SHIFT == 3)
 				{
 					//SHIFTED = ACC;
 					mov(edx, ACC);
+					shl(edx, 8);
+					sar(edx, 8);
 				}
 				// edx contains SHIFTED
 			}
@@ -238,6 +250,9 @@ public:
 			mov(ACC, eax);
 			if (!op.ZERO)
 				add(ACC, B);
+			// The accumulator is a non-saturating signed 26-bit register.
+			shl(ACC, 6);
+			sar(ACC, 6);
 
 			if (op.TWT)
 			{
@@ -266,36 +281,73 @@ public:
 				if (op.MRD || op.MWT)
 				{
 					if ((op.ADRL && op.SHIFT == 3) || op.EWT)
-						push(rdx);
+					{
+						sub(rsp, 16);
+						mov(qword[rsp], rdx);
+					}
 					if (op.ADRL && op.SHIFT != 3)
-						push(INPUTS.cvt64());
+					{
+						sub(rsp, 16);
+						mov(qword[rsp], INPUTS.cvt64());
+					}
 				}
 				const Xbyak::Reg32 ADDR = Y;
+				if (op.MRD && op.MWT)
+				{
+					sub(rsp, 16);
+					mov(qword[rsp], rdx); // MRD helper and address generation clobber SHIFTED
+				}
 				if (op.MRD)			// memory only allowed on odd. DoA inserts NOPs on even
 				{
-					//MEMVAL[(step + 2) & 3] = UNPACK(*(u16 *)&aica_ram[ADDR & ARAM_MASK]);
 					CalculateADDR(ADDR, op, ADRS_REG, MDEC_CT);
 					mov(rcx, (uintptr_t)&aica_ram[0]);
-					movzx(call_arg0, word[rcx + ADDR.cvt64()]);
-					GenCall(UNPACK);
+					if (op.NOFL)
+					{
+						movsx(eax, word[rcx + ADDR.cvt64()]);
+						shl(eax, 8);
+					}
+					else
+					{
+						movzx(call_arg0, word[rcx + ADDR.cvt64()]);
+						GenCall(UNPACK);
+					}
 					mov(dword[rbx + dsp_operand(&DSP->MEMVAL[(step + 2) & 3])], eax);
+				}
+				if (op.MRD && op.MWT)
+				{
+					mov(rdx, qword[rsp]);
+					add(rsp, 16);
 				}
 				if (op.MWT)
 				{
-					// *(u16 *)&aica_ram[ADDR & ARAM_MASK] = PACK(SHIFTED);
-					mov(call_arg0, edx);	// SHIFTED
-					GenCall(PACK);
+					if (op.NOFL)
+					{
+						mov(eax, edx);
+						sar(eax, 8);
+					}
+					else
+					{
+						mov(call_arg0, edx);	// SHIFTED
+						GenCall(PACK);
+					}
 
 					CalculateADDR(ADDR, op, ADRS_REG, MDEC_CT);
-					mov(rcx, (uintptr_t)&aica_ram[0]);
-					mov(word[rcx + ADDR.cvt64()], ax);
+					mov(dword[rbx + dsp_operand(&DSP->MWT_ADDR)], ADDR);
+					mov(dword[rbx + dsp_operand(&DSP->MWT_DATA)], eax);
+					mov(dword[rbx + dsp_operand(&DSP->MWT_PENDING)], 1);
 				}
 				if (op.MRD || op.MWT)
 				{
 					if (op.ADRL && op.SHIFT != 3)
-						pop(INPUTS.cvt64());
+					{
+						mov(INPUTS.cvt64(), qword[rsp]);
+						add(rsp, 16);
+					}
 					if ((op.ADRL && op.SHIFT == 3) || op.EWT)
-						pop(rdx);
+					{
+						mov(rdx, qword[rsp]);
+						add(rsp, 16);
+					}
 				}
 			}
 
@@ -387,8 +439,8 @@ private:
 		//ADDR += DSP->RBP;			// RBP is already a byte address
 		// RBP is constant for this program
 		add(ADDR, DSP->RBP);
-		// ADDR & ARAM_MASK
-		and_(ADDR, ARAM_MASK);
+		// Apply the DRAM size selected by MEM8MB.
+		and_(ADDR, soundRamMask());
 	}
 
 	template<class Ret, class... Params>

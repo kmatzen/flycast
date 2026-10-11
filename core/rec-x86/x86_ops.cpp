@@ -256,29 +256,39 @@ void X86Compiler::genMemHandlers()
 
 void X86Compiler::genMmuLookup(RuntimeBlockInfo* block, const shil_opcode& op, u32 write)
 {
-	if (mmu_enabled())
+	if (!mmu_enabled())
 	{
-#ifdef FAST_MMU
-		Xbyak::Label inCache;
+		Xbyak::Label lookup;
 		Xbyak::Label done;
-
-		mov(eax, ecx);
-		shr(eax, 12);
-		mov(eax, dword[(uintptr_t)mmuAddressLUT + eax * 4]);
-		test(eax, eax);
-		jne(inCache);
-#endif
+		if (op.size > 1)
+		{
+			test(ecx, op.size - 1);
+			jnz(lookup);
+		}
+		if (op.size == 8)
+		{
+			cmp(ecx, 0x7ffffffc);
+			jae(lookup);
+		}
+		test(ecx, 0x80000000);
+		jnz(lookup);
+		jmp(done);
+		L(lookup);
 		mov(edx, write);
+		push(op.size);
+		push(block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+		call((void*)mmuDynarecLookup);
+		mov(ecx, eax);
+		L(done);
+		return;
+	}
+	else
+	{
+		mov(edx, write);
+		push(op.size);
 		push(block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
 		call((void*)mmuDynarecLookup);
 		mov(ecx, eax);
-#ifdef FAST_MMU
-		jmp(done);
-		L(inCache);
-		and_(ecx, 0xFFF);
-		or_(ecx, eax);
-		L(done);
-#endif
 	}
 }
 
@@ -292,7 +302,6 @@ static void DYNACALL handle_sh4_exception(Sh4Context *ctx, SH4ThrownException& e
 		pc--;
 	}
 	Do_Exception(pc, ex.expEvn);
-	ctx->cycle_counter += 4;	// probably more is needed
 	X86Compiler::handleException();
 	// not reached
 	std::abort();
@@ -301,6 +310,14 @@ static void DYNACALL handle_sh4_exception(Sh4Context *ctx, SH4ThrownException& e
 static void DYNACALL interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 {
 	try {
+		if (ctx->sr.MD == 0 && OpDesc[op]->IsPrivileged(op))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
+			throw SH4ThrownException(pc & ~1, Sh4Ex_FpuDisabled);
+		if (OpDesc[op]->IsIllegalFpuMode(op, ctx->fpscr.PR, ctx->fpscr.SZ))
+			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
+		if (OpDesc[op]->ClearsFpuCause(op))
+			ctx->fpscr.full &= ~0x3f000u;
 		oph(ctx, op);
 	} catch (SH4ThrownException& ex) {
 		handle_sh4_exception(ctx, ex, pc);
@@ -321,19 +338,13 @@ void X86Compiler::genOpcode(RuntimeBlockInfo* block, bool optimise, shil_opcode&
 	switch (op.op)
 	{
 	case shop_ifb:
-		if (mmu_enabled())
-		{
-			push(reinterpret_cast<uintptr_t>(*OpDesc[op.rs3._imm]->oph));	// op handler
-			push(block->vaddr + op.guest_offs - (op.delay_slot ? 1 : 0));	// pc
-		}
+		push(reinterpret_cast<uintptr_t>(*OpDesc[op.rs3._imm]->oph));	// op handler
+		push(block->vaddr + op.guest_offs - (op.delay_slot ? 1 : 0));	// pc
 		if (op.rs1.is_imm() && op.rs1.imm_value())
 			mov(dword[&sh4ctx.pc], op.rs2.imm_value());
         mov(ecx, (uintptr_t)&sh4ctx);
 		mov(edx, op.rs3.imm_value());
-		if (!mmu_enabled())
-			genCall(OpDesc[op.rs3.imm_value()]->oph);
-		else
-			genCall(interpreter_fallback);
+		genCall(interpreter_fallback);
 
 		break;
 
@@ -352,7 +363,37 @@ void X86Compiler::genOpcode(RuntimeBlockInfo* block, bool optimise, shil_opcode&
 		break;
 
 	case shop_readm:
-		if (!genReadMemImmediate(op, block))
+		if (op.size == 8 && mmu_enabled())
+		{
+			shil_param_to_host_reg(op.rs1, ecx);
+			if (!op.rs3.is_null())
+			{
+				if (op.rs3.is_imm())
+					add(ecx, op.rs3._imm);
+				else if (regalloc.IsAllocg(op.rs3))
+					add(ecx, regalloc.MapRegister(op.rs3));
+				else
+					add(ecx, dword[op.rs3.reg_ptr(sh4ctx)]);
+			}
+			freezeXMM();
+			mov(edx, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+			call((void *)mmuDynarecRead64);
+			thawXMM();
+			movd(xmm0, eax);
+			movd(xmm1, edx);
+			if (op.rd.count() == 2 && regalloc.IsAllocf(op.rd))
+			{
+				mov(regalloc.MapXRegister(op.rd, 0), xmm0);
+				mov(regalloc.MapXRegister(op.rd, 1), xmm1);
+			}
+			else
+			{
+				verify(!regalloc.IsAllocAny(op.rd));
+				movss(dword[op.rd.reg_ptr(sh4ctx)], xmm0);
+				movss(dword[op.rd.reg_ptr(sh4ctx) + 1], xmm1);
+			}
+		}
+		else if (!genReadMemImmediate(op, block))
 		{
 			// Not an immediate address
 			shil_param_to_host_reg(op.rs1, ecx);
@@ -418,7 +459,35 @@ void X86Compiler::genOpcode(RuntimeBlockInfo* block, bool optimise, shil_opcode&
 		break;
 
 	case shop_writem:
-		if (!genWriteMemImmediate(op, block))
+		if (op.size == 8 && mmu_enabled())
+		{
+			shil_param_to_host_reg(op.rs1, ecx);
+			if (!op.rs3.is_null())
+			{
+				if (op.rs3.is_imm())
+					add(ecx, op.rs3._imm);
+				else if (regalloc.IsAllocg(op.rs3))
+					add(ecx, regalloc.MapRegister(op.rs3));
+				else
+					add(ecx, dword[op.rs3.reg_ptr(sh4ctx)]);
+			}
+			freezeXMM();
+			if (op.rs2.count() == 2 && regalloc.IsAllocf(op.rs2))
+			{
+				movd(edx, regalloc.MapXRegister(op.rs2, 0));
+				movd(eax, regalloc.MapXRegister(op.rs2, 1));
+			}
+			else
+			{
+				mov(edx, dword[op.rs2.reg_ptr(sh4ctx)]);
+				mov(eax, dword[op.rs2.reg_ptr(sh4ctx) + 1]);
+			}
+			push(block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));
+			push(eax);
+			call((void *)mmuDynarecWrite64);
+			thawXMM();
+		}
+		else if (!genWriteMemImmediate(op, block))
 		{
 			shil_param_to_host_reg(op.rs1, ecx);
 			if (!op.rs3.is_null())

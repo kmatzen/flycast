@@ -101,6 +101,9 @@ struct ArmOp
 	u8 flags = 0;
 	u8 cycles = 6;
 	bool spsr = false;
+	// Carry produced by a non-zero immediate rotation in Operand2.
+	bool immediateCarryValid = false;
+	bool immediateCarry = false;
 	// For MSR
 	u8 psrMask = 0;
 

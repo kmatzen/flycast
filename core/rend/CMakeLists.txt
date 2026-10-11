@@ -11,6 +11,10 @@ target_sources(${PROJECT_NAME} PRIVATE
         texconv.h
         transform_matrix.cpp
         transform_matrix.h
+        soft/SoftwareRasterizer.cpp
+        soft/SoftwareRasterizer.h
+        soft/SoftwareRenderer.cpp
+        soft/SoftwareRenderer.h
         norend/norend.cpp)
 
 if(USE_OPENGL)

@@ -22,6 +22,8 @@
 #include "network/netservice.h"
 #include "serialize.h"
 
+#include <algorithm>
+
 static RTL8139State *rtl8139device;
 
 // 1400 - 1600 GAPSPCI bridge registers
@@ -43,13 +45,15 @@ static RTL8139State *rtl8139device;
 #define GAPS_INT_ENABLE 0x14
 #define GAPS_RESET      0x18
 #define GAPS_DMA_BASE   0x28
-#define GAPS_DMA_OFFSET 0x2c
+#define GAPS_DMA_END    0x2c
+static constexpr u32 GAPS_RESET_COMMAND = 0x5a14a501;
 
 static u8 GAPS_ram[GAPSPCI_RAM_SIZE];
 static u8 GAPS_regs[GAPSPCI_REGS_SIZE];
-static u32 dmaOffset;
+static u32 dmaEnd;
 static bool interruptPending;
 static constexpr u32 MAX_ETH_FRAME_SIZE = 1514;
+static constexpr u16 PCI_STATUS_WRITE_1_TO_CLEAR = 0xf900;
 
 static void setInterrupt()
 {
@@ -67,9 +71,12 @@ void pci_set_irq(PCIDevice *pci_dev, int level)
 
 void bba_Init()
 {
+	dmaEnd = 0;
+	interruptPending = false;
 	NICConf nicConf = { 0xc, 0xa, 0xf, 0xe, 0, 0 };
 	rtl8139device = rtl8139_init(&nicConf);
 	pci_rtl8139_realize(PCI_DEVICE(rtl8139device));
+	rtl8139_reset(rtl8139device);
 
 	memset(&GAPS_regs[0], 0, sizeof(GAPS_regs));
 	memcpy(&GAPS_regs[0], "GAPSPCI_BRIDGE_2", 0x10);
@@ -81,6 +88,11 @@ void bba_Term()
 	if (rtl8139device != nullptr)
 	{
 		net::modbba::stop();
+		/* The device may be removed while its interrupt output is asserted.
+		 * Destruction unregisters schedulers but cannot deassert Holly's
+		 * latched external PCI input on its own. */
+		interruptPending = false;
+		setInterrupt();
 		rtl8139_destroy(rtl8139device);
 		rtl8139device = nullptr;
 	}
@@ -100,9 +112,6 @@ u32 bba_ReadMem(u32 addr, u32 sz)
 	u32 data = 0;
 	if ((addr & GAPSPCI_RAM_BASE_MASK) == GAPSPCI_RAM_BASE)
 	{
-		if (addr & 0x8000)
-			// G2 DMA access
-			addr += dmaOffset;
 		addr &= GAPSPCI_RAM_MASK;
 		if (addr + sz > GAPSPCI_RAM_SIZE)
 		{
@@ -148,9 +157,6 @@ void bba_WriteMem(u32 addr, u32 data, u32 sz)
 {
 	if ((addr & GAPSPCI_RAM_BASE_MASK) == GAPSPCI_RAM_BASE)
 	{
-		if (addr & 0x8000)
-			// G2 DMA access
-			addr += dmaOffset;
 		addr &= GAPSPCI_RAM_MASK;
 		if (addr + sz > GAPSPCI_RAM_SIZE)
 		{
@@ -170,6 +176,18 @@ void bba_WriteMem(u32 addr, u32 data, u32 sz)
 	case GAPSPCI_REGS:
 	case GAPSPCI_REGS + 0x100:
 		addr &= GAPSPCI_REGS_SIZE - 1;
+		if (addr == GAPS_RESET)
+		{
+			if (sz == 4 && data == GAPS_RESET_COMMAND)
+			{
+				INFO_LOG(NETWORK, "BBA: GAPS reset");
+				rtl8139_reset(rtl8139device);
+				net::modbba::stop();
+				const u32 ready = 1;
+				memcpy(&GAPS_regs[GAPS_RESET], &ready, sizeof(ready));
+			}
+			break;
+		}
 		memcpy(&GAPS_regs[addr], &data, sz);
 		switch(addr)
 		{
@@ -177,24 +195,30 @@ void bba_WriteMem(u32 addr, u32 data, u32 sz)
 			setInterrupt();
 			break;
 
-		case GAPS_RESET:
-			if (data & 1)
-			{
-				INFO_LOG(NETWORK, "BBA: GAPS reset");
-				rtl8139_reset(rtl8139device);
-				net::modbba::stop();
-			}
-			break;
-
-		case GAPS_DMA_OFFSET:
-			dmaOffset = data & GAPSPCI_RAM_MASK;
+		case GAPS_DMA_END:
+			dmaEnd = data;
 			break;
 		}
 		break;
 
 	case GAPSPCI_PCI_CONFIG:
-		DEBUG_LOG(NETWORK, "pcidev->config(w%d) %02x %x", sz, addr & (GAPSPCI_PCI_CONFIG_SIZE - 1), data);
-		//pci_default_write_config(pcidev, addr & 0xFF, data, sz);
+		addr &= GAPSPCI_PCI_CONFIG_SIZE - 1;
+		DEBUG_LOG(NETWORK, "pcidev->config(w%d) %02x %x", sz, addr, data);
+		for (u32 i = 0; i < sz && addr + i < GAPSPCI_PCI_CONFIG_SIZE; ++i)
+		{
+			u8& config = PCI_DEVICE(rtl8139device)->config[addr + i];
+			const u8 value = data >> (i * 8);
+			if (addr + i == PCI_STATUS || addr + i == PCI_STATUS + 1)
+			{
+				const u8 clearMask = PCI_STATUS_WRITE_1_TO_CLEAR >> ((addr + i - PCI_STATUS) * 8);
+				config &= ~(value & clearMask);
+			}
+			else
+			{
+				const u8 writeMask = PCI_DEVICE(rtl8139device)->wmask[addr + i];
+				config = (config & ~writeMask) | (value & writeMask);
+			}
+		}
 		break;
 
 	case GAPSPCI_RTL_REGS:
@@ -227,19 +251,37 @@ int bba_recv_frame(const u8 *data, u32 len)
 
 void pci_dma_read(PCIDevice *dev, dma_addr_t addr, void *buf, dma_addr_t len)
 {
-	memcpy(buf, &GAPS_ram[addr & GAPSPCI_RAM_MASK], len);
+	u8 *dst = static_cast<u8 *>(buf);
+	while (len != 0)
+	{
+		const u32 offset = addr & GAPSPCI_RAM_MASK;
+		const dma_addr_t chunk = std::min<dma_addr_t>(len, GAPSPCI_RAM_SIZE - offset);
+		memcpy(dst, &GAPS_ram[offset], chunk);
+		addr += chunk;
+		dst += chunk;
+		len -= chunk;
+	}
 }
 
 void pci_dma_write(PCIDevice *dev, dma_addr_t addr, const void *buf, dma_addr_t len)
 {
-	memcpy(&GAPS_ram[addr & GAPSPCI_RAM_MASK], buf, len);
+	const u8 *src = static_cast<const u8 *>(buf);
+	while (len != 0)
+	{
+		const u32 offset = addr & GAPSPCI_RAM_MASK;
+		const dma_addr_t chunk = std::min<dma_addr_t>(len, GAPSPCI_RAM_SIZE - offset);
+		memcpy(&GAPS_ram[offset], src, chunk);
+		addr += chunk;
+		src += chunk;
+		len -= chunk;
+	}
 }
 
 void bba_Serialize(Serializer& ser)
 {
 	ser << GAPS_regs;
 	ser << GAPS_ram;
-	ser << dmaOffset;
+	ser << dmaEnd;
 	ser << interruptPending;
 	rtl8139_serialize(rtl8139device, ser);
 }
@@ -248,11 +290,14 @@ void bba_Deserialize(Deserializer& deser)
 {
 	deser >> GAPS_regs;
 	deser >> GAPS_ram;
-	deser >> dmaOffset;
+	deser >> dmaEnd;
 	deser >> interruptPending;
-    // returns true if the receiver is enabled and the network stack must be started
-    if (rtl8139_deserialize(rtl8139device, deser))
-        net::modbba::start();
+	// Keep the host network service synchronized with the restored receiver.
+	if (rtl8139_deserialize(rtl8139device, deser))
+		net::modbba::start();
+	else
+		net::modbba::stop();
+	setInterrupt();
 }
 
 #define POLYNOMIAL_BE 0x04c11db6

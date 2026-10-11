@@ -77,10 +77,15 @@ static void dec_fallback(u32 op)
 
 static void dec_DynamicSet(u32 regbase,u32 offs=0)
 {
-	if (offs==0)
-		Emit(shop_jdyn,reg_pc_dyn,mk_reg((Sh4RegType)regbase));
+	const shil_param source = mk_reg((Sh4RegType)regbase);
+	if (offs == 0)
+		Emit(shop_and, reg_temp, source, mk_imm(~1u));
 	else
-		Emit(shop_jdyn,reg_pc_dyn,mk_reg((Sh4RegType)regbase),mk_imm(offs));
+	{
+		Emit(shop_add, reg_temp, source, mk_imm(offs));
+		Emit(shop_and, reg_temp, reg_temp, mk_imm(~1u));
+	}
+	Emit(shop_jdyn, reg_pc_dyn, reg_temp);
 }
 
 static void dec_End(u32 dst, BlockEndType flags, bool delaySlot)
@@ -102,12 +107,6 @@ static u32 dec_jump_simm8(u32 op)
 static u32 dec_jump_simm12(u32 op)
 {
 	return state.cpu.rpc + GetSImm12(op)*2 + 4;
-}
-static u32 dec_set_pr()
-{
-	u32 retaddr=state.cpu.rpc + 4;
-	Emit(shop_mov32,reg_pr,mk_imm(retaddr));
-	return retaddr;
 }
 static void dec_write_sr(shil_param src)
 {
@@ -162,25 +161,26 @@ sh4dec(i0100_nnnn_0010_1011)
 //bsr <bdisp12>
 sh4dec(i1011_iiii_iiii_iiii)
 {
-	dec_set_pr();
-	dec_End(dec_jump_simm12(op), BET_StaticCall, true);
+	// PR'' is visible to STS PR in the delay slot, an LDS PR in the slot wins,
+	// and a re-execution exception inhibits the write. SHIL cannot represent
+	// that pending-register state, so execute the indivisible pair precisely.
+	dec_fallback(op);
+	dec_DynamicSet(reg_nextpc);
+	dec_End(NullAddress, BET_DynamicCall, false);
 }
 //bsrf <REG_N>
 sh4dec(i0000_nnnn_0000_0011)
 {
-	u32 n = GetN(op);
-	u32 retaddr=dec_set_pr();
-	dec_DynamicSet(reg_r0+n,retaddr);
-	dec_End(NullAddress, BET_DynamicCall, true);
+	dec_fallback(op);
+	dec_DynamicSet(reg_nextpc);
+	dec_End(NullAddress, BET_DynamicCall, false);
 }
 //jsr @<REG_N>
 sh4dec(i0100_nnnn_0000_1011) 
 {
-	u32 n = GetN(op);
-
-	dec_set_pr();
-	dec_DynamicSet(reg_r0+n);
-	dec_End(NullAddress, BET_DynamicCall, true);
+	dec_fallback(op);
+	dec_DynamicSet(reg_nextpc);
+	dec_End(NullAddress, BET_DynamicCall, false);
 }
 //rts
 sh4dec(i0000_0000_0000_1011)
@@ -280,13 +280,67 @@ sh4dec(i0100_nnnn_0000_0011)
 // tas.b <REG_N>
 sh4dec(i0100_nnnn_0001_1011)
 {
-	shil_param rn = mk_regi(reg_r0 + GetN(op));
+	// TAS.B commits T only after both the read and write complete. Emitting the
+	// flag update before shop_writem leaks T when the write faults, and SHIL has
+	// no second scratch register with which to defer it. Use the shared precise
+	// handler until TAS is represented as an atomic operation.
 	state.info.has_readm = true;
 	state.info.has_writem = true;
-	Emit(shop_readm, reg_temp, rn, shil_param(), 1);
-	Emit(shop_seteq, reg_sr_T, reg_temp, mk_imm(0));
-	Emit(shop_or, reg_temp, reg_temp, mk_imm(0x80));
-	Emit(shop_writem, shil_param(), rn, reg_temp, 1);
+	dec_fallback(op);
+}
+
+// MAC.W/MAC.L perform two faultable reads before committing either address
+// register or the accumulator. Use the precise shared handlers and terminate
+// the block after their dynamic memory timing becomes known.
+sh4dec(i0100_nnnn_mmmm_1111)
+{
+	state.info.has_readm = true;
+	dec_fallback(op);
+}
+
+sh4dec(i0000_nnnn_mmmm_1111)
+{
+	state.info.has_readm = true;
+	dec_fallback(op);
+}
+
+sh4dec(i1100_1100_iiii_iiii)
+{
+	state.info.has_readm = true;
+	dec_fallback(op);
+}
+
+static void dec_read_modify_write_fallback(u32 op)
+{
+	state.info.has_readm = true;
+	state.info.has_writem = true;
+	dec_fallback(op);
+}
+
+sh4dec(i1100_1101_iiii_iiii) { dec_read_modify_write_fallback(op); }
+sh4dec(i1100_1110_iiii_iiii) { dec_read_modify_write_fallback(op); }
+sh4dec(i1100_1111_iiii_iiii) { dec_read_modify_write_fallback(op); }
+
+static void dec_cache_fallback(u32 op)
+{
+	// PREF may drain a store queue; cache-block operations can write back dirty
+	// data in strict mode. Their effective address and timing are runtime state.
+	state.info.has_readm = true;
+	state.info.has_writem = true;
+	dec_fallback(op);
+}
+
+sh4dec(i0000_nnnn_1000_0011)
+{ dec_cache_fallback(op); }
+sh4dec(i0000_nnnn_1001_0011) { dec_cache_fallback(op); }
+sh4dec(i0000_nnnn_1010_0011) { dec_cache_fallback(op); }
+sh4dec(i0000_nnnn_1011_0011) { dec_cache_fallback(op); }
+sh4dec(i0000_nnnn_1100_0011)
+{
+	// MOVCA allocates without fetching the destination block. It can drain a
+	// dirty victim, but has no architectural read access of its own.
+	state.info.has_writem = true;
+	dec_fallback(op);
 }
 
 //nop !
@@ -562,6 +616,61 @@ static Sh4RegType div_som_reg1;
 static Sh4RegType div_som_reg2;
 static Sh4RegType div_som_reg3;
 
+static bool peekOpcode(u32 address, u16& opcode)
+{
+	// Peephole lookahead must never translate, fill the I-cache, or fault on an
+	// instruction the CPU has not reached. Restrict it to the already translated
+	// physical page backing this block.
+	if ((address >> 12) != (blk->vaddr >> 12) || address < blk->vaddr)
+		return false;
+	u8 *ptr = GetMemPtr(blk->addr + (address - blk->vaddr), sizeof(opcode));
+	if (ptr == nullptr)
+		return false;
+	std::memcpy(&opcode, ptr, sizeof(opcode));
+	return true;
+}
+
+static u16 fetchOpcode(u32 address)
+{
+	// Architectural readers derive the fault PC from Sh4cntx.pc. Compilation
+	// normally leaves it at the block entry, so temporarily expose the address
+	// of this fetch and translate a delay-slot fault back to its branch.
+	const u32 savedPc = Sh4cntx.pc;
+	Sh4cntx.pc = address + 2;
+	try
+	{
+		u32 physicalAddress = address;
+		if (sh4InstructionAddressError(address))
+			mmu_raise_exception(MmuError::BADADDR, address, MMU_TT_IREAD);
+		if (mmu_enabled())
+		{
+			const MmuError error = mmu_instruction_translation(address, physicalAddress);
+			if (error != MmuError::NONE)
+				mmu_raise_exception(error, address, MMU_TT_IREAD);
+		}
+		const u16 opcode = addrspace::read16(physicalAddress);
+		if ((address >> 12) != (blk->vaddr >> 12))
+		{
+			blk->tail_addr = physicalAddress;
+			blk->tail_opcode = opcode;
+		}
+		Sh4cntx.pc = savedPc;
+		return opcode;
+	}
+	catch (SH4ThrownException& ex)
+	{
+		Sh4cntx.pc = savedPc;
+		if (state.cpu.is_delayslot)
+			AdjustDelaySlotException(ex);
+		throw;
+	}
+	catch (...)
+	{
+		Sh4cntx.pc = savedPc;
+		throw;
+	}
+}
+
 static u32 MatchDiv32(u32 pc , Sh4RegType &reg1,Sh4RegType &reg2 , Sh4RegType &reg3)
 {
 
@@ -569,7 +678,9 @@ static u32 MatchDiv32(u32 pc , Sh4RegType &reg1,Sh4RegType &reg2 , Sh4RegType &r
 	u32 match=1;
 	for (int i=0;i<32;i++)
 	{
-		u16 opcode=IReadMem16(v_pc);
+		u16 opcode;
+		if (!peekOpcode(v_pc, opcode))
+			break;
 		v_pc+=2;
 		if ((opcode&MASK_N)==ROTCL_KEY)
 		{
@@ -585,7 +696,8 @@ static u32 MatchDiv32(u32 pc , Sh4RegType &reg1,Sh4RegType &reg2 , Sh4RegType &r
 			break;
 		}
 		
-		opcode=IReadMem16(v_pc);
+		if (!peekOpcode(v_pc, opcode))
+			break;
 		v_pc+=2;
 		if ((opcode&MASK_N_M)==DIV1_KEY)
 		{
@@ -657,6 +769,15 @@ static bool dec_generic(u32 op)
 	if (op>=0xF000)
 	{
 		state.info.has_fpu=true;
+		// Basic arithmetic, FSQRT and FTRC update FPSCR Cause/Flag and may trap depending
+		// on the exception enables. Keep their architectural behavior in the
+		// shared interpreter implementation until SHIL models those effects.
+		const u16 unary = op & 0xf0ff;
+		if ((op & 0xf) <= 5 || (op & 0xf00f) == 0xf00e
+				|| unary == 0xf02d || unary == 0xf03d
+				|| unary == 0xf06d || unary == 0xf07d
+				|| unary == 0xf0ed || unary == 0xf0fd)
+			return false;
 		if (state.cpu.FPR64) {
 			// fallback to interpreter for double float ops
 			// except fmov, flds, fsts and fneg that don't depend on PR
@@ -752,16 +873,12 @@ static bool dec_generic(u32 op)
 			bool update_after=false;
 			if ((s32)e<0)
 			{
-				if (rs1._reg!=rs2._reg && !mmu_enabled()) //reg shouldn't be updated if its written
-				{
-					Emit(shop_sub,rs1,rs1,mk_imm(-e));
-				}
-				else
-				{
-					verify(rs3.is_null());
-					rs3=mk_imm(e);
-					update_after=true;
-				}
+				// The architectural pre-decrement is committed only after the
+				// store succeeds. Keep the effective-address displacement on the
+				// memory operation so every possible exception sees the old Rn.
+				verify(rs3.is_null());
+				rs3=mk_imm(e);
+				update_after=true;
 			}
 
 			Emit(shop_writem,shil_param(),rs1,rs2,(s32)e<0?-e:e,rs3);
@@ -844,7 +961,8 @@ static bool dec_generic(u32 op)
 					
 					for (int i = 1; i <= 64; i++)
 					{
-						u16 op = IReadMem16(state.cpu.rpc + i * 2);
+						u16 op;
+						verify(peekOpcode(state.cpu.rpc + i * 2, op));
 						blk->guest_cycles += cycleCounter.countCycles(op);
 					}
 					//skip the aggregated opcodes
@@ -880,7 +998,8 @@ static bool dec_generic(u32 op)
 
 					for (int i = 1; i <= 64; i++)
 					{
-						u16 op = IReadMem16(state.cpu.rpc + i * 2);
+						u16 op;
+						verify(peekOpcode(state.cpu.rpc + i * 2, op));
 						blk->guest_cycles += cycleCounter.countCycles(op);
 					}
 					//skip the aggregated opcodes
@@ -940,7 +1059,6 @@ static void state_Setup(u32 rpc,fpscr_t fpu_cfg)
 	state.BlockType = BET_SCL_Intr;
 	state.JumpAddr = NullAddress;
 	state.NextAddr = NullAddress;
-
 	state.info.has_readm=false;
 	state.info.has_writem=false;
 	state.info.has_fpu=false;
@@ -948,7 +1066,11 @@ static void state_Setup(u32 rpc,fpscr_t fpu_cfg)
 
 void dec_updateBlockCycles(RuntimeBlockInfo *block, u16 op)
 {
-	block->guest_cycles += cycleCounter.countCycles(op);
+	const u32 cycles = cycleCounter.countCycles(op);
+	if (block->guest_opcodes == 1)
+		block->entry_cycles = std::round(cycles * 200.f
+				/ std::max(1.f, (float)config::Sh4Clock));
+	block->guest_cycles += cycles;
 }
 
 bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
@@ -958,8 +1080,10 @@ bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
 	
 	blk->guest_opcodes = 0;
 	cycleCounter.reset();
-	// If full MMU, don't allow the block to extend past the end of the current 4K page
-	u32 max_pc = mmu_enabled() ? ((state.cpu.rpc >> 12) + 1) << 12 : 0xFFFFFFFF;
+	// Always return through the validated dispatcher at a page boundary. This
+	// is required even without address translation because the next page can
+	// cross a privilege boundary; with translation, its mapping can also differ.
+	const u32 block_page = state.cpu.rpc >> 12;
 	
 	for(;;)
 	{
@@ -971,33 +1095,120 @@ bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
 			//there is no break here by design
 		case NDO_NextOp:
 			{
-				if ((blk->oplist.size() >= BLOCK_MAX_SH_OPS_SOFT || blk->guest_cycles >= max_cycles || state.cpu.rpc >= max_pc)
+				if ((blk->oplist.size() >= BLOCK_MAX_SH_OPS_SOFT
+						|| blk->guest_cycles >= max_cycles
+						|| (state.cpu.rpc >> 12) != block_page)
 						&& !state.cpu.is_delayslot)
 				{
 					dec_End(state.cpu.rpc,BET_StaticJump,false);
 				}
-				else
+			else
+			{
+				// A pre-execution UBC match is based on the virtual PC and wins
+				// over an instruction-fetch translation or address exception. UBC
+				// blocks contain one instruction, so this is always a true runtime
+				// block-entry boundary rather than speculative lookahead.
+				if (!state.cpu.is_delayslot && UBC_InstructionBreakEnabled()
+						&& UBC_InstructionBreakPending(state.cpu.rpc, false))
 				{
-					u32 op = IReadMem16(state.cpu.rpc);
+					(void)UBC_InstructionBreak(state.cpu.rpc, false);
+					if (Sh4cntx.sr.BL == 0)
+					{
+						Do_Exception(state.cpu.rpc, Sh4Ex_UserBreak);
+						return false;
+					}
+				}
+				state.info.has_readm = false;
+					state.info.has_writem = false;
+					u16 fetchedOpcode;
+					const bool peeked = peekOpcode(state.cpu.rpc, fetchedOpcode);
+					if (!peeked
+							&& blk->guest_opcodes != 0 && !state.cpu.is_delayslot)
+					{
+						// Do not perform a potentially faulting architectural fetch
+						// before the already decoded instructions have retired.
+						dec_End(state.cpu.rpc, BET_StaticJump, false);
+						break;
+					}
+					if (!peeked)
+						fetchedOpcode = fetchOpcode(state.cpu.rpc);
+					u32 op = fetchedOpcode;
+					const bool fpuOp = OpDesc[op]->IsFloatingPoint();
+
+					if ((OpDesc[op]->type & Delayslot) != 0
+							&& (state.cpu.rpc >> 12) != ((state.cpu.rpc + 2) >> 12)
+							&& blk->guest_opcodes != 0)
+					{
+						// A slot-page fault is observed only after all preceding
+						// instructions retire. Start the delayed branch in a new block.
+						dec_End(state.cpu.rpc, BET_StaticJump, false);
+						break;
+					}
+
+					// FPU-disabled checks happen at block entry. Keep the
+					// first ordinary FPU instruction at block entry so preceding guest
+					// instructions retire before a possible exception.
+					if (fpuOp && !state.cpu.is_delayslot && !blk->has_fpu_op
+							&& blk->guest_opcodes != 0)
+					{
+						dec_End(state.cpu.rpc, BET_StaticJump, false);
+						break;
+					}
 
 					blk->guest_opcodes++;
+					if (UBC_BreakEnabled())
+					{
+						// UBC state is checked at runtime. Execute one complete guest
+						// instruction (including a delay slot) through the shared precise
+						// path, then dispatch its returned architectural successor. Do not
+						// precharge guest_cycles: a pre-execution break consumes no issue
+						// cycle, so the helper charges instructions only after that check.
+						Emit(shop_ubc_exec, reg_temp, mk_imm(op), mk_imm(state.cpu.rpc));
+						dec_DynamicSet(reg_temp);
+						dec_End(NullAddress, BET_DynamicJump, false);
+						state.cpu.rpc += 2;
+						break;
+					}
 					dec_updateBlockCycles(blk, op);
 
-					if (!blk->has_fpu_op && OpDesc[op]->IsFloatingPoint())
+					if (!state.cpu.is_delayslot && !blk->has_fpu_op && fpuOp)
 					{
 						if (Sh4cntx.sr.FD == 1)
 						{
 							// We need to know FPSCR to compile the block, so let the exception handler run first
 							// as it may change the fp registers
-							Do_Exception(Sh4cntx.pc, Sh4Ex_FpuDisabled);
+							Sh4cntx.cycle_counter -= blk->entry_cycles;
+							Do_Exception(state.cpu.rpc, Sh4Ex_FpuDisabled);
 							return false;
 						}
 						blk->has_fpu_op = true;
 					}
+					if (!state.cpu.is_delayslot && OpDesc[op]->ClearsFpuCause(op)
+							&& !OpDesc[op]->IsIllegalFpuMode(op, state.cpu.FPR64, state.cpu.FSZ64))
+						Emit(shop_and, reg_fpscr, reg_fpscr, mk_imm(~0x3f000u));
 
-					if (state.cpu.is_delayslot && OpDesc[op]->SetPC())
-						throw FlycastException("Fatal: SH4 branch instruction in delay slot");
-					if (!OpDesc[op]->rec_oph)
+					if (state.cpu.is_delayslot && fpuOp)
+					{
+						// Runtime fallback preserves exception priority and converts an FD
+						// or illegal-mode fault into the corresponding slot exception.
+						dec_fallback(op);
+					}
+					else if (state.cpu.is_delayslot && OpDesc[op]->IsIllegalDelaySlot(op))
+						dec_illegalOp(op);
+					else if (OpDesc[op]->IsIllegalFpuMode(op, state.cpu.FPR64, state.cpu.FSZ64))
+						dec_illegalOp(op);
+					else if (OpDesc[op]->IsPrivileged(op))
+					{
+						// Privilege depends on SR.MD at execution time, so it cannot be
+						// specialized into a cached block.
+						dec_fallback(op);
+						if (OpDesc[op]->SetPC())
+						{
+							dec_DynamicSet(reg_nextpc);
+							dec_End(NullAddress, BET_DynamicJump, false);
+						}
+					}
+					else if (!OpDesc[op]->rec_oph)
 					{
 						if (!dec_generic(op))
 						{
@@ -1017,7 +1228,25 @@ bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
 					{
 						OpDesc[op]->rec_oph(op);
 					}
+					if (!state.cpu.is_delayslot && state.NextOp == NDO_NextOp
+							&& (OpDesc[op]->ClearsFpuCause(op)
+									|| OpDesc[op]->IsPrivileged(op)))
+					{
+						// Runtime fallback can raise here. Wait for its outcome before
+						// charging or executing another architectural instruction.
+						dec_End(state.cpu.rpc + 2, BET_StaticJump, false);
+					}
 					state.cpu.rpc+=2;
+					if ((state.info.has_readm || state.info.has_writem) && !state.cpu.is_delayslot
+							&& state.NextOp == NDO_NextOp)
+					{
+						// A memory access may incur dynamic cache/bus wait states,
+						// fault, or touch MMIO that changes a scheduler deadline.
+						// Return to the dispatcher so those cycles and events are
+						// observed before another guest instruction retires. Dynamic
+						// addresses prevent restricting this to known MMIO accesses.
+						dec_End(state.cpu.rpc, BET_StaticJump, false);
+					}
 				}
 			}
 			break;

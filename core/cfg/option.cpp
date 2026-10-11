@@ -45,7 +45,13 @@ Option<int, false> UITheme("UITheme", 0);
 
 // Sound
 
-Option<bool> DSPEnabled("aica.DSPEnabled", false);
+Option<bool> DSPEnabled("aica.DSPEnabled",
+#ifdef LOW_END
+		false
+#else
+		true
+#endif
+		);
 #if HOST_CPU == CPU_ARM
 Option<int> AudioBufferSize("aica.BufferSize", 5644);	// 128 ms
 #else
