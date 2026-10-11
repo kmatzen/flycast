@@ -133,6 +133,50 @@ TEST(SoftwareRasterizer, ExhaustivelyMatchesStandardAlphaBlendEquation)
 			}
 }
 
+TEST(SoftwareRasterizer, ImplementsEveryPvrBlendFactorPair)
+{
+	const Color source { 211, 97, 43, 139 };
+	const Color destination { 17, 61, 173, 83 };
+	const auto channels = [](Color color) {
+		return std::array<unsigned, 4> { color.r, color.g, color.b, color.a };
+	};
+	const auto sourceChannels = channels(source);
+	const auto destinationChannels = channels(destination);
+	const auto factor = [&](BlendFactor mode, bool sourceTerm, unsigned channel) {
+		const auto& other = sourceTerm ? destinationChannels : sourceChannels;
+		switch (mode)
+		{
+		case BlendFactor::Zero: return 0.f;
+		case BlendFactor::One: return 1.f;
+		case BlendFactor::OtherColor: return other[channel] / 255.f;
+		case BlendFactor::OneMinusOtherColor: return 1.f - other[channel] / 255.f;
+		case BlendFactor::SrcAlpha: return source.a / 255.f;
+		case BlendFactor::OneMinusSrcAlpha: return 1.f - source.a / 255.f;
+		case BlendFactor::DstAlpha: return destination.a / 255.f;
+		case BlendFactor::OneMinusDstAlpha: return 1.f - destination.a / 255.f;
+		}
+		return 0.f;
+	};
+	for (unsigned sourceMode = 0; sourceMode < 8; ++sourceMode)
+		for (unsigned destinationMode = 0; destinationMode < 8; ++destinationMode)
+		{
+			const auto sf = static_cast<BlendFactor>(sourceMode);
+			const auto df = static_cast<BlendFactor>(destinationMode);
+			const Color result = SoftwareRasterizer::blend(source, destination, sf, df);
+			const auto resultChannels = channels(result);
+			for (unsigned channel = 0; channel < 4; ++channel)
+			{
+				const long expected = std::clamp(std::lround(
+						sourceChannels[channel] * factor(sf, true, channel)
+						+ destinationChannels[channel] * factor(df, false, channel)),
+						0l, 255l);
+				EXPECT_EQ(resultChannels[channel], static_cast<unsigned>(expected))
+						<< "sourceFactor=" << sourceMode << " destinationFactor="
+						<< destinationMode << " channel=" << channel;
+			}
+		}
+}
+
 TEST(SoftwareRasterizer, ImplementsAllTextureShadingInstructions)
 {
 	const Color base { 100, 150, 200, 128 };
@@ -305,6 +349,29 @@ TEST(SoftwareRasterizer, SamplesNearestAndBilinearTextures)
 	// blue=2 here; the four-texel weighted result rounds once to blue=1.
 	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, .3f, .65f, state),
 			(Color { 0, 0, 1, 255 }));
+}
+
+TEST(SoftwareRasterizer, MirrorsBothTextureAxesAcrossFlipPeriods)
+{
+	const Color texels[] {
+		{ 255, 0, 0, 255 }, { 0, 255, 0, 255 },
+		{ 0, 0, 255, 255 }, { 255, 255, 255, 255 },
+	};
+	PipelineState state;
+	state.flipU = true;
+	state.texture = { texels, 4, 1 };
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, .125f, 0.f, state), texels[0]);
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 1.125f, 0.f, state), texels[3]);
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 1.375f, 0.f, state), texels[2]);
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, -.125f, 0.f, state), texels[0]);
+
+	state.flipU = false;
+	state.flipV = true;
+	state.texture = { texels, 1, 4 };
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, .125f, state), texels[0]);
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, 1.125f, state), texels[3]);
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, 1.375f, state), texels[2]);
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, -.125f, state), texels[0]);
 }
 
 TEST(SoftwareRasterizer, SelectsMipLevelFromPvrD)
