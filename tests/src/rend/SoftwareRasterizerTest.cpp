@@ -842,6 +842,25 @@ TEST(SoftwareRasterizer, DecodesBumpMapNormalIntoAlpha)
 	EXPECT_GE(rasterizer.pixel(0, 0).a, 250);
 }
 
+TEST(SoftwareRasterizer, UsesPvrBumpMapAngleEncoding)
+{
+	SoftwareRasterizer rasterizer(1, 1);
+	// ARGB 0x8000 encodes S = 0x80 and R = 0x00. The PVR interprets
+	// S as pi/2 * 128/256, not 128/255.
+	const Color texel { 0, 0, 0, 136 };
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.texture = { &texel, 1, 1 };
+	state.bumpMap = true;
+	state.useOffsetColor = true;
+	const Color base { 255, 255, 255, 255 };
+	// K1 = 0, K2 = 1, K3 = 0, Q = 0: alpha = sin(S).
+	const Color bumpParameters { 255, 0, 0, 0 };
+	rasterizer.drawTriangle({ 0, 0, 1, base, bumpParameters },
+			{ 2, 0, 1, base, bumpParameters }, { 0, 2, 1, base, bumpParameters }, state);
+	EXPECT_EQ(rasterizer.pixel(0, 0).a, 180);
+}
+
 TEST(SoftwareRasterizer, SupportsSecondaryAccumulationBuffer)
 {
 	SoftwareRasterizer rasterizer(1, 1);

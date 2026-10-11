@@ -1298,10 +1298,18 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 					const float offsetR = interpolate(true, &Color::r, &WeightedColor::r) / 255.f;
 					const float offsetG = interpolate(true, &Color::g, &WeightedColor::g) / 255.f;
 					const float offsetB = interpolate(true, &Color::b, &WeightedColor::b) / 255.f;
-					const float s = PI * .5f * (texel.a * 15.f * 16.f + texel.r * 15.f) / 255.f / 255.f;
-					const float r = 2.f * PI * (texel.g * 15.f * 16.f + texel.b * 15.f) / 255.f / 255.f;
+					auto angleFraction = [](float parameter) {
+						// PVR angle parameters use value / 256, except that the 0xff
+						// encoding represents 256 exactly.
+						return parameter >= 255.f ? 1.f : parameter / 256.f;
+					};
+					const float sParameter = (texel.a * 15.f * 16.f + texel.r * 15.f) / 255.f;
+					const float rParameter = (texel.g * 15.f * 16.f + texel.b * 15.f) / 255.f;
+					const float s = PI * .5f * angleFraction(sParameter);
+					const float r = 2.f * PI * angleFraction(rParameter);
+					const float q = 2.f * PI * angleFraction(offsetB * 255.f);
 					texel = { 255, 255, 255, clampByte(std::clamp(offsetA + offsetR * std::sin(s)
-							+ offsetG * std::cos(s) * std::cos(r - 2.f * PI * offsetB), 0.f, 1.f) * 255.f) };
+							+ offsetG * std::cos(s) * std::cos(r - q), 0.f, 1.f) * 255.f) };
 				}
 				else if (fragmentState.ignoreTextureAlpha)
 					texel.a = 255;
