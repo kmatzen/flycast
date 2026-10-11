@@ -389,6 +389,18 @@ Color SoftwareRasterizer::blend(Color source, Color destination, BlendFactor sou
 		return source;
 	if (sourceFactor == BlendFactor::Zero && destinationFactor == BlendFactor::One)
 		return destination;
+	if (sourceFactor == BlendFactor::SrcAlpha
+			&& destinationFactor == BlendFactor::OneMinusSrcAlpha)
+	{
+		const u16 sourceAlpha = source.a;
+		const u16 inverseSourceAlpha = 255 - source.a;
+		return {
+			blendChannel(source.r, destination.r, sourceAlpha, inverseSourceAlpha),
+			blendChannel(source.g, destination.g, sourceAlpha, inverseSourceAlpha),
+			blendChannel(source.b, destination.b, sourceAlpha, inverseSourceAlpha),
+			blendChannel(source.a, destination.a, sourceAlpha, inverseSourceAlpha),
+		};
+	}
 	const auto sf = factorNumerator(sourceFactor, source, destination, true);
 	const auto df = factorNumerator(destinationFactor, source, destination, false);
 	return {
