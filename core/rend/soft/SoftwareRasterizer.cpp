@@ -1066,6 +1066,36 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 		{ vertices[0].v1 * vertexZ[0], vertices[1].v1 * vertexZ[1],
 				vertices[2].v1 * vertexZ[2] },
 	};
+	struct WeightedColor
+	{
+		float r;
+		float g;
+		float b;
+		float a;
+	};
+	auto weightColor = [](const Color& color, float z) {
+		return WeightedColor {
+			color.r * z, color.g * z, color.b * z, color.a * z,
+		};
+	};
+	const WeightedColor vertexColorZ[2][2][3] {
+		{
+			{ weightColor(vertices[0].color, vertexZ[0]),
+					weightColor(vertices[1].color, vertexZ[1]),
+					weightColor(vertices[2].color, vertexZ[2]) },
+			{ weightColor(vertices[0].offsetColor, vertexZ[0]),
+					weightColor(vertices[1].offsetColor, vertexZ[1]),
+					weightColor(vertices[2].offsetColor, vertexZ[2]) },
+		},
+		{
+			{ weightColor(vertices[0].color1, vertexZ[0]),
+					weightColor(vertices[1].color1, vertexZ[1]),
+					weightColor(vertices[2].color1, vertexZ[2]) },
+			{ weightColor(vertices[0].offsetColor1, vertexZ[0]),
+					weightColor(vertices[1].offsetColor1, vertexZ[1]),
+					weightColor(vertices[2].offsetColor1, vertexZ[2]) },
+		},
+	};
 
 	auto rasterizeRow = [&](s32 y)
 	{
@@ -1116,28 +1146,25 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			const float shadeZ = vertices[0].z * s0 + vertices[1].z * s1 + vertices[2].z * s2;
 
 			const float inverseZ = shadeZ == 0.f ? 0.f : 1.f / shadeZ;
-			auto interpolate = [&](bool offsetColor, auto member) {
-				auto color = [&](int index) -> const Color& {
-					if (area1)
-						return offsetColor ? vertices[index].offsetColor1 : vertices[index].color1;
-					return offsetColor ? vertices[index].offsetColor : vertices[index].color;
-				};
+			auto interpolate = [&](bool offsetColor, auto colorMember, auto weightedMember) {
 				if (!fragmentState.gouraud)
 				{
 					const Color& flatColor = area1
 							? (offsetColor ? flatVertex.offsetColor1 : flatVertex.color1)
 							: (offsetColor ? flatVertex.offsetColor : flatVertex.color);
-					return static_cast<float>(flatColor.*member);
+					return static_cast<float>(flatColor.*colorMember);
 				}
-				return ((color(0).*member) * vertices[0].z * s0
-						+ (color(1).*member) * vertices[1].z * s1
-						+ (color(2).*member) * vertices[2].z * s2) * inverseZ;
+				const WeightedColor* colors = vertexColorZ[static_cast<unsigned>(area1)]
+						[static_cast<unsigned>(offsetColor)];
+				return ((colors[0].*weightedMember) * s0
+						+ (colors[1].*weightedMember) * s1
+						+ (colors[2].*weightedMember) * s2) * inverseZ;
 			};
 			Color source {
-				clampByte(interpolate(false, &Color::r)),
-				clampByte(interpolate(false, &Color::g)),
-				clampByte(interpolate(false, &Color::b)),
-				clampByte(interpolate(false, &Color::a)),
+				clampByte(interpolate(false, &Color::r, &WeightedColor::r)),
+				clampByte(interpolate(false, &Color::g, &WeightedColor::g)),
+				clampByte(interpolate(false, &Color::b, &WeightedColor::b)),
+				clampByte(interpolate(false, &Color::a, &WeightedColor::a)),
 			};
 			if (!fragmentState.useAlpha)
 				source.a = 255;
@@ -1249,10 +1276,10 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				if (fragmentState.bumpMap)
 				{
 					constexpr float PI = 3.14159265358979323846f;
-					const float offsetA = interpolate(true, &Color::a) / 255.f;
-					const float offsetR = interpolate(true, &Color::r) / 255.f;
-					const float offsetG = interpolate(true, &Color::g) / 255.f;
-					const float offsetB = interpolate(true, &Color::b) / 255.f;
+					const float offsetA = interpolate(true, &Color::a, &WeightedColor::a) / 255.f;
+					const float offsetR = interpolate(true, &Color::r, &WeightedColor::r) / 255.f;
+					const float offsetG = interpolate(true, &Color::g, &WeightedColor::g) / 255.f;
+					const float offsetB = interpolate(true, &Color::b, &WeightedColor::b) / 255.f;
 					const float s = PI * .5f * (texel.a * 15.f * 16.f + texel.r * 15.f) / 255.f / 255.f;
 					const float r = 2.f * PI * (texel.g * 15.f * 16.f + texel.b * 15.f) / 255.f / 255.f;
 					texel = { 255, 255, 255, clampByte(std::clamp(offsetA + offsetR * std::sin(s)
@@ -1284,9 +1311,9 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 					applyTexture(intensitySource);
 				if (fragmentState.useOffsetColor && !fragmentState.bumpMap)
 				{
-					const Color offsetColor { clampByte(interpolate(true, &Color::r)),
-						clampByte(interpolate(true, &Color::g)),
-						clampByte(interpolate(true, &Color::b)), 0 };
+					const Color offsetColor { clampByte(interpolate(true, &Color::r, &WeightedColor::r)),
+						clampByte(interpolate(true, &Color::g, &WeightedColor::g)),
+						clampByte(interpolate(true, &Color::b, &WeightedColor::b)), 0 };
 					source.r = clampByte(source.r + offsetColor.r);
 					source.g = clampByte(source.g + offsetColor.g);
 					source.b = clampByte(source.b + offsetColor.b);
@@ -1321,7 +1348,7 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			else if (fragmentState.fogMode == 1 && fragmentState.useOffsetColor
 					&& !fragmentState.bumpMap)
 			{
-				const float vertexFog = interpolate(true, &Color::a) / 255.f;
+				const float vertexFog = interpolate(true, &Color::a, &WeightedColor::a) / 255.f;
 				color.r = clampByte(color.r + (fragmentState.fogVertexColor.r - color.r) * vertexFog);
 				color.g = clampByte(color.g + (fragmentState.fogVertexColor.g - color.g) * vertexFog);
 				color.b = clampByte(color.b + (fragmentState.fogVertexColor.b - color.b) * vertexFog);
