@@ -971,6 +971,67 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 		attributeStep(true, false, barycentricDx) };
 	const float vqDyHost[2] { attributeStep(false, false, barycentricDy),
 		attributeStep(true, false, barycentricDy) };
+	struct MipGradient
+	{
+		bool valid = false;
+		float numerator = 0.f;
+	};
+	// With D calculation control clear, q, uq and vq are evaluated at the
+	// native origin. Their derivative numerators are therefore invariant over
+	// the triangle; only 1 / q^2 changes from pixel to pixel.
+	auto prepareMipGradient = [&](const PipelineState& fragmentState, unsigned areaIndex) {
+		MipGradient result;
+		if (fragmentState.texture.mipLevelCount <= 1 || fragmentState.dCalcCtrl)
+			return result;
+		const s32 sampleXFixed = minX * SUBPIXEL_SCALE + tspSampleOffset;
+		const s32 sampleYFixed = minY * SUBPIXEL_SCALE + tspSampleOffset;
+		const float q0 = static_cast<float>(edge(points[1], points[2], sampleXFixed, sampleYFixed) * inverseArea);
+		const float q1 = static_cast<float>(edge(points[2], points[0], sampleXFixed, sampleYFixed) * inverseArea);
+		const float q2 = static_cast<float>(edge(points[0], points[1], sampleXFixed, sampleYFixed) * inverseArea);
+		const float q = vertices[0].z * q0 + vertices[1].z * q1 + vertices[2].z * q2;
+		const float u0 = areaIndex ? vertices[0].u1 : vertices[0].u;
+		const float u1 = areaIndex ? vertices[1].u1 : vertices[1].u;
+		const float u2 = areaIndex ? vertices[2].u1 : vertices[2].u;
+		const float v0 = areaIndex ? vertices[0].v1 : vertices[0].v;
+		const float v1 = areaIndex ? vertices[1].v1 : vertices[1].v;
+		const float v2 = areaIndex ? vertices[2].v1 : vertices[2].v;
+		const float uq = u0 * vertices[0].z * q0 + u1 * vertices[1].z * q1
+				+ u2 * vertices[2].z * q2;
+		const float vq = v0 * vertices[0].z * q0 + v1 * vertices[1].z * q1
+				+ v2 * vertices[2].z * q2;
+		const float sampleX = sampleXFixed / static_cast<float>(SUBPIXEL_SCALE)
+				- fragmentState.nativeOriginX;
+		const float sampleY = sampleYFixed / static_cast<float>(SUBPIXEL_SCALE)
+				- fragmentState.nativeOriginY;
+		const float referenceQ = q - qDxHost * sampleX - qDyHost * sampleY;
+		const float referenceUQ = uq - uqDxHost[areaIndex] * sampleX
+				- uqDyHost[areaIndex] * sampleY;
+		const float referenceVQ = vq - vqDxHost[areaIndex] * sampleX
+				- vqDyHost[areaIndex] * sampleY;
+		const float dqDx = qDxHost * fragmentState.nativeToHostScaleX;
+		const float dqDy = qDyHost * fragmentState.nativeToHostScaleY;
+		const float duqDx = uqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
+		const float duqDy = uqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
+		const float dvqDx = vqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
+		const float dvqDy = vqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
+		const float dxU = (duqDx * referenceQ - dqDx * referenceUQ)
+				* fragmentState.texture.width;
+		const float dxV = (dvqDx * referenceQ - dqDx * referenceVQ)
+				* fragmentState.texture.height;
+		const float dyU = (duqDy * referenceQ - dqDy * referenceUQ)
+				* fragmentState.texture.width;
+		const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ)
+				* fragmentState.texture.height;
+		result.valid = true;
+		result.numerator = std::sqrt(std::max(dxU * dxU + dxV * dxV,
+				dyU * dyU + dyV * dyV)) * fragmentState.mipDAdjust;
+		return result;
+	};
+	const MipGradient mipGradients[2] {
+		prepareMipGradient(state, 0),
+		prepareMipGradient(state.useArea1VertexData || state.area1 == nullptr
+				? state : *state.area1, 1),
+	};
 
 	auto rasterizeRow = [&](s32 y)
 	{
@@ -1104,49 +1165,37 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				const float v = vq * inverseZ;
 				if (fragmentState.texture.mipLevelCount > 1)
 				{
-					const float dqDx = qDxHost * fragmentState.nativeToHostScaleX;
-					const float dqDy = qDyHost * fragmentState.nativeToHostScaleY;
 					const unsigned areaIndex = static_cast<unsigned>(area1);
-					const float duqDx = uqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
-					const float duqDy = uqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
-					const float dvqDx = vqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
-					const float dvqDy = vqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
-					float referenceQ;
-					float referenceUQ;
-					float referenceVQ;
-					if (fragmentState.dCalcCtrl)
-					{
-						referenceQ = vertices[0].z;
-						referenceUQ = (area1 ? vertices[0].u1 : vertices[0].u) * vertices[0].z;
-						referenceVQ = (area1 ? vertices[0].v1 : vertices[0].v) * vertices[0].z;
-					}
-					else
-					{
-						const float sampleX = shadeSampleX / static_cast<float>(SUBPIXEL_SCALE)
-								- fragmentState.nativeOriginX;
-						const float sampleY = shadeSampleY / static_cast<float>(SUBPIXEL_SCALE)
-								- fragmentState.nativeOriginY;
-						referenceQ = shadeZ - qDxHost * sampleX - qDyHost * sampleY;
-						referenceUQ = uq - uqDxHost[areaIndex] * sampleX
-								- uqDyHost[areaIndex] * sampleY;
-						referenceVQ = vq - vqDxHost[areaIndex] * sampleX
-								- vqDyHost[areaIndex] * sampleY;
-					}
 					const float denominator = shadeZ * shadeZ;
 					const float reciprocalDenominator = denominator == 0.f ? 0.f : 1.f / denominator;
-					const float dxU = (duqDx * referenceQ - dqDx * referenceUQ)
-							* reciprocalDenominator * fragmentState.texture.width;
-					const float dxV = (dvqDx * referenceQ - dqDx * referenceVQ)
-							* reciprocalDenominator * fragmentState.texture.height;
-					const float dyU = (duqDy * referenceQ - dqDy * referenceUQ)
-							* reciprocalDenominator * fragmentState.texture.width;
-					const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ)
-							* reciprocalDenominator * fragmentState.texture.height;
-					const float footprint = std::sqrt(std::max(dxU * dxU + dxV * dxV,
-							dyU * dyU + dyV * dyV));
-					// Values below one still select the full-resolution map, but their
-					// fractional part remains significant to trilinear Pass A/B.
-					pvrD = std::max(0.f, footprint * fragmentState.mipDAdjust);
+					if (mipGradients[areaIndex].valid)
+						pvrD = std::max(0.f,
+								mipGradients[areaIndex].numerator * reciprocalDenominator);
+					else
+					{
+						const float dqDx = qDxHost * fragmentState.nativeToHostScaleX;
+						const float dqDy = qDyHost * fragmentState.nativeToHostScaleY;
+						const float duqDx = uqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
+						const float duqDy = uqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
+						const float dvqDx = vqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
+						const float dvqDy = vqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
+						const float referenceQ = vertices[0].z;
+						const float referenceUQ = (area1 ? vertices[0].u1 : vertices[0].u)
+								* vertices[0].z;
+						const float referenceVQ = (area1 ? vertices[0].v1 : vertices[0].v)
+								* vertices[0].z;
+						const float dxU = (duqDx * referenceQ - dqDx * referenceUQ)
+								* reciprocalDenominator * fragmentState.texture.width;
+						const float dxV = (dvqDx * referenceQ - dqDx * referenceVQ)
+								* reciprocalDenominator * fragmentState.texture.height;
+						const float dyU = (duqDy * referenceQ - dqDy * referenceUQ)
+								* reciprocalDenominator * fragmentState.texture.width;
+						const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ)
+								* reciprocalDenominator * fragmentState.texture.height;
+						const float footprint = std::sqrt(std::max(dxU * dxU + dxV * dxV,
+								dyU * dyU + dyV * dyV));
+						pvrD = std::max(0.f, footprint * fragmentState.mipDAdjust);
+					}
 				}
 				Color texel = sampleTexture(fragmentState.texture, u, v, fragmentState, pvrD);
 				if (fragmentState.textureSuperSample)
