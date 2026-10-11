@@ -394,12 +394,38 @@ Color SoftwareRasterizer::blend(Color source, Color destination, BlendFactor sou
 	{
 		const u16 sourceAlpha = source.a;
 		const u16 inverseSourceAlpha = 255 - source.a;
+#if defined(__ARM_NEON)
+		u32 sourcePacked;
+		u32 destinationPacked;
+		std::memcpy(&sourcePacked, &source, sizeof(sourcePacked));
+		std::memcpy(&destinationPacked, &destination, sizeof(destinationPacked));
+		const uint16x4_t sourceChannels = vget_low_u16(vmovl_u8(
+				vreinterpret_u8_u32(vdup_n_u32(sourcePacked))));
+		const uint16x4_t destinationChannels = vget_low_u16(vmovl_u8(
+				vreinterpret_u8_u32(vdup_n_u32(destinationPacked))));
+		uint32x4_t numerators = vmull_n_u16(sourceChannels, sourceAlpha);
+		numerators = vmlal_n_u16(numerators, destinationChannels, inverseSourceAlpha);
+		numerators = vaddq_u32(numerators, vdupq_n_u32(127));
+		// Numerators are below 2^24, so conversion to float is exact. Since 255
+		// is odd, the quotient cannot be a half-integer; truncating the biased
+		// quotient therefore reproduces the scalar round-to-nearest equation.
+		uint32x4_t blended = vcvtq_u32_f32(vmulq_n_f32(
+				vcvtq_f32_u32(numerators), 1.f / 255.f));
+		blended = vminq_u32(blended, vdupq_n_u32(255));
+		const uint8x8_t bytes = vmovn_u16(vcombine_u16(vmovn_u32(blended),
+				vdup_n_u16(0)));
+		const u32 packed = vget_lane_u32(vreinterpret_u32_u8(bytes), 0);
+		Color result;
+		std::memcpy(&result, &packed, sizeof(result));
+		return result;
+#else
 		return {
 			blendChannel(source.r, destination.r, sourceAlpha, inverseSourceAlpha),
 			blendChannel(source.g, destination.g, sourceAlpha, inverseSourceAlpha),
 			blendChannel(source.b, destination.b, sourceAlpha, inverseSourceAlpha),
 			blendChannel(source.a, destination.a, sourceAlpha, inverseSourceAlpha),
 		};
+#endif
 	}
 	const auto sf = factorNumerator(sourceFactor, source, destination, true);
 	const auto df = factorNumerator(destinationFactor, source, destination, false);
