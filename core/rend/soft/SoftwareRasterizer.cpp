@@ -233,49 +233,74 @@ void SoftwareRasterizer::resolveDeferredFragments()
 	static constexpr u8 ditherTable[16] {
 		5, 13, 7, 15, 9, 1, 11, 3, 6, 14, 4, 12, 10, 2, 8, 0
 	};
-	for (size_t offset = 0; offset < deferredFragments_.size(); ++offset)
+	auto resolveRow = [&](u32 y)
 	{
-		auto& fragments = deferredFragments_[offset];
-		if (fragments.empty())
-			continue;
-		fragments.stableSort([](const Fragment& left, const Fragment& right) {
-			return left.depth < right.depth || (left.depth == right.depth && left.sequence < right.sequence);
-		});
-		Color finalColor = colorBuffer_[offset];
-		Color secondary = secondaryBuffer_[offset];
-		fragments.forEach([&](const Fragment& fragment) {
-			const bool area1 = fragment.shadowEnabled && (fragment.modifier & 2) != 0
-					&& fragment.hasArea1;
-			Color fragmentColor = area1 ? fragment.area1Color : fragment.color;
-			if (!area1 && fragment.shadowEnabled && fragment.intensityShadow
-					&& (fragment.modifier & 2) != 0)
-				fragmentColor = fragment.intensityColor;
-			const bool srcSelect = area1 ? fragment.area1SrcSelect : fragment.srcSelect;
-			const bool dstSelect = area1 ? fragment.area1DstSelect : fragment.dstSelect;
-			const BlendFactor srcBlend = area1 ? fragment.area1SrcBlend : fragment.srcBlend;
-			const BlendFactor dstBlend = area1 ? fragment.area1DstBlend : fragment.dstBlend;
-			const Color source = srcSelect ? secondary : fragmentColor;
-			const Color destination = dstSelect ? secondary : finalColor;
-			const Color result = blend(source, destination, srcBlend, dstBlend);
-			if (dstSelect)
-				secondary = result;
-			else
-				finalColor = result;
-		});
-		const Fragment& last = fragments.back();
-		if (last.dither)
+		const size_t rowOffset = static_cast<size_t>(y) * width_;
+		for (u32 x = 0; x < width_; ++x)
 		{
-			const u32 x = static_cast<u32>(offset % width_);
-			const u32 y = static_cast<u32>(offset / width_);
-			const u8 dither = ditherTable[(y & 3) * 4 + (x & 3)];
-			finalColor.r = static_cast<u8>(std::min(255, finalColor.r + dither / last.ditherDivisorR));
-			finalColor.g = static_cast<u8>(std::min(255, finalColor.g + dither / last.ditherDivisorG));
-			finalColor.b = static_cast<u8>(std::min(255, finalColor.b + dither / last.ditherDivisorB));
-			finalColor.a = static_cast<u8>(std::min(255, finalColor.a + 1 / last.ditherDivisorA));
+			const size_t offset = rowOffset + x;
+			auto& fragments = deferredFragments_[offset];
+			if (fragments.empty())
+				continue;
+			fragments.stableSort([](const Fragment& left, const Fragment& right) {
+				return left.depth < right.depth
+						|| (left.depth == right.depth && left.sequence < right.sequence);
+			});
+			Color finalColor = colorBuffer_[offset];
+			Color secondary = secondaryBuffer_[offset];
+			fragments.forEach([&](const Fragment& fragment) {
+				const bool area1 = fragment.shadowEnabled && (fragment.modifier & 2) != 0
+						&& fragment.hasArea1;
+				Color fragmentColor = area1 ? fragment.area1Color : fragment.color;
+				if (!area1 && fragment.shadowEnabled && fragment.intensityShadow
+						&& (fragment.modifier & 2) != 0)
+					fragmentColor = fragment.intensityColor;
+				const bool srcSelect = area1 ? fragment.area1SrcSelect : fragment.srcSelect;
+				const bool dstSelect = area1 ? fragment.area1DstSelect : fragment.dstSelect;
+				const BlendFactor srcBlend = area1 ? fragment.area1SrcBlend : fragment.srcBlend;
+				const BlendFactor dstBlend = area1 ? fragment.area1DstBlend : fragment.dstBlend;
+				const Color source = srcSelect ? secondary : fragmentColor;
+				const Color destination = dstSelect ? secondary : finalColor;
+				const Color result = blend(source, destination, srcBlend, dstBlend);
+				if (dstSelect)
+					secondary = result;
+				else
+					finalColor = result;
+			});
+			const Fragment& last = fragments.back();
+			if (last.dither)
+			{
+				const u8 dither = ditherTable[(y & 3) * 4 + (x & 3)];
+				finalColor.r = static_cast<u8>(std::min(255,
+						finalColor.r + dither / last.ditherDivisorR));
+				finalColor.g = static_cast<u8>(std::min(255,
+						finalColor.g + dither / last.ditherDivisorG));
+				finalColor.b = static_cast<u8>(std::min(255,
+						finalColor.b + dither / last.ditherDivisorB));
+				finalColor.a = static_cast<u8>(std::min(255,
+						finalColor.a + 1 / last.ditherDivisorA));
+			}
+			colorBuffer_[offset] = finalColor;
+			secondaryBuffer_[offset] = secondary;
 		}
-		colorBuffer_[offset] = finalColor;
-		secondaryBuffer_[offset] = secondary;
+	};
+#ifdef TARGET_MAC
+	if (height_ >= 16)
+	{
+		struct RowContext
+		{
+			decltype(resolveRow) *resolve;
+		} rowContext { &resolveRow };
+		dispatch_apply_f(height_, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+				&rowContext, [](void *opaque, size_t row) {
+					auto& context = *static_cast<RowContext *>(opaque);
+					(*context.resolve)(static_cast<u32>(row));
+				});
 	}
+	else
+#endif
+		for (u32 y = 0; y < height_; ++y)
+			resolveRow(y);
 }
 
 Color SoftwareRasterizer::pixel(u32 x, u32 y) const
