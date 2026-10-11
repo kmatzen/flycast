@@ -1046,10 +1046,32 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				dyU * dyU + dyV * dyV)) * fragmentState.mipDAdjust;
 		return result;
 	};
+	const PipelineState& area1State = state.useArea1VertexData || state.area1 == nullptr
+			? state : *state.area1;
 	const MipGradient mipGradients[2] {
 		prepareMipGradient(state, 0),
-		prepareMipGradient(state.useArea1VertexData || state.area1 == nullptr
-				? state : *state.area1, 1),
+		prepareMipGradient(area1State, 1),
+	};
+	struct SuperSampleEdgeOffset
+	{
+		s64 x[3];
+		s64 y[3];
+	};
+	auto prepareSuperSampleEdgeOffset = [&](const PipelineState& fragmentState) {
+		const s32 x = static_cast<s32>(std::lround(
+				CENTER_SAMPLE_OFFSET * fragmentState.nativeToHostScaleX));
+		const s32 y = static_cast<s32>(std::lround(
+				CENTER_SAMPLE_OFFSET * fragmentState.nativeToHostScaleY));
+		return SuperSampleEdgeOffset {
+			{ edgeStepX0 / SUBPIXEL_SCALE * x, edgeStepX1 / SUBPIXEL_SCALE * x,
+					edgeStepX2 / SUBPIXEL_SCALE * x },
+			{ edgeStepY0 / SUBPIXEL_SCALE * y, edgeStepY1 / SUBPIXEL_SCALE * y,
+					edgeStepY2 / SUBPIXEL_SCALE * y },
+		};
+	};
+	const SuperSampleEdgeOffset superSampleEdgeOffsets[2] {
+		prepareSuperSampleEdgeOffset(state),
+		prepareSuperSampleEdgeOffset(area1State),
 	};
 	const float vertexZ[3] {
 		vertices[0].z, vertices[1].z, vertices[2].z,
@@ -1139,7 +1161,6 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 					|| (state.area1 != nullptr && modifierArea1);
 			const PipelineState& fragmentState = area1 && !state.useArea1VertexData
 					? *state.area1 : state;
-			const s32 shadeSampleX = x * SUBPIXEL_SCALE + tspSampleOffset;
 			const float s0 = static_cast<float>(shadeW0 * inverseArea);
 			const float s1 = static_cast<float>(shadeW1 * inverseArea);
 			const float s2 = static_cast<float>(shadeW2 * inverseArea);
@@ -1199,10 +1220,10 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			if (fragmentState.texture)
 			{
 				const unsigned areaIndex = static_cast<unsigned>(area1);
-				auto projectedAt = [&](s32 sx, s32 sy) {
-					const float q0 = static_cast<float>(edge(points[1], points[2], sx, sy) * inverseArea);
-					const float q1 = static_cast<float>(edge(points[2], points[0], sx, sy) * inverseArea);
-					const float q2 = static_cast<float>(edge(points[0], points[1], sx, sy) * inverseArea);
+				auto projectedAt = [&](s64 edgeOffset0, s64 edgeOffset1, s64 edgeOffset2) {
+					const float q0 = static_cast<float>((shadeW0 + edgeOffset0) * inverseArea);
+					const float q1 = static_cast<float>((shadeW1 + edgeOffset1) * inverseArea);
+					const float q2 = static_cast<float>((shadeW2 + edgeOffset2) * inverseArea);
 					const float q = vertexZ[0] * q0 + vertexZ[1] * q1 + vertexZ[2] * q2;
 					const float uq = vertexUZ[areaIndex][0] * q0
 						 + vertexUZ[areaIndex][1] * q1 + vertexUZ[areaIndex][2] * q2;
@@ -1253,14 +1274,11 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 				Color texel = sampleTexture(fragmentState.texture, u, v, fragmentState, pvrD);
 				if (fragmentState.textureSuperSample)
 				{
-					const s32 superOffsetX = static_cast<s32>(std::lround(
-							CENTER_SAMPLE_OFFSET * fragmentState.nativeToHostScaleX));
-					const s32 superOffsetY = static_cast<s32>(std::lround(
-							CENTER_SAMPLE_OFFSET * fragmentState.nativeToHostScaleY));
-					const auto uv10 = projectedAt(shadeSampleX + superOffsetX, shadeSampleY);
-					const auto uv01 = projectedAt(shadeSampleX, shadeSampleY + superOffsetY);
-					const auto uv11 = projectedAt(shadeSampleX + superOffsetX,
-							shadeSampleY + superOffsetY);
+					const SuperSampleEdgeOffset& offsets = superSampleEdgeOffsets[areaIndex];
+					const auto uv10 = projectedAt(offsets.x[0], offsets.x[1], offsets.x[2]);
+					const auto uv01 = projectedAt(offsets.y[0], offsets.y[1], offsets.y[2]);
+					const auto uv11 = projectedAt(offsets.x[0] + offsets.y[0],
+							offsets.x[1] + offsets.y[1], offsets.x[2] + offsets.y[2]);
 					const Color samples[3] {
 						sampleTexture(fragmentState.texture, uv10[0], uv10[1], fragmentState, pvrD),
 						sampleTexture(fragmentState.texture, uv01[0], uv01[1], fragmentState, pvrD),
