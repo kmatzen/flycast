@@ -148,6 +148,24 @@ u32 Sh4Interpreter::ExecuteUbcFallback(Sh4Context *ctx, u16 op, u32 pc)
 	return ctx->pc;
 }
 
+void Sh4Interpreter::ExecuteFallbackHandler(Sh4Context *ctx, u16 op,
+		OpCallFP *handler)
+{
+	Sh4Interpreter executor;
+	executor.ctx = ctx;
+	executor.dynarecUbcFallback = true;
+	Sh4Interpreter *previous = Instance;
+	Instance = &executor;
+	try {
+		handler(ctx, op);
+	}
+	catch (...) {
+		Instance = previous;
+		throw;
+	}
+	Instance = previous;
+}
+
 u16 Sh4Interpreter::ReadNexOp(bool checkPreExecutionBreak)
 {
 	u32 addr = ctx->pc;

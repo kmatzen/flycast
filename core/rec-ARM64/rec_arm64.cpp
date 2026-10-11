@@ -98,7 +98,7 @@ static bool interpreter_fallback(Sh4Context *ctx, u16 op, OpCallFP *oph, u32 pc)
 			throw SH4ThrownException(pc & ~1, Sh4Ex_IllegalInstr);
 		if (OpDesc[op]->ClearsFpuCause(op))
 			ctx->fpscr.full &= ~0x3f000u;
-		oph(ctx, op);
+		Sh4Interpreter::ExecuteFallbackHandler(ctx, op, oph);
 		return false;
 	} catch (SH4ThrownException& ex) {
 		if (pc & 1)

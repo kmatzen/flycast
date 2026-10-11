@@ -26,6 +26,7 @@ public:
 			Instance->RecordUbcOperandAccess(address, size, write, data, hasData);
 	}
 	static u32 ExecuteUbcFallback(Sh4Context *ctx, u16 op, u32 pc);
+	static void ExecuteFallbackHandler(Sh4Context *ctx, u16 op, OpCallFP *handler);
 	Sh4Context *getContext() { return ctx; }
 
 	static Sh4Interpreter *Instance;

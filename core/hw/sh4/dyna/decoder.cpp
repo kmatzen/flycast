@@ -108,6 +108,10 @@ static u32 dec_jump_simm12(u32 op)
 {
 	return state.cpu.rpc + GetSImm12(op)*2 + 4;
 }
+static void dec_set_pr()
+{
+	Emit(shop_mov32, reg_pr, mk_imm(state.cpu.rpc + 4));
+}
 static void dec_write_sr(shil_param src)
 {
 	Emit(shop_and, mk_reg(reg_sr_status), src, mk_imm(sr_t::MASK));
@@ -161,26 +165,24 @@ sh4dec(i0100_nnnn_0010_1011)
 //bsr <bdisp12>
 sh4dec(i1011_iiii_iiii_iiii)
 {
-	// PR'' is visible to STS PR in the delay slot, an LDS PR in the slot wins,
-	// and a re-execution exception inhibits the write. SHIL cannot represent
-	// that pending-register state, so execute the indivisible pair precisely.
-	dec_fallback(op);
-	dec_DynamicSet(reg_nextpc);
-	dec_End(NullAddress, BET_DynamicCall, false);
+	dec_set_pr();
+	dec_End(dec_jump_simm12(op), BET_StaticCall, true);
 }
 //bsrf <REG_N>
 sh4dec(i0000_nnnn_0000_0011)
 {
-	dec_fallback(op);
-	dec_DynamicSet(reg_nextpc);
-	dec_End(NullAddress, BET_DynamicCall, false);
+	u32 n = GetN(op);
+	dec_set_pr();
+	dec_DynamicSet(reg_r0 + n, state.cpu.rpc + 4);
+	dec_End(NullAddress, BET_DynamicCall, true);
 }
 //jsr @<REG_N>
 sh4dec(i0100_nnnn_0000_1011) 
 {
-	dec_fallback(op);
-	dec_DynamicSet(reg_nextpc);
-	dec_End(NullAddress, BET_DynamicCall, false);
+	u32 n = GetN(op);
+	dec_set_pr();
+	dec_DynamicSet(reg_r0 + n);
+	dec_End(NullAddress, BET_DynamicCall, true);
 }
 //rts
 sh4dec(i0000_0000_0000_1011)
