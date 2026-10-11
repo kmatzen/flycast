@@ -68,7 +68,12 @@ float wrapCoordinate(float coordinate, bool clamp, bool flip)
 	{
 		float period = std::floor(coordinate);
 		float fraction = coordinate - period;
-		if (std::fmod(std::abs(period), 2.f) >= 1.f)
+		const bool periodFitsInteger = period > static_cast<float>(std::numeric_limits<s64>::min())
+				&& period < static_cast<float>(std::numeric_limits<s64>::max());
+		const bool oddPeriod = periodFitsInteger
+				? (static_cast<s64>(period) & 1) != 0
+				: std::fmod(std::abs(period), 2.f) >= 1.f;
+		if (oddPeriod)
 			fraction = 1.f - fraction;
 		return fraction;
 	}
@@ -81,6 +86,17 @@ u32 wrapTexel(s32 coordinate, u32 size, bool clamp, bool flip)
 		return 0;
 	if (clamp)
 		return static_cast<u32>(std::clamp<s32>(coordinate, 0, static_cast<s32>(size) - 1));
+	// Native PVR textures are powers of two. Masking is exactly equivalent to
+	// signed modulo with positive wrap, but avoids integer division for every
+	// point sample (and eight times per bilinear sample).
+	if ((size & (size - 1)) == 0)
+	{
+		if (!flip)
+			return static_cast<u32>(coordinate) & (size - 1);
+		const u32 periodMask = size * 2 - 1;
+		const u32 wrapped = static_cast<u32>(coordinate) & periodMask;
+		return wrapped < size ? wrapped : periodMask - wrapped;
+	}
 
 	const s32 signedSize = static_cast<s32>(size);
 	if (flip)
@@ -330,11 +346,14 @@ Color SoftwareRasterizer::blend(Color source, Color destination, BlendFactor sou
 	};
 }
 
-Color SoftwareRasterizer::sampleTexture(TextureView texture, float u, float v,
+Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, float v,
 		const PipelineState& state, float pvrD)
 {
 	if (!texture)
 		return { 255, 255, 255, 255 };
+	const Color *pixels = texture.pixels;
+	u32 width = texture.width;
+	u32 height = texture.height;
 	if (!std::isfinite(pvrD))
 		pvrD = 1.f;
 	if (texture.mipLevelCount > 1)
@@ -348,19 +367,19 @@ Color SoftwareRasterizer::sampleTexture(TextureView texture, float u, float v,
 			selected = std::max(0.f, selected - 1.f);
 		const u32 level = std::min<u32>(texture.mipLevelCount - 1,
 				static_cast<u32>(selected) + (state.trilinearPassB ? 1u : 0u));
-		texture.pixels = texture.mipLevels[level];
-		texture.width = std::max(1u, texture.width >> level);
-		texture.height = std::max(1u, texture.height >> level);
+		pixels = texture.mipLevels[level];
+		width = std::max(1u, width >> level);
+		height = std::max(1u, height >> level);
 	}
 	u = wrapCoordinate(u, state.clampU, state.flipU);
 	v = wrapCoordinate(v, state.clampV, state.flipV);
 	const float sampleAdjustment = state.texelSampleCenter ? .5f : 0.f;
-	const float texelX = u * texture.width - sampleAdjustment;
-	const float texelY = v * texture.height - sampleAdjustment;
+	const float texelX = u * width - sampleAdjustment;
+	const float texelY = v * height - sampleAdjustment;
 	auto fetch = [&](s32 x, s32 y) {
-		const u32 sx = wrapTexel(x, texture.width, state.clampU, state.flipU);
-		const u32 sy = wrapTexel(y, texture.height, state.clampV, state.flipV);
-		return texture.pixels[static_cast<size_t>(sy) * texture.width + sx];
+		const u32 sx = wrapTexel(x, width, state.clampU, state.flipU);
+		const u32 sy = wrapTexel(y, height, state.clampV, state.flipV);
+		return pixels[static_cast<size_t>(sy) * width + sx];
 	};
 	if (!state.bilinearFilter)
 	{
@@ -373,10 +392,14 @@ Color SoftwareRasterizer::sampleTexture(TextureView texture, float u, float v,
 
 	const s32 x0 = static_cast<s32>(std::floor(texelX));
 	const s32 y0 = static_cast<s32>(std::floor(texelY));
-	const Color c00 = fetch(x0, y0);
-	const Color c10 = fetch(x0 + 1, y0);
-	const Color c01 = fetch(x0, y0 + 1);
-	const Color c11 = fetch(x0 + 1, y0 + 1);
+	const u32 sx0 = wrapTexel(x0, width, state.clampU, state.flipU);
+	const u32 sx1 = wrapTexel(x0 + 1, width, state.clampU, state.flipU);
+	const u32 sy0 = wrapTexel(y0, height, state.clampV, state.flipV);
+	const u32 sy1 = wrapTexel(y0 + 1, height, state.clampV, state.flipV);
+	const Color c00 = pixels[static_cast<size_t>(sy0) * width + sx0];
+	const Color c10 = pixels[static_cast<size_t>(sy0) * width + sx1];
+	const Color c01 = pixels[static_cast<size_t>(sy1) * width + sx0];
+	const Color c11 = pixels[static_cast<size_t>(sy1) * width + sx1];
 	const float tx = texelX - x0;
 	const float ty = texelY - y0;
 	auto bilinear = [&](auto member) {
@@ -851,6 +874,41 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 	const s64 edgeStepX0 = -(static_cast<s64>(points[2].y) - points[1].y) * SUBPIXEL_SCALE;
 	const s64 edgeStepX1 = -(static_cast<s64>(points[0].y) - points[2].y) * SUBPIXEL_SCALE;
 	const s64 edgeStepX2 = -(static_cast<s64>(points[1].y) - points[0].y) * SUBPIXEL_SCALE;
+	const s64 edgeStepY0 = (static_cast<s64>(points[2].x) - points[1].x) * SUBPIXEL_SCALE;
+	const s64 edgeStepY1 = (static_cast<s64>(points[0].x) - points[2].x) * SUBPIXEL_SCALE;
+	const s64 edgeStepY2 = (static_cast<s64>(points[1].x) - points[0].x) * SUBPIXEL_SCALE;
+	const float barycentricDx[3] {
+		static_cast<float>(edgeStepX0 * inverseArea),
+		static_cast<float>(edgeStepX1 * inverseArea),
+		static_cast<float>(edgeStepX2 * inverseArea),
+	};
+	const float barycentricDy[3] {
+		static_cast<float>(edgeStepY0 * inverseArea),
+		static_cast<float>(edgeStepY1 * inverseArea),
+		static_cast<float>(edgeStepY2 * inverseArea),
+	};
+	const float qDxHost = vertices[0].z * barycentricDx[0]
+			+ vertices[1].z * barycentricDx[1] + vertices[2].z * barycentricDx[2];
+	const float qDyHost = vertices[0].z * barycentricDy[0]
+			+ vertices[1].z * barycentricDy[1] + vertices[2].z * barycentricDy[2];
+	auto attributeStep = [&](bool area1, bool u, const float *step) {
+		const float a0 = u ? (area1 ? vertices[0].u1 : vertices[0].u)
+				: (area1 ? vertices[0].v1 : vertices[0].v);
+		const float a1 = u ? (area1 ? vertices[1].u1 : vertices[1].u)
+				: (area1 ? vertices[1].v1 : vertices[1].v);
+		const float a2 = u ? (area1 ? vertices[2].u1 : vertices[2].u)
+				: (area1 ? vertices[2].v1 : vertices[2].v);
+		return a0 * vertices[0].z * step[0] + a1 * vertices[1].z * step[1]
+				+ a2 * vertices[2].z * step[2];
+	};
+	const float uqDxHost[2] { attributeStep(false, true, barycentricDx),
+		attributeStep(true, true, barycentricDx) };
+	const float uqDyHost[2] { attributeStep(false, true, barycentricDy),
+		attributeStep(true, true, barycentricDy) };
+	const float vqDxHost[2] { attributeStep(false, false, barycentricDx),
+		attributeStep(true, false, barycentricDx) };
+	const float vqDyHost[2] { attributeStep(false, false, barycentricDy),
+		attributeStep(true, false, barycentricDy) };
 
 	auto rasterizeRow = [&](s32 y)
 	{
@@ -945,41 +1003,41 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			float pvrD = 1.f;
 			if (fragmentState.texture)
 			{
+				const float vertexU0 = area1 ? vertices[0].u1 : vertices[0].u;
+				const float vertexU1 = area1 ? vertices[1].u1 : vertices[1].u;
+				const float vertexU2 = area1 ? vertices[2].u1 : vertices[2].u;
+				const float vertexV0 = area1 ? vertices[0].v1 : vertices[0].v;
+				const float vertexV1 = area1 ? vertices[1].v1 : vertices[1].v;
+				const float vertexV2 = area1 ? vertices[2].v1 : vertices[2].v;
 				auto projectedAt = [&](s32 sx, s32 sy) {
 					const float q0 = static_cast<float>(edge(points[1], points[2], sx, sy) * inverseArea);
 					const float q1 = static_cast<float>(edge(points[2], points[0], sx, sy) * inverseArea);
 					const float q2 = static_cast<float>(edge(points[0], points[1], sx, sy) * inverseArea);
 					const float q = vertices[0].z * q0 + vertices[1].z * q1 + vertices[2].z * q2;
-					const float uq = (area1 ? vertices[0].u1 : vertices[0].u) * vertices[0].z * q0
-						 + (area1 ? vertices[1].u1 : vertices[1].u) * vertices[1].z * q1
-						 + (area1 ? vertices[2].u1 : vertices[2].u) * vertices[2].z * q2;
-					const float vq = (area1 ? vertices[0].v1 : vertices[0].v) * vertices[0].z * q0
-						 + (area1 ? vertices[1].v1 : vertices[1].v) * vertices[1].z * q1
-						 + (area1 ? vertices[2].v1 : vertices[2].v) * vertices[2].z * q2;
+					const float uq = vertexU0 * vertices[0].z * q0
+						 + vertexU1 * vertices[1].z * q1 + vertexU2 * vertices[2].z * q2;
+					const float vq = vertexV0 * vertices[0].z * q0
+						 + vertexV1 * vertices[1].z * q1 + vertexV2 * vertices[2].z * q2;
 					const float reciprocal = q == 0.f ? 0.f : 1.f / q;
 					return std::array<float, 5> {
 						uq * reciprocal, vq * reciprocal, q, uq, vq,
 					};
 				};
-				const auto uv = projectedAt(shadeSampleX, shadeSampleY);
-				const float u = uv[0];
-				const float v = uv[1];
+				const float uq = vertexU0 * vertices[0].z * s0
+						+ vertexU1 * vertices[1].z * s1 + vertexU2 * vertices[2].z * s2;
+				const float vq = vertexV0 * vertices[0].z * s0
+						+ vertexV1 * vertices[1].z * s1 + vertexV2 * vertices[2].z * s2;
+				const float u = uq * inverseZ;
+				const float v = vq * inverseZ;
 				if (fragmentState.texture.mipLevelCount > 1)
 				{
-					const auto uvX = projectedAt(shadeSampleX + SUBPIXEL_SCALE, shadeSampleY);
-					const auto uvY = projectedAt(shadeSampleX, shadeSampleY + SUBPIXEL_SCALE);
-					const float dqDxHost = uvX[2] - uv[2];
-					const float dqDyHost = uvY[2] - uv[2];
-					const float duqDxHost = uvX[3] - uv[3];
-					const float duqDyHost = uvY[3] - uv[3];
-					const float dvqDxHost = uvX[4] - uv[4];
-					const float dvqDyHost = uvY[4] - uv[4];
-					const float dqDx = dqDxHost * fragmentState.nativeToHostScaleX;
-					const float dqDy = dqDyHost * fragmentState.nativeToHostScaleY;
-					const float duqDx = duqDxHost * fragmentState.nativeToHostScaleX;
-					const float duqDy = duqDyHost * fragmentState.nativeToHostScaleY;
-					const float dvqDx = dvqDxHost * fragmentState.nativeToHostScaleX;
-					const float dvqDy = dvqDyHost * fragmentState.nativeToHostScaleY;
+					const float dqDx = qDxHost * fragmentState.nativeToHostScaleX;
+					const float dqDy = qDyHost * fragmentState.nativeToHostScaleY;
+					const unsigned areaIndex = static_cast<unsigned>(area1);
+					const float duqDx = uqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
+					const float duqDy = uqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
+					const float dvqDx = vqDxHost[areaIndex] * fragmentState.nativeToHostScaleX;
+					const float dvqDy = vqDyHost[areaIndex] * fragmentState.nativeToHostScaleY;
 					float referenceQ;
 					float referenceUQ;
 					float referenceVQ;
@@ -995,11 +1053,13 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 								- fragmentState.nativeOriginX;
 						const float sampleY = shadeSampleY / static_cast<float>(SUBPIXEL_SCALE)
 								- fragmentState.nativeOriginY;
-						referenceQ = uv[2] - dqDxHost * sampleX - dqDyHost * sampleY;
-						referenceUQ = uv[3] - duqDxHost * sampleX - duqDyHost * sampleY;
-						referenceVQ = uv[4] - dvqDxHost * sampleX - dvqDyHost * sampleY;
+						referenceQ = shadeZ - qDxHost * sampleX - qDyHost * sampleY;
+						referenceUQ = uq - uqDxHost[areaIndex] * sampleX
+								- uqDyHost[areaIndex] * sampleY;
+						referenceVQ = vq - vqDxHost[areaIndex] * sampleX
+								- vqDyHost[areaIndex] * sampleY;
 					}
-					const float denominator = uv[2] * uv[2];
+					const float denominator = shadeZ * shadeZ;
 					const float reciprocalDenominator = denominator == 0.f ? 0.f : 1.f / denominator;
 					const float dxU = (duqDx * referenceQ - dqDx * referenceUQ)
 							* reciprocalDenominator * fragmentState.texture.width;
@@ -1009,7 +1069,8 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 							* reciprocalDenominator * fragmentState.texture.width;
 					const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ)
 							* reciprocalDenominator * fragmentState.texture.height;
-					const float footprint = std::max(std::hypot(dxU, dxV), std::hypot(dyU, dyV));
+					const float footprint = std::sqrt(std::max(dxU * dxU + dxV * dxV,
+							dyU * dyU + dyV * dyV));
 					// Values below one still select the full-resolution map, but their
 					// fractional part remains significant to trilinear Pass A/B.
 					pvrD = std::max(0.f, footprint * fragmentState.mipDAdjust);

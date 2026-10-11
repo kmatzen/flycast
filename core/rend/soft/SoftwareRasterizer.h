@@ -197,7 +197,7 @@ public:
 			const Vertex& b, const Vertex& c);
 	static Color blend(Color source, Color destination, BlendFactor sourceFactor,
 			BlendFactor destinationFactor);
-	static Color sampleTexture(TextureView texture, float u, float v,
+	static Color sampleTexture(const TextureView& texture, float u, float v,
 			const PipelineState& state, float pvrD = 1.f);
 	static TextureView makeTextureView(const Color *pixels, u32 width, u32 height,
 			bool mipmapped);
