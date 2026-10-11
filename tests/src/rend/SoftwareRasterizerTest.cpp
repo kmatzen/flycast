@@ -548,6 +548,28 @@ TEST(SoftwareRasterizer, SelectsFogTableAddressFromIeeeExponentAndMantissa)
 	EXPECT_LT(coefficient, 16.f / 255.f);
 }
 
+TEST(SoftwareRasterizer, AppliesColorClampBeforeFog)
+{
+	SoftwareRasterizer rasterizer(1, 1);
+	u32 table[128] {};
+	reinterpret_cast<u8 *>(table)[0] = 128;
+	reinterpret_cast<u8 *>(table)[1] = 128;
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.colorClamp = true;
+	state.clampMax = { 100, 100, 100, 100 };
+	state.fogMode = 0;
+	state.fogRamColor = { 255, 255, 255, 255 };
+	state.fogDensity = 1.f;
+	state.fogTable = table;
+	const Color input { 200, 200, 200, 200 };
+	rasterizer.drawTriangle({ 0, 0, 1, input }, { 2, 0, 1, input },
+			{ 0, 2, 1, input }, state);
+	// The PVR clamps the TSP result to 100 first, then applies 128/255 fog.
+	// Applying fog before the clamp would leave RGB at 100 instead of 178.
+	EXPECT_EQ(rasterizer.pixel(0, 0), (Color { 178, 178, 178, 100 }));
+}
+
 TEST(SoftwareRasterizer, AppliesModifierVolumeShadow)
 {
 	SoftwareRasterizer rasterizer(1, 1);
