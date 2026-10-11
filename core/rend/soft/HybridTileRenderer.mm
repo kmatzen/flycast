@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace rend::soft::hybrid {
 namespace {
@@ -17,12 +18,10 @@ struct Constants {
   u32 width;
   u32 height;
   u32 tilesX;
-  u32 textureWidth;
-  u32 textureHeight;
   u32 reserved;
 };
 
-static_assert(sizeof(Constants) == 24);
+static_assert(sizeof(Constants) == 16);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -35,7 +34,11 @@ struct Triangle {
     float u[3];
     float v[3];
     uint color[3];
-    uint flags;
+    uint textureOffset;
+    uint textureWidth;
+    uint textureHeight;
+    uint state;
+    uint alphaReference;
     int minX;
     int minY;
     int maxX;
@@ -46,8 +49,6 @@ struct Constants {
     uint width;
     uint height;
     uint tilesX;
-    uint textureWidth;
-    uint textureHeight;
     uint reserved;
 };
 
@@ -74,37 +75,112 @@ inline uint packColor(float4 value)
     return bytes.x | (bytes.y << 8) | (bytes.z << 16) | (bytes.w << 24);
 }
 
-inline uint sourceAlphaBlend(uint source, uint destination)
+inline bool depthTest(uint mode, float source, float destination)
 {
-    const uint alpha = source >> 24;
-    const uint inverseAlpha = 255 - alpha;
+    switch (mode & 7) {
+    case 0: return false;
+    case 1: return source < destination;
+    case 2: return source == destination;
+    case 3: return source <= destination;
+    case 4: return source > destination;
+    case 5: return source != destination;
+    case 6: return source >= destination;
+    default: return true;
+    }
+}
+
+inline uint factor(uint mode, uint source, uint destination,
+        bool sourceTerm, uint shift)
+{
+    const uint other = sourceTerm ? channel(destination, shift) : channel(source, shift);
+    switch (mode & 7) {
+    case 0: return 0;
+    case 1: return 255;
+    case 2: return other;
+    case 3: return 255 - other;
+    case 4: return channel(source, 24);
+    case 5: return 255 - channel(source, 24);
+    case 6: return channel(destination, 24);
+    default: return 255 - channel(destination, 24);
+    }
+}
+
+inline uint blend(uint source, uint destination, uint sourceFactor, uint destinationFactor)
+{
     uint result = 0;
     for (uint shift = 0; shift < 32; shift += 8) {
-        const uint sourceChannel = (source >> shift) & 0xff;
-        const uint destinationChannel = (destination >> shift) & 0xff;
-        const uint blended = min(255u, (sourceChannel * alpha
-                + destinationChannel * inverseAlpha + 127) / 255);
+        const uint sf = factor(sourceFactor, source, destination, true, shift);
+        const uint df = factor(destinationFactor, source, destination, false, shift);
+        const uint blended = min(255u, (channel(source, shift) * sf
+                + channel(destination, shift) * df + 127) / 255);
         result |= blended << shift;
     }
     return result;
 }
 
-inline uint sampleBilinear(const device uint *texture, float2 uv,
-        constant Constants& constants)
+inline uint sourceAlphaBlend(uint source, uint destination)
 {
-    uv -= floor(uv);
-    const float2 size = float2(constants.textureWidth, constants.textureHeight);
-    const float2 texel = uv * size - .5f;
+    const uint alpha = channel(source, 24);
+    const uint inverseAlpha = 255 - alpha;
+    uint result = 0;
+    for (uint shift = 0; shift < 32; shift += 8) {
+        const uint blended = (channel(source, shift) * alpha
+                + channel(destination, shift) * inverseAlpha + 127) / 255;
+        result |= blended << shift;
+    }
+    return result;
+}
+
+inline float wrapCoordinate(float coordinate, bool clampAxis, bool flipAxis)
+{
+    if (clampAxis)
+        return clamp(coordinate, 0.0f, 1.0f);
+    const float period = floor(coordinate);
+    float fraction = coordinate - period;
+    if (flipAxis && (long(period) & 1) != 0)
+        fraction = 1.0f - fraction;
+    return fraction;
+}
+
+inline uint wrapTexel(int coordinate, uint size, bool clampAxis, bool flipAxis)
+{
+    if (size <= 1)
+        return 0;
+    if (clampAxis)
+        return uint(clamp(coordinate, 0, int(size) - 1));
+    if (!flipAxis)
+        return uint(coordinate) & (size - 1);
+    const uint periodMask = size * 2 - 1;
+    const uint wrapped = uint(coordinate) & periodMask;
+    return wrapped < size ? wrapped : periodMask - wrapped;
+}
+
+inline uint sampleTexture(const device uint *texture, const Triangle t, float2 uv)
+{
+    const bool clampU = (t.state & (1u << 6)) != 0;
+    const bool clampV = (t.state & (1u << 7)) != 0;
+    const bool flipU = (t.state & (1u << 8)) != 0;
+    const bool flipV = (t.state & (1u << 9)) != 0;
+    uv.x = wrapCoordinate(uv.x, clampU, flipU);
+    uv.y = wrapCoordinate(uv.y, clampV, flipV);
+    const float adjustment = (t.state & (1u << 10)) != 0 ? .5f : 0.0f;
+    const float2 texel = uv * float2(t.textureWidth, t.textureHeight) - adjustment;
     const int2 base = int2(floor(texel));
-    // The supported subset uses native power-of-two PVR textures.
-    const uint2 mask = uint2(constants.textureWidth - 1, constants.textureHeight - 1);
-    const uint2 p0 = uint2(base) & mask;
-    const uint2 p1 = uint2(base + 1) & mask;
+    if ((t.state & (1u << 5)) == 0) {
+        const int2 nearest = int2(floor(texel + .5f));
+        const uint x = wrapTexel(nearest.x, t.textureWidth, clampU, flipU);
+        const uint y = wrapTexel(nearest.y, t.textureHeight, clampV, flipV);
+        return texture[t.textureOffset + y * t.textureWidth + x];
+    }
+    const uint x0 = wrapTexel(base.x, t.textureWidth, clampU, flipU);
+    const uint x1 = wrapTexel(base.x + 1, t.textureWidth, clampU, flipU);
+    const uint y0 = wrapTexel(base.y, t.textureHeight, clampV, flipV);
+    const uint y1 = wrapTexel(base.y + 1, t.textureHeight, clampV, flipV);
     const uint samples[4] = {
-        texture[p0.y * constants.textureWidth + p0.x],
-        texture[p0.y * constants.textureWidth + p1.x],
-        texture[p1.y * constants.textureWidth + p0.x],
-        texture[p1.y * constants.textureWidth + p1.x],
+        texture[t.textureOffset + y0 * t.textureWidth + x0],
+        texture[t.textureOffset + y0 * t.textureWidth + x1],
+        texture[t.textureOffset + y1 * t.textureWidth + x0],
+        texture[t.textureOffset + y1 * t.textureWidth + x1],
     };
     const float2 fraction = texel - float2(base);
     float4 result;
@@ -121,12 +197,26 @@ inline uint sampleBilinear(const device uint *texture, float2 uv,
     return packColor(result);
 }
 
-inline uint modulate(uint base, uint texel)
+inline uint applyTexture(uint base, uint texel, uint instruction)
 {
+    if (instruction == 0)
+        return texel;
     float4 result;
+    if (instruction == 2) {
+        const float alpha = float(channel(texel, 24)) / 255.0f;
+        for (uint component = 0; component < 3; ++component) {
+            const uint shift = component * 8;
+            result[component] = float(channel(base, shift))
+                    + (float(channel(texel, shift)) - float(channel(base, shift))) * alpha;
+        }
+        result.w = float(channel(base, 24));
+        return packColor(result);
+    }
     for (uint component = 0; component < 4; ++component) {
         const uint shift = component * 8;
-        result[component] = float(channel(base, shift) * channel(texel, shift)) / 255.0f;
+        result[component] = component == 3 && instruction == 1
+                ? float(channel(texel, shift))
+                : float(channel(base, shift) * channel(texel, shift)) / 255.0f;
     }
     return packColor(result);
 }
@@ -164,7 +254,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const float s1 = float(w1) / float(area);
         const float s2 = float(w2) / float(area);
         const float z = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
-        if (z < depth)
+        if (!depthTest(t.state, z, depth))
             continue;
         const float inverseZ = z == 0.0f ? 0.0f : 1.0f / z;
         float4 interpolated;
@@ -175,15 +265,33 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                     + float(channel(t.color[1], shift)) * t.z[1] * s1
                     + float(channel(t.color[2], shift)) * t.z[2] * s2) * inverseZ;
         }
-        const float u = (t.u[0] * t.z[0] * s0 + t.u[1] * t.z[1] * s1
-                + t.u[2] * t.z[2] * s2) * inverseZ;
-        const float v = (t.v[0] * t.z[0] * s0 + t.v[1] * t.z[1] * s1
-                + t.v[2] * t.z[2] * s2) * inverseZ;
-        const uint source = modulate(packColor(interpolated),
-                sampleBilinear(texture, float2(u, v), constants));
-        if ((t.flags & 2) != 0)
+        uint source = packColor(interpolated);
+        if ((t.state & (1u << 11)) == 0)
+            source |= 0xff000000u;
+        if ((t.state & (1u << 4)) != 0) {
+            const float u = (t.u[0] * t.z[0] * s0 + t.u[1] * t.z[1] * s1
+                    + t.u[2] * t.z[2] * s2) * inverseZ;
+            const float v = (t.v[0] * t.z[0] * s0 + t.v[1] * t.z[1] * s1
+                    + t.v[2] * t.z[2] * s2) * inverseZ;
+            uint texel = sampleTexture(texture, t, float2(u, v));
+            if ((t.state & (1u << 12)) != 0)
+                texel |= 0xff000000u;
+            source = applyTexture(source, texel, (t.state >> 14) & 3);
+        }
+        if ((t.state & (1u << 13)) != 0 && channel(source, 24) < t.alphaReference)
+            continue;
+        if ((t.state & (1u << 13)) != 0)
+            source |= 0xff000000u;
+        if ((t.state & (1u << 3)) != 0)
             depth = z;
-        color = (t.flags & 1) != 0 ? sourceAlphaBlend(source, color) : source;
+        const uint sourceFactor = (t.state >> 16) & 7;
+        const uint destinationFactor = (t.state >> 19) & 7;
+        if (sourceFactor == 1 && destinationFactor == 0)
+            color = source;
+        else if (sourceFactor == 4 && destinationFactor == 5)
+            color = sourceAlphaBlend(source, color);
+        else
+            color = blend(source, color, sourceFactor, destinationFactor);
     }
     colors[offset] = color;
     depths[offset] = depth;
@@ -243,11 +351,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   if (!metal.valid() || frame.width == 0 || frame.height == 0 ||
       frame.triangles == nullptr || frame.triangles->empty() ||
       frame.texture == nullptr || frame.texture->empty() ||
-      frame.textureWidth == 0 || frame.textureHeight == 0 ||
-      (frame.textureWidth & (frame.textureWidth - 1)) != 0 ||
-      (frame.textureHeight & (frame.textureHeight - 1)) != 0 ||
-      frame.texture->size() !=
-          static_cast<size_t>(frame.textureWidth) * frame.textureHeight)
+      frame.texture->size() > std::numeric_limits<u32>::max())
     return false;
 
   const auto encodeStart = std::chrono::steady_clock::now();
@@ -259,7 +363,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     if (triangle.minX < 0 || triangle.minY < 0 ||
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
-        triangle.maxY >= static_cast<s32>(frame.height) || triangle.flags > 3)
+        triangle.maxY >= static_cast<s32>(frame.height) ||
+        triangle.alphaReference > 255 || (triangle.state >> 22) != 0)
       return false;
     const s64 area = (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
                          (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -
@@ -272,6 +377,17 @@ bool render(const Frame &frame, std::vector<u32> &colors,
           !std::isfinite(triangle.u[vertex]) ||
           !std::isfinite(triangle.v[vertex]))
         return false;
+    if ((triangle.state & Textured) != 0) {
+      if (triangle.textureWidth == 0 || triangle.textureHeight == 0 ||
+          (triangle.textureWidth & (triangle.textureWidth - 1)) != 0 ||
+          (triangle.textureHeight & (triangle.textureHeight - 1)) != 0)
+        return false;
+      const size_t textureEnd =
+          static_cast<size_t>(triangle.textureOffset) +
+          static_cast<size_t>(triangle.textureWidth) * triangle.textureHeight;
+      if (textureEnd > frame.texture->size())
+        return false;
+    }
     for (s32 y = triangle.minY / static_cast<s32>(TileSize);
          y <= triangle.maxY / static_cast<s32>(TileSize); ++y)
       for (s32 x = triangle.minX / static_cast<s32>(TileSize);
@@ -299,8 +415,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil)
     return false;
-  const Constants constants{frame.width,        frame.height,        tilesX,
-                            frame.textureWidth, frame.textureHeight, 0};
+  const Constants constants{frame.width, frame.height, tilesX, 0};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
