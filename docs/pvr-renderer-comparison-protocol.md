@@ -2885,3 +2885,24 @@ performance comparison or an argument to disable VSync. Application SHA-256:
 `6fa0a9bc391a556a6126121e7e2ae82a198ccfc889239f4f81d09e43ca6d1fba`.
 Fast-forward uses the same settings callback but was not independently driven
 through the interactive frontend in these checks.
+
+### First native Seaman window inspection
+
+A bounded 90-second native run with null audio reached Seaman's title screen.
+The actual test process's window was identified by PID, then captured with
+macOS window capture and visually inspected. The image shows the foliage,
+yellow Seaman signs, and legible “Press Start Button” text filling the 4:3
+game area. This excludes a black or visibly mis-oriented window at that
+instant; it does not exclude intermittent flashing or establish exact colors.
+
+Capture: `/tmp/pvr-native-seaman-game-20261012.png`, SHA-256
+`e877eed27ebc266a1829e79aaff560fb17c30467d68038db106aff0e69ef1995`.
+Runtime log: `/tmp/pvr-native-visual-20261012.log`.
+Application SHA-256:
+`6fa0a9bc391a556a6126121e7e2ae82a198ccfc889239f4f81d09e43ca6d1fba`.
+A separate installed Flycast instance was open; an initial name-based capture
+selected its game browser and is not native-test evidence. The PID-specific
+capture above is the relevant one. That other instance was left untouched.
+A Return key was sent to the test process near the bounded run's end, but no
+post-input frame was captured, so no successful menu navigation is claimed.
+This is a title-screen visual check, not a playthrough or matched-renderer diff.
