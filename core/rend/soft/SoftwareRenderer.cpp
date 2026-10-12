@@ -151,6 +151,9 @@ public:
 
 	bool Render() override
 	{
+		const bool traceHybrid = std::getenv("FLYCAST_HYBRID_TRACE") != nullptr
+				|| std::getenv("FLYCAST_HYBRID_TIMING") != nullptr;
+		const auto renderWallStart = std::chrono::steady_clock::now();
 		if (rendContext == nullptr)
 			return false;
 		const u32 width = std::max(1u, rendContext->framebufferWidth);
@@ -250,6 +253,35 @@ public:
 			frameReady = true;
 			frameAspectRatio = getOutputFramebufferAspectRatio();
 			clearLastFrame = false;
+			if (traceHybrid)
+			{
+				const auto now = std::chrono::steady_clock::now();
+				const double renderMilliseconds =
+						std::chrono::duration<double, std::milli>(
+								now - renderWallStart).count();
+				static auto cadenceStart = now;
+				static u32 cadenceFrames = 0;
+				static double renderTotalMilliseconds = 0.;
+				static double renderMaximumMilliseconds = 0.;
+				++cadenceFrames;
+				renderTotalMilliseconds += renderMilliseconds;
+				renderMaximumMilliseconds = std::max(
+						renderMaximumMilliseconds, renderMilliseconds);
+				const double cadenceSeconds = std::chrono::duration<double>(
+						now - cadenceStart).count();
+				if (cadenceSeconds >= 2.)
+				{
+					std::fprintf(stderr, "HYBRID cadence frames=%u seconds=%.3f fps=%.3f render_avg=%.3f render_max=%.3f\n",
+							cadenceFrames, cadenceSeconds,
+							cadenceFrames / cadenceSeconds,
+							renderTotalMilliseconds / cadenceFrames,
+							renderMaximumMilliseconds);
+					cadenceStart = now;
+					cadenceFrames = 0;
+					renderTotalMilliseconds = 0.;
+					renderMaximumMilliseconds = 0.;
+				}
+			}
 			return true;
 		}
 		std::vector<Color> hybridVerification;
@@ -479,6 +511,9 @@ public:
 
 	bool drawFrame()
 	{
+		const bool traceHybrid = std::getenv("FLYCAST_HYBRID_TRACE") != nullptr
+				|| std::getenv("FLYCAST_HYBRID_TIMING") != nullptr;
+		const auto presentWallStart = std::chrono::steady_clock::now();
 		if (!displayRasterizer)
 			return false;
 	#ifdef USE_OPENGL
@@ -511,6 +546,31 @@ public:
 		quadDrawer->draw(presentTexture, config::Rotate90, true);
 		glCheck();
 #endif
+		if (traceHybrid)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const double milliseconds = std::chrono::duration<double, std::milli>(
+					now - presentWallStart).count();
+			static auto reportStart = now;
+			static double totalMilliseconds = 0.;
+			static double maximumMilliseconds = 0.;
+			static u32 count = 0;
+			totalMilliseconds += milliseconds;
+			maximumMilliseconds = std::max(maximumMilliseconds, milliseconds);
+			++count;
+			const double seconds = std::chrono::duration<double>(
+					now - reportStart).count();
+			if (seconds >= 2.)
+			{
+				std::fprintf(stderr, "HYBRID presentation calls=%u seconds=%.3f avg=%.3f max=%.3f\n",
+						count, seconds, totalMilliseconds / count,
+						maximumMilliseconds);
+				reportStart = now;
+				totalMilliseconds = 0.;
+				maximumMilliseconds = 0.;
+				count = 0;
+			}
+		}
 		return true;
 	}
 
