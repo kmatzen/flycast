@@ -1004,3 +1004,15 @@ from hardware data. A no-render sentinel dump therefore reports 256 differing
 interior pixels even if registers look correct. Three parser tests pass,
 including independent detection of prefix/suffix guard and padding changes.
 Matching interior pixels still never changes the unclassified provenance.
+
+The isolated toolchain completed Binutils and GCC pass 1 (`sh-elf-gcc
+--version` reports 15.2.0), then terminated with exit 2 while building newlib.
+The failing command was the host documentation generator: Homebrew's
+`makeinfo` script names an unavailable `/usr/bin/perl5.30`. Invoking the same
+script with `/usr/bin/perl` successfully reports Texinfo 7.1. The build was
+resumed with `make -o build-gcc-pass1
+MAKEINFO='/usr/bin/perl /opt/homebrew/opt/texinfo/bin/makeinfo'`, preserving
+completed compiler work and leaving the system installation unchanged.
+The resumed process is compiling newlib math objects; full toolchain, SDK,
+and probe completion remain pending. This is build progress, not renderer
+validation or hardware evidence.
