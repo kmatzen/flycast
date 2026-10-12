@@ -476,4 +476,145 @@ TEST(HybridTileRenderer, MatchesOracleForTextureSupersampling)
 		expectEqual(cpu, colors, depths);
 	}
 }
+
+TEST(HybridTileRenderer, MatchesOracleForSecondaryAccumulation)
+{
+	const Color stored { 40, 80, 120, 160 };
+	const Color ignored { 230, 20, 10, 255 };
+	SoftwareRasterizer cpu(2, 2);
+	PipelineState store;
+	store.depthMode = DepthMode::Always;
+	store.dstSelect = true;
+	drawQuad(cpu, 1.f, stored, store);
+	PipelineState load;
+	load.depthMode = DepthMode::Always;
+	load.srcSelect = true;
+	drawQuad(cpu, 2.f, ignored, load);
+
+	std::vector<hybrid::Triangle> commands;
+	u32 storeState = hybrid::makeState(7, true, false, false, true, 0, 1, 0);
+	appendQuad(commands, 1.f, stored, storeState);
+	commands[0].effects |= hybrid::DestinationSelect;
+	commands[1].effects |= hybrid::DestinationSelect;
+	u32 loadState = hybrid::makeState(7, true, false, false, true, 0, 1, 0);
+	appendQuad(commands, 2.f, ignored, loadState);
+	commands[2].effects |= hybrid::SourceSelect;
+	commands[3].effects |= hybrid::SourceSelect;
+	const std::vector<u32> texture { 0xffffffffu };
+	hybrid::Frame frame { 2, 2, &commands, &texture };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	std::vector<u32> secondary;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, nullptr, &secondary));
+	expectEqual(cpu, colors, depths);
+	ASSERT_EQ(secondary.size(), cpu.secondaryBuffer().size());
+	for (size_t i = 0; i < secondary.size(); ++i)
+		EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i])) << "pixel=" << i;
+}
+
+TEST(HybridTileRenderer, MatchesOracleForModifierAreaSelection)
+{
+	const Color red { 230, 20, 30, 255 };
+	const Color green { 20, 220, 60, 255 };
+	const Vertex a { 0, 0, .5f, red };
+	const Vertex b { 2, 0, .5f, red };
+	const Vertex c { 0, 2, .5f, red };
+	const Vertex d { 2, 2, .5f, red };
+	SoftwareRasterizer cpu(2, 2);
+	PipelineState geometry;
+	geometry.depthMode = DepthMode::Always;
+	geometry.colorWrite = false;
+	geometry.shadow = true;
+	cpu.drawTriangle(a, b, c, geometry);
+	cpu.drawTriangle(b, d, c, geometry);
+	const Vertex ma { 0, 0, 1.f };
+	const Vertex mb { 2, 0, 1.f };
+	const Vertex mc { 0, 2, 1.f };
+	const Vertex md { 2, 2, 1.f };
+	cpu.drawModifierTriangle(ma, mb, mc, ModifierMode::Xor);
+	cpu.drawModifierTriangle(mb, md, mc, ModifierMode::Xor);
+	cpu.drawModifierTriangle(ma, mb, mc, ModifierMode::Inclusion);
+	cpu.drawModifierTriangle(mb, md, mc, ModifierMode::Inclusion);
+	cpu.restoreDepth(std::vector<float>(4, 0.f));
+	PipelineState area1;
+	area1.depthMode = DepthMode::Always;
+	PipelineState area0 = area1;
+	area0.area1 = &area1;
+	Vertex ca = a, cb = b, cc = c, cd = d;
+	ca.color1 = cb.color1 = cc.color1 = cd.color1 = green;
+	cpu.drawTriangle(ca, cb, cc, area0);
+	cpu.drawTriangle(cb, cd, cc, area0);
+
+	const u32 primaryState = hybrid::makeState(7, true, false, false, true, 0, 1, 0);
+	const u32 areaState = primaryState | hybrid::Area1Only;
+	std::vector<hybrid::Triangle> commands;
+	for (const auto& vertices : {
+			std::array<Vertex, 3> { ca, cb, cc },
+			std::array<Vertex, 3> { cb, cd, cc } })
+	{
+		const u32 primary = static_cast<u32>(commands.size());
+		commands.push_back(triangle(vertices[0], vertices[1], vertices[2], primaryState));
+		Vertex aa = vertices[0], ab = vertices[1], ac = vertices[2];
+		aa.color = aa.color1;
+		ab.color = ab.color1;
+		ac.color = ac.color1;
+		commands.push_back(triangle(aa, ab, ac, areaState));
+		commands[primary].area1Index = primary + 1;
+		commands[primary + 1].effects |= hybrid::ModifierArea1Only;
+	}
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u8> modifierMask(4, 1);
+	hybrid::Frame frame { 2, 2, &commands, &texture };
+	frame.modifierMask = &modifierMask;
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
+
+TEST(HybridTileRenderer, MatchesOracleForModifierIntensityShadow)
+{
+	const Color base { 200, 100, 50, 255 };
+	const Vertex a { 0, 0, .5f, base };
+	const Vertex b { 2, 0, .5f, base };
+	const Vertex c { 0, 2, .5f, base };
+	const Vertex d { 2, 2, .5f, base };
+	SoftwareRasterizer cpu(2, 2);
+	PipelineState geometry;
+	geometry.depthMode = DepthMode::Always;
+	geometry.colorWrite = false;
+	geometry.shadow = true;
+	cpu.drawTriangle(a, b, c, geometry);
+	cpu.drawTriangle(b, d, c, geometry);
+	const Vertex ma { 0, 0, 1.f };
+	const Vertex mb { 2, 0, 1.f };
+	const Vertex mc { 0, 2, 1.f };
+	const Vertex md { 2, 2, 1.f };
+	cpu.drawModifierTriangle(ma, mb, mc, ModifierMode::Xor);
+	cpu.drawModifierTriangle(mb, md, mc, ModifierMode::Xor);
+	cpu.drawModifierTriangle(ma, mb, mc, ModifierMode::Inclusion);
+	cpu.drawModifierTriangle(mb, md, mc, ModifierMode::Inclusion);
+	cpu.restoreDepth(std::vector<float>(4, 0.f));
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.shadeScale = 128;
+	cpu.drawTriangle(a, b, c, state);
+	cpu.drawTriangle(b, d, c, state);
+
+	u32 gpuState = hybrid::makeState(7, true, false, false, true, 0, 1, 0)
+			| hybrid::IntensityShadow;
+	std::vector<hybrid::Triangle> commands {
+		triangle(a, b, c, gpuState), triangle(b, d, c, gpuState)
+	};
+	for (hybrid::Triangle& command : commands)
+		command.shadeScale = 128;
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u8> modifierMask(4, 1);
+	hybrid::Frame frame { 2, 2, &commands, &texture };
+	frame.modifierMask = &modifierMask;
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
 #endif
