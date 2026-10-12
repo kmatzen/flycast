@@ -529,3 +529,26 @@ is `vk.log`. MoltenVK logged warnings about unsupported disabling of primitive
 restart; retain those warnings with the evidence. The owned process was stopped
 after capture. This establishes a conventional Vulkan/MoltenVK result on this
 M1 for one input, not Vulkan OIT, other Vulkan drivers, or hardware accuracy.
+
+### Vulkan OIT via MoltenVK
+
+The same isolated app with `pvr.rend=5` successfully instantiated
+`backend=vulkan-oit`. Frame 4 passed the captured-input comparison against
+software. Artifacts use prefix `vkoit` in `/tmp/pvr-context-capture.c8w16g/`;
+reports are `vkoit-input-comparison.json` and `vkoit-comparison.json`.
+The muted run was stopped after capture.
+
+OIT rendered VRAM SHA256 is
+`8b690034ab85f9e9eeacbea87a4f67ff5712f4933e2862ee10b2db39bfcb39de`.
+It differs from software at 77 RGB565 pixels / 81 physical bytes, with maximum
+native channel error `[1,1,1]` and signed software-minus-OIT sums `[4,20,-3]`.
+This is substantially fewer differing pixels than the 1732 observed for
+conventional Vulkan/OpenGL, but similarity to software is not hardware truth.
+
+Source inspection provides a candidate explanation for part of the difference:
+`core/rend/vulkan/oit/oit_shaders.cpp` applies dithering to `finalColor` after
+its explicit fragment blending loop, whereas the conventional fragment shader
+in `core/rend/vulkan/shaders.cpp` dithers `color` before returning it for host
+blending. Software also dithers the completed framebuffer. This comparison
+does not isolate stage ordering from other OIT/conventional differences, and
+the remaining 77 pixels have not yet been attributed to a specific operation.
