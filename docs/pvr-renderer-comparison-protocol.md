@@ -684,3 +684,27 @@ emulated VBlank, even if the game has not submitted another render. In the
 single-threaded configuration these presentation waits serialize with
 emulation. Next isolate the threaded configuration and measure its emulated
 progress safely, rather than assuming the same result applies to it.
+
+### Threaded emulation progress
+
+`FLYCAST_PVR_TRACE_EMULATION=1` samples scheduler cycles on the emulation
+thread at VBlank, reporting progress every 240 VBlanks. It works with threaded
+rendering without reading scheduler state from the render thread. It is not a
+presentation, audio, or rendered-frame counter. Use a fresh process without
+pauses or state loads; backward scheduler movement resets the window.
+
+With hybrid rendering, VSync, full framebuffer emulation, null audio, and
+`-config config:rend.ThreadedRendering=yes`, later Seaman windows measured
+0.6635, 0.6671, and 0.6673 speed. Nearby swap windows still averaged
+10.015–11.140 ms. Thus threading alone did not eliminate the slowdown.
+Log: `/tmp/pvr-threaded-speed.log`; the owned process was stopped afterward.
+The 125-test renderer suite passed during startup, so early timing windows
+are excluded from this comparison. The app build and diff whitespace check
+also passed. The test suite does not establish correctness of threaded live
+framebuffer synchronization.
+
+Full framebuffer rendering intentionally retains the render-completion wait
+until `Renderer::Render` finishes. The queue also contains an existing FIXME
+about asynchronous framebuffer reads and blinking. These constraints require
+preserving ordering and VRAM visibility while investigating presentation
+scheduling; simply removing synchronization is not an accuracy-preserving fix.

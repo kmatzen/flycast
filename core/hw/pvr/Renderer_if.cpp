@@ -880,6 +880,32 @@ int rend_end_render(int tag, int cycles, int jitter, void *arg)
 
 void rend_vblank()
 {
+	if (std::getenv("FLYCAST_PVR_TRACE_EMULATION") != nullptr)
+	{
+		// Sample scheduler state only on its owning emulation thread. Host
+		// presentation counts cannot establish emulation speed.
+		static auto start = std::chrono::steady_clock::time_point{};
+		static u64 cyclesStart = 0;
+		static unsigned count = 0;
+		const auto now = std::chrono::steady_clock::now();
+		const u64 cycles = sh4_sched_now64();
+		if (start == std::chrono::steady_clock::time_point{} || cycles < cyclesStart)
+		{
+			start = now;
+			cyclesStart = cycles;
+			count = 0;
+		}
+		else if (++count == 240)
+		{
+			const double seconds = std::chrono::duration<double>(now - start).count();
+			const double emulated = double(cycles - cyclesStart) / SH4_MAIN_CLOCK;
+			std::fprintf(stderr, "PVR_EMULATION vblanks=%u seconds=%.6f emulated_seconds=%.6f speed=%.4f\n",
+					count, seconds, emulated, emulated / seconds);
+			start = now;
+			cyclesStart = cycles;
+			count = 0;
+		}
+	}
 	if (config::EmulateFramebuffer
 			|| (!render_called && fb_dirty && FB_R_CTRL.fb_enable))
 	{
