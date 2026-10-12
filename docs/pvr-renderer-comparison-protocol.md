@@ -1089,3 +1089,23 @@ that contained no RTT frames. Same-frame verification leaves software's
 result in VRAM and is not an independent accelerated-only capture; the
 separate traced run supplies that evidence. Shared packing code and an
 instrumented SDK remain limitations, and no original-hardware result exists.
+
+The temporary SDK initialization markers were then removed with a targeted
+patch; its tracked worktree is clean at the pinned revision. After rebuilding
+the kernel and relinking with completed GCC 15.2.0, probe ELF SHA-256 is
+`2dd9b68ff6c354e7babab2a78802e6fa96b17fa2baac30e3e283690749e4a8cc`.
+`rtt-clean-sdk-run.log` reproduces the allocation hash and zero pixel/full
+VRAM verifier mismatches without SDK instrumentation.
+
+An existing-OpenGL baseline uses the same ELF, renderer 0, single-thread
+rendering, and full framebuffer emulation. Without explicitly enabling
+`rend.RenderToTextureBuffer`, its center remained the `0xa5a5` sentinel;
+that run is not a valid rendered-color comparison. With
+`rend.RenderToTextureBuffer=yes`, `rtt-opengl-readback-run.log` reports
+matching requested registers, unchanged guards/padding, and center word
+`0xb69e` (all 256 interior pixels differ from requested `0xae7d`). Its
+allocation hash is
+`685917cfd1171c864fd6d42887de7d518462605953087fdc05ac8dc0a7fc1bef`.
+This establishes a reproducible backend difference under this configuration,
+not an OpenGL accuracy verdict: color processing/settings and matched-input
+provenance still need investigation, followed by original-hardware comparison.
