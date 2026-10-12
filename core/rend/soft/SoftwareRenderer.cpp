@@ -750,13 +750,13 @@ private:
 		return true;
 	}
 
-	bool appendHybridList(const std::vector<PolyParam>& list, u32 end,
+	bool appendHybridList(const std::vector<PolyParam>& list, u32 first, u32 end,
 			bool punchThrough, bool sorting, std::vector<hybrid::Triangle>& commands,
 			std::vector<u32>& textureAtlas,
 			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets)
 	{
 		end = std::min<u32>(end, list.size());
-		for (u32 i = 0; i < end; ++i)
+		for (u32 i = std::min(first, end); i < end; ++i)
 		{
 			const PolyParam& poly = list[i];
 			if (poly.count < 3)
@@ -826,6 +826,95 @@ private:
 		return true;
 	}
 
+	bool tryRenderHybridPasses(u32 width, u32 height,
+			const std::vector<std::vector<RegionInfo>>& passRegions,
+			std::vector<Color>& frameStore, bool trace)
+	{
+		if (rendContext->render_passes.size() < 2
+				|| passRegions.size() != rendContext->render_passes.size())
+			return false;
+		std::vector<u32> accumulation(frameStore.size());
+		std::memcpy(accumulation.data(), frameStore.data(), frameStore.size() * sizeof(Color));
+		std::vector<float> preservedDepth;
+		RenderPass previous {};
+		size_t totalTriangles = 0;
+		size_t totalTextures = 0;
+		hybrid::Timing totalTiming;
+		for (size_t passIndex = 0; passIndex < rendContext->render_passes.size(); ++passIndex)
+		{
+			const RenderPass& pass = rendContext->render_passes[passIndex];
+			const std::vector<RegionInfo>& regions = passRegions[passIndex];
+			if (regions.empty() || (config::ModifierVolumes
+					&& (pass.mvo_count != previous.mvo_count
+							|| pass.mvo_tr_count != previous.mvo_tr_count)))
+				return false;
+			const bool autosort = !config::PerStripSorting && pass.autosort;
+			const bool hasOpaque = pass.op_count != previous.op_count;
+			const bool hasPunch = pass.pt_count != previous.pt_count;
+			const bool hasTranslucent = pass.tr_count != previous.tr_count;
+			const bool zClear = regions.front().zClear;
+			std::vector<u8> coverage(static_cast<size_t>(width) * height);
+			for (const RegionInfo& region : regions)
+			{
+				if (!region.flushAccumulate || region.zClear != zClear
+						|| (hasOpaque && !region.opaquePresent)
+						|| (hasPunch && !region.punchThroughPresent)
+						|| (hasTranslucent && (!region.translucentPresent
+								|| region.autosort != autosort)))
+					return false;
+				const s32 x0 = std::clamp<s32>(region.x0, 0, width);
+				const s32 y0 = std::clamp<s32>(region.y0, 0, height);
+				const s32 x1 = std::clamp<s32>(region.x1, 0, width);
+				const s32 y1 = std::clamp<s32>(region.y1, 0, height);
+				for (s32 y = y0; y < y1; ++y)
+					std::fill(coverage.begin() + static_cast<size_t>(y) * width + x0,
+							coverage.begin() + static_cast<size_t>(y) * width + x1, 1);
+			}
+			if (std::find(coverage.begin(), coverage.end(), 0) != coverage.end())
+				return false;
+
+			std::vector<hybrid::Triangle> commands;
+			std::vector<u32> textureAtlas { 0xffffffffu };
+			std::unordered_map<const Color *, std::array<u32, 11>> textureOffsets;
+			if (!appendHybridList(rendContext->global_param_op, previous.op_count,
+					pass.op_count, false, false, commands, textureAtlas, textureOffsets)
+					|| !appendHybridList(rendContext->global_param_pt, previous.pt_count,
+							pass.pt_count, true, false, commands, textureAtlas, textureOffsets)
+					|| !appendHybridList(rendContext->global_param_tr, previous.tr_count,
+							pass.tr_count, false, autosort, commands, textureAtlas, textureOffsets)
+					|| commands.empty())
+				return false;
+			hybrid::Frame frame { width, height, &commands, &textureAtlas, &accumulation };
+			if (passIndex != 0 && !zClear)
+				frame.initialDepths = &preservedDepth;
+			frame.fogTable = rendContext->fog_table;
+			frame.fogColor = packedColor({
+				static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
+				static_cast<u8>(rendContext->fog_col_ram.green() * 255.f),
+				static_cast<u8>(rendContext->fog_col_ram.blue() * 255.f), 255 });
+			frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
+			std::vector<u32> output;
+			hybrid::Timing timing;
+			if (!hybrid::render(frame, output, preservedDepth, &timing)
+					|| output.size() != accumulation.size())
+				return false;
+			accumulation = std::move(output);
+			totalTriangles += commands.size();
+			totalTextures += textureOffsets.size();
+			totalTiming.encodeMilliseconds += timing.encodeMilliseconds;
+			totalTiming.gpuMilliseconds += timing.gpuMilliseconds;
+			totalTiming.readbackMilliseconds += timing.readbackMilliseconds;
+			previous = pass;
+		}
+		std::memcpy(frameStore.data(), accumulation.data(), accumulation.size() * sizeof(u32));
+		if (trace)
+			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",
+					rendContext->render_passes.size(), totalTriangles, totalTextures,
+					totalTiming.encodeMilliseconds, totalTiming.gpuMilliseconds,
+					totalTiming.readbackMilliseconds);
+		return true;
+	}
+
 	bool tryRenderHybrid(u32 width, u32 height,
 			const std::vector<std::vector<RegionInfo>>& passRegions,
 			std::vector<Color>& frameStore)
@@ -841,10 +930,14 @@ private:
 			return false;
 		if (rendContext->isRTT)
 			return reject("render-to-texture");
-		if (rendContext->render_passes.size() != 1 || passRegions.size() != 1)
-			return reject("multiple-passes");
+		if (rendContext->render_passes.size() != passRegions.size()
+				|| rendContext->render_passes.empty())
+			return reject("invalid-passes");
 		if (config::EmulateFramebuffer)
 			return reject("framebuffer-emulation");
+		if (rendContext->render_passes.size() > 1)
+			return tryRenderHybridPasses(width, height, passRegions, frameStore, trace)
+					|| reject("unsupported-multiple-passes");
 		const RenderPass& pass = rendContext->render_passes[0];
 		const bool autosort = !config::PerStripSorting && pass.autosort;
 		const bool hasOpaque = pass.op_count != 0;
@@ -878,12 +971,12 @@ private:
 		std::vector<hybrid::Triangle> commands;
 		std::vector<u32> textureAtlas { 0xffffffffu };
 		std::unordered_map<const Color *, std::array<u32, 11>> textureOffsets;
-		if (!appendHybridList(rendContext->global_param_op, pass.op_count, false, false,
+		if (!appendHybridList(rendContext->global_param_op, 0, pass.op_count, false, false,
 				commands, textureAtlas, textureOffsets)
-				|| !appendHybridList(rendContext->global_param_pt, pass.pt_count, true, false,
+				|| !appendHybridList(rendContext->global_param_pt, 0, pass.pt_count, true, false,
 						commands, textureAtlas, textureOffsets)
 				|| (!cpuTranslucent && !appendHybridList(rendContext->global_param_tr,
-						pass.tr_count, false, autosort, commands, textureAtlas, textureOffsets))
+						0, pass.tr_count, false, autosort, commands, textureAtlas, textureOffsets))
 				|| commands.empty())
 			return reject("unsupported-polygon-state");
 		std::vector<u32> initial(frameStore.size());

@@ -22,9 +22,10 @@ struct Constants {
   u32 fogColor;
   float fogDensity;
   u32 useModifierMask;
+  u32 useInitialDepth;
 };
 
-static_assert(sizeof(Constants) == 28);
+static_assert(sizeof(Constants) == 32);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -61,6 +62,7 @@ struct Constants {
     uint fogColor;
     float fogDensity;
     uint useModifierMask;
+    uint useInitialDepth;
 };
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -275,7 +277,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     const uint offset = pixel.y * constants.width + pixel.x;
     const uint tile = (pixel.y / 32) * constants.tilesX + pixel.x / 32;
     uint color = constants.useInitialColor != 0 ? colors[offset] : 0xff000000u;
-    float depth = 0.0f;
+    float depth = constants.useInitialDepth != 0 ? depths[offset] : 0.0f;
     const int sx = int(pixel.x) * 16 + 8;
     const int sy = int(pixel.y) * 16 + 8;
     constexpr uint MaxSortedFragments = 64;
@@ -536,6 +538,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     return false;
   if (frame.modifierMask != nullptr && frame.modifierMask->size() != pixelCount)
     return false;
+  if (frame.initialDepths != nullptr && frame.initialDepths->size() != pixelCount)
+    return false;
   id<MTLBuffer> triangleBuffer = makeBuffer(metal.device, *frame.triangles);
   id<MTLBuffer> offsetBuffer = makeBuffer(metal.device, tileOffsets);
   id<MTLBuffer> referenceBuffer = makeBuffer(metal.device, tileReferences);
@@ -565,10 +569,14 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   if (frame.initialColors != nullptr)
     std::memcpy(colorBuffer.contents, frame.initialColors->data(),
                 pixelCount * sizeof(u32));
+  if (frame.initialDepths != nullptr)
+    std::memcpy(depthBuffer.contents, frame.initialDepths->data(),
+                pixelCount * sizeof(float));
   const Constants constants{frame.width, frame.height, tilesX,
                             frame.initialColors != nullptr ? 1u : 0u,
                             frame.fogColor, frame.fogDensity,
-                            frame.modifierMask != nullptr ? 1u : 0u};
+                            frame.modifierMask != nullptr ? 1u : 0u,
+                            frame.initialDepths != nullptr ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];

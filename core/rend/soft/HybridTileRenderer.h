@@ -76,6 +76,7 @@ struct Frame {
   const std::vector<u32> *texture = nullptr;
   // Optional starting accumulation buffer. Null starts at opaque black.
   const std::vector<u32> *initialColors = nullptr;
+  const std::vector<float> *initialDepths = nullptr;
   const u32 *fogTable = nullptr;
   u32 fogColor = 0;
   float fogDensity = 0.f;
