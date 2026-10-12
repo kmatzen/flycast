@@ -28,6 +28,7 @@ enum StateBits : u32 {
   TrilinearPassB = 1 << 25,
   IntensityShadow = 1 << 26,
   Area1Only = 1 << 27,
+  ListTypeShift = 28,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -81,6 +82,10 @@ struct Frame {
   u32 fogColor = 0;
   float fogDensity = 0.f;
   const std::vector<u8> *modifierMask = nullptr;
+  const std::vector<u8> *depthClearMask = nullptr;
+  const std::vector<u8> *opaqueMask = nullptr;
+  const std::vector<u8> *punchThroughMask = nullptr;
+  const std::vector<u8> *translucentMask = nullptr;
 };
 
 struct Timing {

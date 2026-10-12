@@ -564,7 +564,7 @@ private:
 			const PipelineState& state, std::vector<hybrid::Triangle>& commands,
 			std::vector<u32>& textureAtlas,
 			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets,
-			bool area1Data = false)
+			u32 listType, bool area1Data = false)
 	{
 		if (ia >= rendContext->verts.size() || ib >= rendContext->verts.size()
 				|| ic >= rendContext->verts.size())
@@ -655,6 +655,7 @@ private:
 		if (state.trilinearFilter && state.trilinearPassB) encodedState |= hybrid::TrilinearPassB;
 		if (state.shadow && state.intensityShadow) encodedState |= hybrid::IntensityShadow;
 		if (area1Data) encodedState |= hybrid::Area1Only;
+		encodedState |= (listType & 3) << hybrid::ListTypeShift;
 		hybrid::Triangle command {};
 		for (u32 i = 0; i < 3; ++i)
 		{
@@ -751,7 +752,8 @@ private:
 	}
 
 	bool appendHybridList(const std::vector<PolyParam>& list, u32 first, u32 end,
-			bool punchThrough, bool sorting, std::vector<hybrid::Triangle>& commands,
+			bool punchThrough, bool sorting, u32 listType,
+			std::vector<hybrid::Triangle>& commands,
 			std::vector<u32>& textureAtlas,
 			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets)
 	{
@@ -808,13 +810,13 @@ private:
 					std::swap(a, b);
 				const size_t primaryIndex = commands.size();
 				if (!appendHybridTriangle(poly, a, b, c, state, commands,
-						textureAtlas, textureOffsets))
+						textureAtlas, textureOffsets, listType))
 					return false;
 				if (hasArea1 && commands.size() != primaryIndex)
 				{
 					const size_t area1Index = commands.size();
 					if (!appendHybridTriangle(poly, a, b, c, area1State, commands,
-							textureAtlas, textureOffsets, true))
+							textureAtlas, textureOffsets, listType, true))
 						return false;
 					if (commands.size() != area1Index + 1
 							|| area1Index > std::numeric_limits<u32>::max())
@@ -835,6 +837,7 @@ private:
 			return false;
 		std::vector<u32> accumulation(frameStore.size());
 		std::memcpy(accumulation.data(), frameStore.data(), frameStore.size() * sizeof(Color));
+		std::vector<u32> committed = accumulation;
 		std::vector<float> preservedDepth;
 		RenderPass previous {};
 		size_t totalTriangles = 0;
@@ -849,44 +852,50 @@ private:
 							|| pass.mvo_tr_count != previous.mvo_tr_count)))
 				return false;
 			const bool autosort = !config::PerStripSorting && pass.autosort;
-			const bool hasOpaque = pass.op_count != previous.op_count;
-			const bool hasPunch = pass.pt_count != previous.pt_count;
 			const bool hasTranslucent = pass.tr_count != previous.tr_count;
-			const bool zClear = regions.front().zClear;
-			std::vector<u8> coverage(static_cast<size_t>(width) * height);
+			const size_t pixelCount = static_cast<size_t>(width) * height;
+			std::vector<u8> depthClearMask(pixelCount);
+			std::vector<u8> opaqueMask(pixelCount);
+			std::vector<u8> punchMask(pixelCount);
+			std::vector<u8> translucentMask(pixelCount);
 			for (const RegionInfo& region : regions)
 			{
-				if (!region.flushAccumulate || region.zClear != zClear
-						|| (hasOpaque && !region.opaquePresent)
-						|| (hasPunch && !region.punchThroughPresent)
-						|| (hasTranslucent && (!region.translucentPresent
-								|| region.autosort != autosort)))
+				if (hasTranslucent && region.translucentPresent
+						&& region.autosort != autosort)
 					return false;
 				const s32 x0 = std::clamp<s32>(region.x0, 0, width);
 				const s32 y0 = std::clamp<s32>(region.y0, 0, height);
 				const s32 x1 = std::clamp<s32>(region.x1, 0, width);
 				const s32 y1 = std::clamp<s32>(region.y1, 0, height);
 				for (s32 y = y0; y < y1; ++y)
-					std::fill(coverage.begin() + static_cast<size_t>(y) * width + x0,
-							coverage.begin() + static_cast<size_t>(y) * width + x1, 1);
+				{
+					const size_t first = static_cast<size_t>(y) * width + x0;
+					const size_t last = static_cast<size_t>(y) * width + x1;
+					if (region.zClear) std::fill(depthClearMask.begin() + first, depthClearMask.begin() + last, 1);
+					if (region.opaquePresent) std::fill(opaqueMask.begin() + first, opaqueMask.begin() + last, 1);
+					if (region.punchThroughPresent) std::fill(punchMask.begin() + first, punchMask.begin() + last, 1);
+					if (region.translucentPresent) std::fill(translucentMask.begin() + first, translucentMask.begin() + last, 1);
+				}
 			}
-			if (std::find(coverage.begin(), coverage.end(), 0) != coverage.end())
-				return false;
 
 			std::vector<hybrid::Triangle> commands;
 			std::vector<u32> textureAtlas { 0xffffffffu };
 			std::unordered_map<const Color *, std::array<u32, 11>> textureOffsets;
 			if (!appendHybridList(rendContext->global_param_op, previous.op_count,
-					pass.op_count, false, false, commands, textureAtlas, textureOffsets)
+					pass.op_count, false, false, 0, commands, textureAtlas, textureOffsets)
 					|| !appendHybridList(rendContext->global_param_pt, previous.pt_count,
-							pass.pt_count, true, false, commands, textureAtlas, textureOffsets)
+							pass.pt_count, true, false, 1, commands, textureAtlas, textureOffsets)
 					|| !appendHybridList(rendContext->global_param_tr, previous.tr_count,
-							pass.tr_count, false, autosort, commands, textureAtlas, textureOffsets)
+							pass.tr_count, false, autosort, 2, commands, textureAtlas, textureOffsets)
 					|| commands.empty())
 				return false;
 			hybrid::Frame frame { width, height, &commands, &textureAtlas, &accumulation };
-			if (passIndex != 0 && !zClear)
+			if (passIndex != 0)
 				frame.initialDepths = &preservedDepth;
+			frame.depthClearMask = &depthClearMask;
+			frame.opaqueMask = &opaqueMask;
+			frame.punchThroughMask = &punchMask;
+			frame.translucentMask = &translucentMask;
 			frame.fogTable = rendContext->fog_table;
 			frame.fogColor = packedColor({
 				static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
@@ -899,6 +908,20 @@ private:
 					|| output.size() != accumulation.size())
 				return false;
 			accumulation = std::move(output);
+			for (const RegionInfo& region : regions)
+				if (region.flushAccumulate)
+				{
+					const s32 x0 = std::clamp<s32>(region.x0, 0, width);
+					const s32 y0 = std::clamp<s32>(region.y0, 0, height);
+					const s32 x1 = std::clamp<s32>(region.x1, 0, width);
+					const s32 y1 = std::clamp<s32>(region.y1, 0, height);
+					for (s32 y = y0; y < y1; ++y)
+					{
+						const size_t first = static_cast<size_t>(y) * width + x0;
+						std::copy(accumulation.begin() + first,
+								accumulation.begin() + first + (x1 - x0), committed.begin() + first);
+					}
+				}
 			totalTriangles += commands.size();
 			totalTextures += textureOffsets.size();
 			totalTiming.encodeMilliseconds += timing.encodeMilliseconds;
@@ -906,7 +929,7 @@ private:
 			totalTiming.readbackMilliseconds += timing.readbackMilliseconds;
 			previous = pass;
 		}
-		std::memcpy(frameStore.data(), accumulation.data(), accumulation.size() * sizeof(u32));
+		std::memcpy(frameStore.data(), committed.data(), committed.size() * sizeof(u32));
 		if (trace)
 			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",
 					rendContext->render_passes.size(), totalTriangles, totalTextures,
@@ -940,50 +963,65 @@ private:
 					|| reject("unsupported-multiple-passes");
 		const RenderPass& pass = rendContext->render_passes[0];
 		const bool autosort = !config::PerStripSorting && pass.autosort;
-		const bool hasOpaque = pass.op_count != 0;
-		const bool hasPunch = pass.pt_count != 0;
 		const bool hasTranslucent = pass.tr_count != 0;
 		const bool useOpaqueModifiers = config::ModifierVolumes && pass.mvo_count != 0;
 		const bool cpuTranslucent = config::ModifierVolumes && hasTranslucent
 				&& (pass.mvo_count != 0 || pass.mvo_tr_count != 0);
+		std::vector<u8> opaqueMask;
+		std::vector<u8> punchMask;
+		std::vector<u8> translucentMask;
 		if (!passRegions[0].empty())
 		{
-			std::vector<u8> coverage(static_cast<size_t>(width) * height);
+			const size_t pixelCount = static_cast<size_t>(width) * height;
+			opaqueMask.resize(pixelCount);
+			punchMask.resize(pixelCount);
+			translucentMask.resize(pixelCount);
+			std::vector<u8> modifierCoverage(pixelCount);
 			for (const RegionInfo& region : passRegions[0])
 			{
-				if (!region.flushAccumulate || (hasOpaque && !region.opaquePresent)
-						|| (hasPunch && !region.punchThroughPresent)
-						|| (hasTranslucent && (!region.translucentPresent
-								|| region.autosort != autosort)))
-					return reject("partial-region-lists");
+				if (hasTranslucent && region.translucentPresent
+						&& region.autosort != autosort)
+					return reject("mixed-translucent-sort");
 				const s32 x0 = std::clamp<s32>(region.x0, 0, width);
 				const s32 y0 = std::clamp<s32>(region.y0, 0, height);
 				const s32 x1 = std::clamp<s32>(region.x1, 0, width);
 				const s32 y1 = std::clamp<s32>(region.y1, 0, height);
 				for (s32 y = y0; y < y1; ++y)
-					std::fill(coverage.begin() + static_cast<size_t>(y) * width + x0,
-							coverage.begin() + static_cast<size_t>(y) * width + x1, 1);
+				{
+					const size_t first = static_cast<size_t>(y) * width + x0;
+					const size_t last = static_cast<size_t>(y) * width + x1;
+					if (region.opaquePresent) std::fill(opaqueMask.begin() + first, opaqueMask.begin() + last, 1);
+					if (region.punchThroughPresent) std::fill(punchMask.begin() + first, punchMask.begin() + last, 1);
+					if (region.translucentPresent) std::fill(translucentMask.begin() + first, translucentMask.begin() + last, 1);
+					if (region.opaqueModifierPresent) std::fill(modifierCoverage.begin() + first, modifierCoverage.begin() + last, 1);
+				}
 			}
-			if (std::find(coverage.begin(), coverage.end(), 0) != coverage.end())
-				return reject("partial-region-coverage");
+			if (useOpaqueModifiers
+					&& std::find(modifierCoverage.begin(), modifierCoverage.end(), 0)
+							!= modifierCoverage.end())
+				return reject("partial-modifier-coverage");
 		}
 
 		std::vector<hybrid::Triangle> commands;
 		std::vector<u32> textureAtlas { 0xffffffffu };
 		std::unordered_map<const Color *, std::array<u32, 11>> textureOffsets;
-		if (!appendHybridList(rendContext->global_param_op, 0, pass.op_count, false, false,
+		if (!appendHybridList(rendContext->global_param_op, 0, pass.op_count, false, false, 0,
 				commands, textureAtlas, textureOffsets)
-				|| !appendHybridList(rendContext->global_param_pt, 0, pass.pt_count, true, false,
+				|| !appendHybridList(rendContext->global_param_pt, 0, pass.pt_count, true, false, 1,
 						commands, textureAtlas, textureOffsets)
 				|| (!cpuTranslucent && !appendHybridList(rendContext->global_param_tr,
-						0, pass.tr_count, false, autosort, commands, textureAtlas, textureOffsets))
+						0, pass.tr_count, false, autosort, 2, commands, textureAtlas, textureOffsets))
 				|| commands.empty())
 			return reject("unsupported-polygon-state");
-		std::vector<u32> initial(frameStore.size());
-		std::memcpy(initial.data(), frameStore.data(), frameStore.size() * sizeof(Color));
+		std::vector<u32> initial(rasterizer->colorBuffer().size());
+		std::memcpy(initial.data(), rasterizer->colorBuffer().data(),
+				rasterizer->colorBuffer().size() * sizeof(Color));
 		std::vector<u32> output;
 		std::vector<float> depth;
 		hybrid::Frame frame { width, height, &commands, &textureAtlas, &initial };
+		if (!opaqueMask.empty()) frame.opaqueMask = &opaqueMask;
+		if (!punchMask.empty()) frame.punchThroughMask = &punchMask;
+		if (!translucentMask.empty()) frame.translucentMask = &translucentMask;
 		frame.fogTable = rendContext->fog_table;
 		frame.fogColor = packedColor({
 			static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
@@ -1034,7 +1072,23 @@ private:
 			cpuTranslucentMilliseconds = std::chrono::duration<double, std::milli>(
 					std::chrono::steady_clock::now() - cpuStart).count();
 		}
-		std::memcpy(frameStore.data(), output.data(), output.size() * sizeof(u32));
+		if (passRegions[0].empty())
+			std::memcpy(frameStore.data(), output.data(), output.size() * sizeof(u32));
+		else
+			for (const RegionInfo& region : passRegions[0])
+				if (region.flushAccumulate)
+				{
+					const s32 x0 = std::clamp<s32>(region.x0, 0, width);
+					const s32 y0 = std::clamp<s32>(region.y0, 0, height);
+					const s32 x1 = std::clamp<s32>(region.x1, 0, width);
+					const s32 y1 = std::clamp<s32>(region.y1, 0, height);
+					for (s32 y = y0; y < y1; ++y)
+					{
+						const size_t first = static_cast<size_t>(y) * width + x0;
+						std::memcpy(frameStore.data() + first, output.data() + first,
+								static_cast<size_t>(x1 - x0) * sizeof(u32));
+					}
+				}
 		if (trace)
 			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f\n",
 					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,

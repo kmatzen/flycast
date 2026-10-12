@@ -270,6 +270,10 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         device atomic_uint *overflow [[buffer(7)]],
         const device uint *fogTable [[buffer(8)]],
         const device uchar *modifierMask [[buffer(9)]],
+        const device uchar *depthClearMask [[buffer(10)]],
+        const device uchar *opaqueMask [[buffer(11)]],
+        const device uchar *punchThroughMask [[buffer(12)]],
+        const device uchar *translucentMask [[buffer(13)]],
         uint2 pixel [[thread_position_in_grid]])
 {
     if (pixel.x >= constants.width || pixel.y >= constants.height)
@@ -277,7 +281,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     const uint offset = pixel.y * constants.width + pixel.x;
     const uint tile = (pixel.y / 32) * constants.tilesX + pixel.x / 32;
     uint color = constants.useInitialColor != 0 ? colors[offset] : 0xff000000u;
-    float depth = constants.useInitialDepth != 0 ? depths[offset] : 0.0f;
+    float depth = depthClearMask[offset] != 0 ? 0.0f
+            : (constants.useInitialDepth != 0 ? depths[offset] : 0.0f);
     const int sx = int(pixel.x) * 16 + 8;
     const int sy = int(pixel.y) * 16 + 8;
     constexpr uint MaxSortedFragments = 64;
@@ -292,6 +297,11 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const bool selectArea1 = constants.useModifierMask != 0
                 && modifierMask[offset] != 0 && base.area1Index != 0xffffffffu;
         const Triangle t = selectArea1 ? triangles[base.area1Index] : base;
+        const uint listType = (base.state >> 28) & 3;
+        if ((listType == 0 && opaqueMask[offset] == 0)
+                || (listType == 1 && punchThroughMask[offset] == 0)
+                || (listType == 2 && translucentMask[offset] == 0))
+            continue;
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
                 || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
             continue;
@@ -483,7 +493,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 28) != 0 ||
+        triangle.alphaReference > 255 || (triangle.state >> 30) != 0 ||
         triangle.shadeScale > 256)
       return false;
     if (triangle.area1Index != std::numeric_limits<u32>::max() &&
@@ -540,6 +550,11 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     return false;
   if (frame.initialDepths != nullptr && frame.initialDepths->size() != pixelCount)
     return false;
+  const std::vector<u8> *masks[] = {frame.depthClearMask, frame.opaqueMask,
+                                   frame.punchThroughMask, frame.translucentMask};
+  for (const std::vector<u8> *mask : masks)
+    if (mask != nullptr && mask->size() != pixelCount)
+      return false;
   id<MTLBuffer> triangleBuffer = makeBuffer(metal.device, *frame.triangles);
   id<MTLBuffer> offsetBuffer = makeBuffer(metal.device, tileOffsets);
   id<MTLBuffer> referenceBuffer = makeBuffer(metal.device, tileReferences);
@@ -552,6 +567,16 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   const std::vector<u8> emptyModifier(pixelCount);
   id<MTLBuffer> modifierBuffer = makeBuffer(metal.device,
       frame.modifierMask != nullptr ? *frame.modifierMask : emptyModifier);
+  const std::vector<u8> emptyMask(pixelCount);
+  const std::vector<u8> fullMask(pixelCount, 1);
+  id<MTLBuffer> depthClearBuffer = makeBuffer(metal.device,
+      frame.depthClearMask != nullptr ? *frame.depthClearMask : emptyMask);
+  id<MTLBuffer> opaqueMaskBuffer = makeBuffer(metal.device,
+      frame.opaqueMask != nullptr ? *frame.opaqueMask : fullMask);
+  id<MTLBuffer> punchMaskBuffer = makeBuffer(metal.device,
+      frame.punchThroughMask != nullptr ? *frame.punchThroughMask : fullMask);
+  id<MTLBuffer> translucentMaskBuffer = makeBuffer(metal.device,
+      frame.translucentMask != nullptr ? *frame.translucentMask : fullMask);
   id<MTLBuffer> colorBuffer =
       [metal.device newBufferWithLength:pixelCount * sizeof(u32)
                                 options:MTLResourceStorageModeShared];
@@ -563,7 +588,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                                 options:MTLResourceStorageModeShared];
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
-      overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil)
+      overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
+      depthClearBuffer == nil || opaqueMaskBuffer == nil ||
+      punchMaskBuffer == nil || translucentMaskBuffer == nil)
     return false;
   *static_cast<u32 *>(overflowBuffer.contents) = 0;
   if (frame.initialColors != nullptr)
@@ -592,6 +619,10 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:overflowBuffer offset:0 atIndex:7];
   [encoder setBuffer:fogBuffer offset:0 atIndex:8];
   [encoder setBuffer:modifierBuffer offset:0 atIndex:9];
+  [encoder setBuffer:depthClearBuffer offset:0 atIndex:10];
+  [encoder setBuffer:opaqueMaskBuffer offset:0 atIndex:11];
+  [encoder setBuffer:punchMaskBuffer offset:0 atIndex:12];
+  [encoder setBuffer:translucentMaskBuffer offset:0 atIndex:13];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
   [encoder endEncoding];

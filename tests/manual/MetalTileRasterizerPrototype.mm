@@ -296,6 +296,23 @@ int main() {
   }
 
   {
+    std::vector<Triangle> commands{testTriangle(
+        source, .75f,
+        rend::soft::hybrid::makeState(7, true, false, false, true, 0, 1, 0))};
+    const std::vector<u32> initialColors{destination};
+    const std::vector<float> initialDepths{.5f};
+    const std::vector<u8> disabledList{0};
+    const std::vector<u8> clearDepth{1};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &texture, &initialColors,
+                                   &initialDepths};
+    test.depthClearMask = &clearDepth;
+    test.opaqueMask = &disabledList;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != destination || actualDepths[0] != 0.f)
+      return 1;
+  }
+
+  {
     const u32 colors[]{0x80602010u, 0x804080c0u, 0x80c04020u};
     const float depths[]{.8f, .2f, .5f};
     std::vector<Triangle> commands;
