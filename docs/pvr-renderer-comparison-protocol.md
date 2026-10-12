@@ -1349,3 +1349,20 @@ hardware accuracy validation remain required.
 The rebuilt application passes all seven automated RTT cases after the
 analysis pruning, including complete readback and zero color/full-VRAM
 verifier differences (`/tmp/pvr-rtt-prune-20261012/report.json`).
+
+A longer post-optimization Seaman run used real SDL2 output (host muted),
+full framebuffer emulation, single-thread rendering, and the opt-in late
+swap interval. `/tmp/pvr-seaman-post-prune-audio.log` initially shows roughly
+1.0x emulation speed. Audio delivery reports progress to 2,649,600 submitted
+input frames, 2,594 callbacks, nine underruns/9,216 silent output frames,
+and zero dropped input frames with a 2,822-frame buffer. The underrun count
+is unchanged across the last nine delivery reports.
+
+However, delivery reports subsequently stop while PVR/emulation logs continue.
+Later four-second-emulated windows run around 1.5–1.8x real time, and the log
+contains microphone-control `MDRE_TransmitAgain` warnings. The causal link
+between those observations is not established. No hybrid rejection was
+logged, but this run fails to establish sustained audio/pacing correctness;
+the earlier stable interval must not be generalized to the later phase.
+The emulator was stopped after capture. Audio/pacing across this transition
+requires investigation, separate from the passing renderer microbenchmarks.
