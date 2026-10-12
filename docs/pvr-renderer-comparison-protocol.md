@@ -1937,3 +1937,45 @@ network rollback, longer play, and other games still need validation. No
 visual tear-free claim or full hardware-conformance claim follows from the
 audio counters or CPU/Metal agreement. The opt-in path is not enabled for
 libretro or non-macOS platforms.
+
+### Completed-swap and image-change delivery accounting
+
+`FLYCAST_PVR_TRACE_DELIVERY=1` now records immutable framebuffer sequence IDs
+at the return from the UI's OpenGL window swap. This distinguishes publication
+from a completed host swap. It is not proof of physical scanout or tear-free
+output. Counters separate unique snapshots, skipped sequence IDs, repeat
+swaps, and out-of-order swaps; a unit test covers gaps, duplicates, invalid
+zero IDs, and backward IDs. All 146 renderer tests pass on ARM64 and Rosetta
+in `/tmp/pvr-delivery-content-{native,rosetta}.log`.
+
+Under this diagnostic flag only, the producer also compares each framebuffer
+image with its predecessor using exact RGBA vector equality, dimensions,
+aspect ratio, and border color. A separate monotonic content ID increments
+on each change, including A-to-B-to-A transitions. Thus missing repeated
+copies of one image is distinguished from omitting an intermediate changed
+image. These comparisons add CPU work and should not be mistaken for a
+zero-overhead benchmark. UI rotation/filter preferences and physical display
+timing are outside this content comparison.
+
+The first sequence-only sample (`/tmp/pvr-delivery-seaman.log`) delivered
+3,682 of 4,038 published snapshots, skipped 355, and ended with one snapshot
+not yet swapped. No out-of-order swaps occurred. It recorded 41 final audio
+underruns; native UI inspection occurred during that sample, so it is not a
+clean uninterrupted benchmark or evidence that UI inspection caused them.
+
+The subsequent exact-content sample (`/tmp/pvr-delivery-content-seaman.log`)
+used the opt-in decoupled path, full framebuffer emulation, ordinary VSync,
+real SDL2 audio, and muted host output. It published 5,059 snapshots and
+completed swaps for 4,678, skipping 381 with no repeats or backward sequence
+IDs. All 2,108 distinct consecutive image states reached completed swaps:
+`content_published=2108 content_swapped=2108 content_skipped=0`. No snapshot
+was pending at the final counter. This supports the claim that the skipped
+snapshots in this run were duplicate images, not missing visual changes.
+
+Across 21 emulation windows, speed ranged 0.9771–1.0100x. Final audio totals
+were 3,723,264 submitted frames, 3,641 callbacks, five underruns/5,120 silent
+output frames, and zero dropped input frames. Four underruns were already
+present in periodic reports, so these are not all shutdown events. The
+process stopped normally. This remains boot/idle evidence from one game:
+consistent glitch-free audio, 60-Hz changing content, pause/resume, resize,
+longer play, and original-hardware validation remain open.

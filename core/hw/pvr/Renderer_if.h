@@ -76,6 +76,7 @@ struct Renderer
 	virtual bool GetLastFrame(std::vector<u8>& data, int& width, int& height) { return false; }
 
 	virtual bool Present() { return true; }
+	virtual void PresentationCompleted() {}
 	// Only renderers with an independently owned presentation handoff may opt
 	// into executing PVR work on the emulation thread while the UI swaps.
 	virtual bool RendersOnEmulationThread() const { return false; }

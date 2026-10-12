@@ -166,6 +166,7 @@ public:
 
 	void Term() override
 	{
+		reportPresentationDelivery(true);
 		if (hybridAsyncActive)
 		{
 			std::vector<u32> ignored;
@@ -191,6 +192,12 @@ public:
 		screenRasterizer.reset();
 		framebufferPresentation.clear();
 		lastPresentedFramebuffer.reset();
+		pendingPresentedFramebuffer.reset();
+		presentationDelivery = {};
+		presentationContentDelivery = {};
+		presentationSequence = 0;
+		presentationContentSequence = 0;
+		presentationReports = 0;
 		rttRasterizer.reset();
 		displayRasterizer = nullptr;
 		rasterizer = nullptr;
@@ -636,8 +643,18 @@ public:
 						static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) };
 				}
 		}
-		auto frame = PresentationFrame::create(width, height,
-				getDCFramebufferAspectRatio(), border, std::move(pixels));
+		const float aspectRatio = getDCFramebufferAspectRatio();
+		if (emulationThreadRendering && std::getenv("FLYCAST_PVR_TRACE_DELIVERY") != nullptr)
+		{
+			const auto previous = framebufferPresentation.acquire();
+			if (!previous || previous->width != static_cast<u32>(width)
+					|| previous->height != static_cast<u32>(height)
+					|| previous->aspectRatio != aspectRatio || !(previous->border == border)
+					|| previous->pixels != pixels)
+				++presentationContentSequence;
+		}
+		auto frame = PresentationFrame::create(width, height, aspectRatio, border,
+				std::move(pixels), ++presentationSequence, presentationContentSequence);
 		frameReady = frame != nullptr;
 		framebufferPresentation.publish(std::move(frame));
 		clearLastFrame = false;
@@ -653,6 +670,20 @@ public:
 	}
 
 	bool RendersOnEmulationThread() const override { return emulationThreadRendering; }
+
+	void PresentationCompleted() override
+	{
+		if (!emulationThreadRendering || !pendingPresentedFramebuffer)
+			return;
+		presentationDelivery.complete(pendingPresentedFramebuffer->sequence);
+		presentationContentDelivery.complete(pendingPresentedFramebuffer->contentSequence);
+		pendingPresentedFramebuffer.reset();
+		if (++presentationReports == 120)
+		{
+			reportPresentationDelivery(false);
+			presentationReports = 0;
+		}
+	}
 
 	bool Present() override
 	{
@@ -681,6 +712,7 @@ public:
 
 	bool drawFrame()
 	{
+		pendingPresentedFramebuffer.reset();
 		const bool traceHybrid = std::getenv("FLYCAST_HYBRID_TRACE") != nullptr
 				|| std::getenv("FLYCAST_HYBRID_TIMING") != nullptr;
 		const auto presentWallStart = std::chrono::steady_clock::now();
@@ -794,6 +826,8 @@ public:
 				count = 0;
 			}
 		}
+		if (emulationThreadRendering)
+			pendingPresentedFramebuffer = frame;
 		return true;
 	}
 
@@ -849,6 +883,25 @@ public:
 	}
 
 private:
+	void reportPresentationDelivery(bool final)
+	{
+		if (!emulationThreadRendering || std::getenv("FLYCAST_PVR_TRACE_DELIVERY") == nullptr)
+			return;
+		const auto latest = framebufferPresentation.acquire();
+		const u64 published = latest ? latest->sequence : 0;
+		std::fprintf(stderr,
+				"PVR_DELIVERY%s published=%llu swapped_unique=%llu skipped=%llu repeated=%llu out_of_order=%llu last_swapped=%llu content_published=%llu content_swapped=%llu content_skipped=%llu\n",
+				final ? "_FINAL" : "", static_cast<unsigned long long>(published),
+				static_cast<unsigned long long>(presentationDelivery.unique),
+				static_cast<unsigned long long>(presentationDelivery.skipped),
+				static_cast<unsigned long long>(presentationDelivery.repeated),
+				static_cast<unsigned long long>(presentationDelivery.outOfOrder),
+				static_cast<unsigned long long>(presentationDelivery.lastSequence),
+				static_cast<unsigned long long>(latest ? latest->contentSequence : 0),
+				static_cast<unsigned long long>(presentationContentDelivery.unique),
+				static_cast<unsigned long long>(presentationContentDelivery.skipped));
+	}
+
 	void checkPresentationMode() const
 	{
 		if (emulationThreadRendering && (!config::ThreadedRendering || !config::EmulateFramebuffer))
@@ -2461,6 +2514,12 @@ private:
 	std::unique_ptr<SoftwareRasterizer> screenRasterizer;
 	PresentationMailbox framebufferPresentation;
 	std::shared_ptr<const PresentationFrame> lastPresentedFramebuffer;
+	std::shared_ptr<const PresentationFrame> pendingPresentedFramebuffer;
+	PresentationDelivery presentationDelivery;
+	PresentationDelivery presentationContentDelivery;
+	u64 presentationSequence = 0; // Producer-thread only; copied into each packet.
+	u64 presentationContentSequence = 0;
+	unsigned presentationReports = 0; // UI-thread only.
 	bool emulationThreadRendering = false;
 	std::unique_ptr<SoftwareRasterizer> rttRasterizer;
 	SoftwareRasterizer *rasterizer = nullptr;

@@ -76,7 +76,11 @@ void OpenGLDriver::present()
 	if (frameRendered && renderer != nullptr && isSoftware(config::RendererType))
 		renderer->RenderLastFrame();
 	if (frameRendered)
+	{
 		GLGraphicsContext::Instance()->swap();
+		if (renderer != nullptr)
+			renderer->PresentationCompleted();
+	}
 	frameRendered = false;
 }
 

@@ -6,6 +6,23 @@
 
 using namespace rend::soft;
 
+TEST(PresentationFrame, DeliveryDistinguishesGapsRepeatsAndOutOfOrder)
+{
+	PresentationDelivery delivery;
+	delivery.complete(0);
+	delivery.complete(3);
+	delivery.complete(3);
+	delivery.complete(2);
+	delivery.complete(4);
+	delivery.complete(7);
+	EXPECT_EQ(delivery.unique, 3u);
+	EXPECT_EQ(delivery.skipped, 4u);
+	EXPECT_EQ(delivery.repeated, 1u);
+	EXPECT_EQ(delivery.outOfOrder, 1u);
+	EXPECT_EQ(delivery.lastSequence, 7u);
+	EXPECT_EQ(delivery.unique + delivery.skipped, delivery.lastSequence);
+}
+
 TEST(PresentationFrame, OwnsPixelsAndMetadataAcrossProducerReplacement)
 {
 	std::vector<Color> source(6, {1, 2, 3, 255});
