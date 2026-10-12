@@ -30,10 +30,21 @@ requires a broader test corpus captured from real Dreamcast hardware.
 ## Performance claims
 
 Performance measurements in this branch are Apple-specific. On an Apple M1,
-the current 72-layer synthetic stress case completes in roughly one 60 Hz frame
-and tested Seaman scenes meet their game cadence. These measurements must not be
-generalized to other Apple GPUs, operating systems, or graphics APIs without
-testing them there.
+the reproducible 640x480 fill-rate workload completes in about 5.0 ms against a
+16.67 ms 60 Hz frame budget. It draws six full-screen translucent layers, or
+1.84 million shaded pixels per frame, which stays below the contemporary quoted
+Dreamcast peak of 120 million pixels per second (2.0 million per 60 Hz frame).
+The separate 72-layer full-screen stress case is intentionally far outside that
+hardware envelope and takes about 62.4 ms; it is a throughput diagnostic, not a
+frame-rate claim. Tested Seaman scenes meet their game cadence. These
+measurements must not be generalized to other Apple GPUs, operating systems, or
+graphics APIs without testing them there.
+
+The 120 Mpixel/s comparison comes from the published Dreamcast specification
+in *Game Developer*, September 1999:
+https://ubm-twvideo01.s3.amazonaws.com/o1/vault/GD_Mag_Archives/GDM_September_1999.pdf
+The focused benchmark can enforce its 60 Hz threshold with
+`FLYCAST_HYBRID_ENFORCE_60HZ=1`.
 
 The asynchronous path preserves correctness by keeping ordered GPU work on one
 Metal command queue, chaining prior IOSurface contents GPU-to-GPU, and draining

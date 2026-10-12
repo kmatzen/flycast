@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <limits>
@@ -1653,5 +1654,86 @@ TEST(HybridTileRenderer, AsyncPresentationChainsFramesWithoutCpuUpload)
 	for (size_t pixel = 0; pixel < secondColors.size(); ++pixel)
 		EXPECT_EQ(secondColors[pixel], pack(cpu.colorBuffer()[pixel]))
 				<< "second frame pixel=" << pixel;
+}
+
+TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
+{
+	constexpr u32 width = 640;
+	constexpr u32 height = 480;
+	// Contemporary Dreamcast specifications quote a 120 Mpixel/s peak fill
+	// rate. Six 640x480 layers are 1.84 Mpixels per frame, below the 2.0
+	// Mpixel 60 Hz envelope. The 72-layer case is retained as a deliberately
+	// out-of-spec throughput stress measurement, not a frame-rate requirement.
+	constexpr u32 budgetLayers = 6;
+	constexpr double frameBudgetMilliseconds = 1000. / 60.;
+	Color texels[4] {
+		{ 255, 127, 63, 79 }, { 31, 239, 97, 131 },
+		{ 83, 47, 229, 181 }, { 211, 157, 23, 227 },
+	};
+	std::vector<u32> texture;
+	for (Color texel : texels)
+		texture.push_back(pack(texel));
+	u32 fogTable[128];
+	for (u32 i = 0; i < 128; ++i)
+		fogTable[i] = ((i * 5 + 17) & 0xff) << 8 | ((i * 11 + 3) & 0xff);
+	const u32 state = hybrid::makeState(6, false, true, true, true, 3, 4, 5)
+			| hybrid::Autosort | hybrid::LookupFog
+			| (2u << hybrid::ListTypeShift);
+	std::vector<hybrid::Triangle> commands;
+	for (u32 layer = 0; layer < 72; ++layer)
+	{
+		const float depth = .5f + layer * .125f;
+		const Color color { static_cast<u8>(37 + layer * 19),
+				static_cast<u8>(229 - layer * 7),
+				static_cast<u8>(53 + layer * 29),
+				static_cast<u8>(47 + layer * 23) };
+		const Vertex a { 0, 0, depth, color, {}, -.1f, -.1f };
+		const Vertex b { static_cast<float>(width), 0, depth, color, {}, 1.1f, -.1f };
+		const Vertex c { 0, static_cast<float>(height), depth, color, {}, -.1f, 1.1f };
+		const Vertex d { static_cast<float>(width), static_cast<float>(height),
+				depth, color, {}, 1.1f, 1.1f };
+		for (auto command : { triangle(a, b, c, state), triangle(b, d, c, state) })
+		{
+			command.minX = command.minY = 0;
+			command.maxX = width - 1;
+			command.maxY = height - 1;
+			command.textureWidth = command.textureHeight = 2;
+			command.mipOffsets[0] = 0;
+			command.mipLevelCount = 1;
+			commands.push_back(command);
+		}
+	}
+	const Color clear { 5, 9, 17, 255 };
+	const std::vector<u32> initialColors(static_cast<size_t>(width) * height,
+			pack(clear));
+	auto configureFrame = [&](const std::vector<hybrid::Triangle>& frameCommands) {
+		hybrid::Frame frame { width, height, &frameCommands, &texture, &initialColors };
+		frame.fogTable = fogTable;
+		frame.fogColor = pack({ 29, 101, 223, 255 });
+		frame.fogDensity = .75f;
+		return frame;
+	};
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	hybrid::Timing stressTiming;
+	auto stressFrame = configureFrame(commands);
+	ASSERT_TRUE(hybrid::render(stressFrame, colors, depths, &stressTiming));
+	EXPECT_EQ(colors.size(), static_cast<size_t>(width) * height);
+	EXPECT_EQ(stressTiming.simpleTranslucentFrames, 1u);
+	EXPECT_GT(stressTiming.gpuExecutionMilliseconds, 0.);
+	RecordProperty("stress_72_layer_gpu_ms", stressTiming.gpuExecutionMilliseconds);
+
+	std::vector<hybrid::Triangle> budgetCommands(commands.begin(),
+			commands.begin() + budgetLayers * 2);
+	auto budgetFrame = configureFrame(budgetCommands);
+	hybrid::Timing budgetTiming;
+	ASSERT_TRUE(hybrid::render(budgetFrame, colors, depths, &budgetTiming));
+	EXPECT_EQ(budgetTiming.simpleTranslucentFrames, 1u);
+	EXPECT_GT(budgetTiming.gpuExecutionMilliseconds, 0.);
+	RecordProperty("dreamcast_budget_layers", budgetLayers);
+	RecordProperty("dreamcast_budget_gpu_ms", budgetTiming.gpuExecutionMilliseconds);
+	RecordProperty("frame_budget_ms", frameBudgetMilliseconds);
+	if (std::getenv("FLYCAST_HYBRID_ENFORCE_60HZ") != nullptr)
+		EXPECT_LE(budgetTiming.gpuExecutionMilliseconds, frameBudgetMilliseconds);
 }
 #endif
