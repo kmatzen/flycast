@@ -601,3 +601,23 @@ present. Comparing the two runs exits 1 and identifies exactly
 `config_TextureFiltering` as the differing context field. Both owned emulator
 sessions were stopped after capture. Reports are `identity.json` and
 `filter-mismatch.json` in that directory.
+
+### Render cadence diagnostic
+
+`FLYCAST_PVR_TRACE_CADENCE=1` reports each window of 120 successful non-RTT
+render calls. Unlike presentation counts, this does not count repeated display
+presentation as new rendering. It measures wall-clock render-call throughput
+and mean time inside the render routine; async GPU completion is not implied.
+Use a fresh process for a measurement and avoid pauses, state loads, or backend
+changes within a window. The diagnostic does not yet reset windows for those
+events or measure emulated time, audio underruns, or display frame pacing.
+
+A muted Seaman boot/intro run with `FLYCAST_HYBRID_SOFT=1`, framebuffer
+emulation enabled, single-threaded rendering, and verifier/trace/capture
+disabled reported four windows at 29.748, 15.108, 19.241, and 19.149 renders/s.
+Mean render-routine times were 9.948, 10.560, 19.770, and 20.139 ms. Log:
+`/tmp/pvr-cadence-seaman.log`. The owned process was stopped afterward.
+The backend label is software; the environment requests hybrid acceleration
+but this low-overhead run does not record per-frame fallback. These observations
+do not distinguish variable game render cadence from emulator slowdown.
+Emulated-time progress must be measured before claiming full-speed play.

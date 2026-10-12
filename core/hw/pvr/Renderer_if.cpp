@@ -18,6 +18,7 @@
 #include <sstream>
 #include <cstring>
 #include <locale>
+#include <chrono>
 
 #include <mutex>
 #include <deque>
@@ -207,6 +208,9 @@ private:
 		TA_context *taContext = DequeueRender();
 		if (taContext == nullptr)
 			return;
+		const bool traceCadence = std::getenv("FLYCAST_PVR_TRACE_CADENCE") != nullptr;
+		const auto renderStarted = traceCadence ? std::chrono::steady_clock::now()
+				: std::chrono::steady_clock::time_point {};
 		auto fingerprintStage = [&](const char *stage) {
 			if (std::getenv("FLYCAST_PVR_INPUT_FINGERPRINT") != nullptr
 					&& !config::ThreadedRendering)
@@ -430,6 +434,32 @@ private:
 		else if (config::DelayFrameSwapping && fb_w_cur == FB_R_SOF1)
 			present();
 
+		if (traceCadence && !taContext->rend.isRTT)
+		{
+			// Count successful render submissions, not Present() calls, which
+			// can repeat a frame. Async backends may still have GPU work queued.
+			using Clock = std::chrono::steady_clock;
+			static auto windowStart = Clock::time_point {};
+			static u32 count = 0;
+			static double renderMilliseconds = 0.;
+			const auto now = Clock::now();
+			if (windowStart == Clock::time_point {})
+				windowStart = now;
+			else
+			{
+				++count;
+				renderMilliseconds += std::chrono::duration<double, std::milli>(now - renderStarted).count();
+				if (count == 120)
+				{
+					const double seconds = std::chrono::duration<double>(now - windowStart).count();
+					std::fprintf(stderr, "PVR_CADENCE backend=%s renders=%u seconds=%.6f renders_per_second=%.3f render_call_mean_ms=%.3f\n",
+							rendererBackend, count, seconds, count / seconds, renderMilliseconds / count);
+					windowStart = now;
+					count = 0;
+					renderMilliseconds = 0.;
+				}
+			}
+		}
 		//clear up & free data ..
 		FinishRender(taContext);
 	}
