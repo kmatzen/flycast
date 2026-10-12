@@ -671,6 +671,7 @@ private:
 		if (state.shadow && state.intensityShadow) encodedState |= hybrid::IntensityShadow;
 		if (area1Data) encodedState |= hybrid::Area1Only;
 		encodedState |= (listType & 3) << hybrid::ListTypeShift;
+		if (state.textureSuperSample) encodedState |= hybrid::TextureSuperSample;
 		hybrid::Triangle command {};
 		for (u32 i = 0; i < 3; ++i)
 		{
@@ -696,6 +697,8 @@ private:
 		command.mipLevelCount = state.texture ? state.texture.mipLevelCount : 0;
 		command.shadeScale = state.shadeScale;
 		command.area1Index = std::numeric_limits<u32>::max();
+		command.superSampleOffsetX = static_cast<s32>(std::lround(8.f * state.nativeToHostScaleX));
+		command.superSampleOffsetY = static_cast<s32>(std::lround(8.f * state.nativeToHostScaleY));
 		if (command.mipLevelCount > 1)
 		{
 			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
@@ -784,7 +787,6 @@ private:
 			auto unsupported = [](const PipelineState& candidate) {
 				return !candidate.fpuPixelCenter || !candidate.tspPixelCenter
 						|| candidate.excludeClip || candidate.useOffsetColor
-						|| candidate.textureSuperSample
 						|| (candidate.fogMode != 0 && candidate.fogMode != 2)
 						|| candidate.colorClamp || candidate.srcSelect || candidate.dstSelect
 						|| candidate.bumpMap || candidate.dither;

@@ -396,6 +396,27 @@ int main() {
       return 1;
   }
 
+  {
+    const std::vector<u32> superTexture{
+        0xff0000ffu, 0xff00ff00u, 0xffff0000u, 0xffffffffu};
+    Triangle command = testTriangle(
+        0xffffffffu, 1.f,
+        rend::soft::hybrid::makeState(7, false, true, false, true, 0, 1, 0) |
+            rend::soft::hybrid::TextureSuperSample);
+    command.textureWidth = command.textureHeight = 2;
+    command.u[0] = command.v[0] = -.25f;
+    command.u[1] = 1.75f;
+    command.v[1] = -.25f;
+    command.u[2] = -.25f;
+    command.v[2] = 1.75f;
+    command.superSampleOffsetX = command.superSampleOffsetY = 8;
+    std::vector<Triangle> commands{command};
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &superTexture};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff808080u)
+      return 1;
+  }
+
   const std::vector<u32> atlas{0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
                                0xff0000ffu, 0xff00ff00u, 0xff00ff00u,
                                0xff00ff00u, 0xff00ff00u};

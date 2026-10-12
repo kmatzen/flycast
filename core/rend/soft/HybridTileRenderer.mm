@@ -52,6 +52,8 @@ struct Triangle {
     float mipNumerator;
     uint shadeScale;
     uint area1Index;
+    int superSampleOffsetX;
+    int superSampleOffsetY;
 };
 
 struct Constants {
@@ -179,7 +181,9 @@ inline uint sampleTexture(const device uint *texture, const Triangle t, float2 u
     uint height = t.textureHeight;
     uint textureOffset = t.textureOffset;
     if (t.mipLevelCount > 1) {
-        const float selected = max(0.0f, floor(max(pvrD, 1.0f)) - 1.0f);
+        float selected = max(0.0f, floor(max(pvrD, 1.0f)) - 1.0f);
+        if ((t.state & (1u << 30)) != 0)
+            selected = max(0.0f, selected - 1.0f);
         const uint passOffset = (t.state & (1u << 25)) != 0 ? 1u : 0u;
         const uint level = min(t.mipLevelCount - 1, uint(selected) + passOffset);
         width = max(1u, width >> level);
@@ -259,6 +263,23 @@ inline float fogCoefficient(float inverseDepth, float density,
     const float first = float(entry & 0xff);
     const float second = float((entry >> 8) & 0xff);
     return (second + (first - second) * fraction) / 255.0f;
+}
+
+inline float2 projectedUV(const Triangle t, int sx, int sy)
+{
+    const long w0 = edge(t.x[1], t.y[1], t.x[2], t.y[2], sx, sy);
+    const long w1 = edge(t.x[2], t.y[2], t.x[0], t.y[0], sx, sy);
+    const long w2 = edge(t.x[0], t.y[0], t.x[1], t.y[1], sx, sy);
+    const long area = edge(t.x[0], t.y[0], t.x[1], t.y[1], t.x[2], t.y[2]);
+    const float s0 = float(w0) / float(area);
+    const float s1 = float(w1) / float(area);
+    const float s2 = float(w2) / float(area);
+    const float q = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
+    const float inverseQ = q == 0.0f ? 0.0f : 1.0f / q;
+    return float2((t.u[0] * t.z[0] * s0 + t.u[1] * t.z[1] * s1
+            + t.u[2] * t.z[2] * s2) * inverseQ,
+            (t.v[0] * t.z[0] * s0 + t.v[1] * t.z[1] * s1
+            + t.v[2] * t.z[2] * s2) * inverseQ);
 }
 
 kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
@@ -351,6 +372,26 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             pvrD = t.mipLevelCount > 1
                     ? max(0.0f, z == 0.0f ? 0.0f : t.mipNumerator / (z * z)) : 1.0f;
             uint texel = sampleTexture(texture, t, float2(u, v), pvrD);
+            if ((t.state & (1u << 30)) != 0) {
+                const float2 uv10 = projectedUV(t, sx + t.superSampleOffsetX, sy);
+                const float2 uv01 = projectedUV(t, sx, sy + t.superSampleOffsetY);
+                const float2 uv11 = projectedUV(t, sx + t.superSampleOffsetX,
+                        sy + t.superSampleOffsetY);
+                const uint samples[3] = {
+                    sampleTexture(texture, t, uv10, pvrD),
+                    sampleTexture(texture, t, uv01, pvrD),
+                    sampleTexture(texture, t, uv11, pvrD),
+                };
+                uint averaged = 0;
+                for (uint component = 0; component < 4; ++component) {
+                    const uint shift = component * 8;
+                    const uint value = (channel(texel, shift)
+                            + channel(samples[0], shift) + channel(samples[1], shift)
+                            + channel(samples[2], shift) + 2) / 4;
+                    averaged |= value << shift;
+                }
+                texel = averaged;
+            }
             if ((t.state & (1u << 12)) != 0)
                 texel |= 0xff000000u;
             source = applyTexture(source, texel, (t.state >> 14) & 3);
@@ -493,7 +534,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 30) != 0 ||
+        triangle.alphaReference > 255 || (triangle.state >> 31) != 0 ||
         triangle.shadeScale > 256)
       return false;
     if (triangle.area1Index != std::numeric_limits<u32>::max() &&
