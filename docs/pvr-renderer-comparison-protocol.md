@@ -1678,3 +1678,31 @@ All twenty rebuilt-app RTT probes complete in
 `/tmp/pvr-rtt-reverse-20261012/report.json`, with zero color/full-VRAM
 software–Metal differences. Dither results remain differential-only, and
 no original-hardware validation is implied.
+
+### Rejected experiment: prefix-depth early termination
+
+A follow-up experiment supplied a conservative maximum depth for every
+remaining opaque prefix, allowing reverse visibility to break out entirely
+when the accepted winner was strictly nearer than that maximum. Ceilings
+used the same nonnegative-depth/coordinate proof as reverse visibility,
+computed in double and rounded outward to float. A separate GPU buffer held
+one ceiling per bin reference. All 141 correctness tests passed.
+
+The experiment reduced GPU time, but not enough end-to-end time to justify
+the added per-reference metadata and CPU preparation. Three paired runs of
+the same binary gave small-triangle wall p95 values:
+
+| Pair | Early exit disabled | Early exit enabled |
+| --- | --- | --- |
+| 0 | 18.808 ms | 17.471 ms |
+| 1 | 18.146 ms | 17.947 ms |
+| 2 | 18.878 ms | 18.018 ms |
+
+Artifacts: `/tmp/pvr-early-{off,on}-{0,1,2}.xml`. Enabled GPU p95 was
+12.036–12.079 ms versus 13.411–13.619 ms disabled, but CPU encode p95 was
+4.097–4.339 ms enabled versus 3.767–4.608 ms disabled. The wall improvement
+was only approximately 1–7%, with all runs above the 16.667-ms gate.
+The experiment, its buffer, and its disable switch were removed. The existing
+reverse scan with individual conservative rejection remains unchanged. This
+does not establish a correctness problem with early exit; it rejects this
+particular implementation as an insufficient performance tradeoff.
