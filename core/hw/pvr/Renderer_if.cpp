@@ -204,6 +204,15 @@ private:
 		TA_context *taContext = DequeueRender();
 		if (taContext == nullptr)
 			return;
+		auto fingerprintStage = [&](const char *stage) {
+			if (std::getenv("FLYCAST_PVR_INPUT_FINGERPRINT") != nullptr
+					&& !config::ThreadedRendering)
+				std::fprintf(stderr,
+						"PVR_STAGE frame=%u backend=%s stage=%s rtt=%u efb=%u write=%08x vram=%016llx\n",
+						FrameCount, rendererBackend, stage, taContext->rend.isRTT ? 1u : 0u,
+						config::EmulateFramebuffer ? 1u : 0u, taContext->rend.fb_W_SOF1,
+						static_cast<unsigned long long>(XXH64(&vram[0], VRAM_SIZE, 0)));
+		};
 
 		// Diagnostic only: hash raw inputs before backend-specific processing.
 		// Require single-threaded execution so live register/VRAM reads cannot
@@ -263,6 +272,7 @@ private:
 			FC_PROFILE_SCOPE_NAMED("Renderer::Process");
 			try {
 				renderer->Process(taContext);
+				fingerprintStage("processed");
 			} catch (...) {
 				renderEnd.Set();
 				rend_allow_rollback();
@@ -279,6 +289,7 @@ private:
 			FC_PROFILE_SCOPE_NAMED("Renderer::Render");
 			try {
 				renderer->Render();
+				fingerprintStage("rendered");
 			} catch (...) {
 				if (!renderToScreen)
 					renderEnd.Set();

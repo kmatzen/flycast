@@ -105,6 +105,23 @@ writes that precede frame 5. This identifies differing pages, not the exact
 bytes or the cause. Local run logs are `/tmp/pvr-pages-gl.log` and
 `/tmp/pvr-pages-software.log`.
 
+Stage fingerprints subsequently localized the change to frame 4's `Render()`
+call. Both backends started that frame and finished `Process()` with VRAM hash
+`fef1cd3eefa6af1f`. After `Render()`, OpenGL produced `2515ffd693a5dc2f`
+and software produced `cfefd4d7db5aa67e`, exactly the next frame's inputs.
+Both reported `rtt=0`, `efb=1`, and framebuffer write address `00200000`.
+Thus full framebuffer emulation was enabled, and the observed divergence is
+already present in renderer output before the next emulation interval. The
+next comparison should inspect framebuffer pixels and conversion settings at
+frame 4; these hashes alone do not establish which output is correct.
+Local stage logs are `/tmp/pvr-stages-gl.log` and
+`/tmp/pvr-stages-software.log`.
+
+With fingerprinting enabled, `PVR_STAGE` records the whole-VRAM hash after
+`Process()` and `Render()`, the instantiated backend, RTT/full-framebuffer
+flags, and framebuffer write address. It has the same single-threaded
+restriction as the input fingerprints.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
