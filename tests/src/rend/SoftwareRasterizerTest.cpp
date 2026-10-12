@@ -641,6 +641,39 @@ TEST(SoftwareRasterizer, AppliesPunchThroughAlphaReference)
 	EXPECT_EQ(rasterizer.pixel(0, 0), (Color {}));
 }
 
+TEST(SoftwareRasterizer, AppliesPunchThroughAfterBilinearAlphaFiltering)
+{
+	const Color mixedAlpha[4] {
+		{ 255, 0, 0, 255 }, { 0, 255, 0, 255 },
+		{ 0, 0, 255, 255 }, { 255, 255, 255, 0 },
+	};
+	Color opaque[4];
+	std::copy(std::begin(mixedAlpha), std::end(mixedAlpha), std::begin(opaque));
+	opaque[3].a = 255;
+	const Color white { 255, 255, 255, 255 };
+	const Vertex a { 0, 0, 1, white, {}, .5f, .5f };
+	const Vertex b { 2, 0, 1, white, {}, .5f, .5f };
+	const Vertex c { 0, 2, 1, white, {}, .5f, .5f };
+
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.alphaTest = true;
+	state.alphaReference = 255;
+	state.bilinearFilter = true;
+	state.shadingInstruction = 0;
+	state.texture = { mixedAlpha, 2, 2 };
+	SoftwareRasterizer rejected(1, 1);
+	rejected.drawTriangle(a, b, c, state);
+	// Holly2 alpha-tests the filtered result. One transparent contributor
+	// lowers the four-texel average below fully opaque, leaving a hole.
+	EXPECT_EQ(rejected.pixel(0, 0), (Color {}));
+
+	state.texture = { opaque, 2, 2 };
+	SoftwareRasterizer accepted(1, 1);
+	accepted.drawTriangle(a, b, c, state);
+	EXPECT_EQ(accepted.pixel(0, 0), (Color { 128, 128, 128, 255 }));
+}
+
 TEST(SoftwareRasterizer, AppliesInclusiveExclusiveScissor)
 {
 	SoftwareRasterizer rasterizer(3, 3);

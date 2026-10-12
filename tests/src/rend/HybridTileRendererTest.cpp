@@ -412,6 +412,57 @@ TEST(HybridTileRenderer, MatchesOracleForPunchThroughAlphaTest)
 	EXPECT_EQ(cpu.pixel(1, 0).a, 255);
 }
 
+TEST(HybridTileRenderer, MatchesOracleForBilinearPunchThroughCoverage)
+{
+	const std::array<Color, 4> mixedAlpha {{
+		{ 255, 0, 0, 255 }, { 0, 255, 0, 255 },
+		{ 0, 0, 255, 255 }, { 255, 255, 255, 0 },
+	}};
+	auto opaque = mixedAlpha;
+	opaque[3].a = 255;
+	const Color white { 255, 255, 255, 255 };
+	const Color background { 19, 47, 113, 255 };
+
+	for (const auto& texels : { mixedAlpha, opaque })
+	{
+		SoftwareRasterizer cpu(2, 2);
+		cpu.clear(background);
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.alphaTest = true;
+		state.alphaReference = 255;
+		state.bilinearFilter = true;
+		state.shadingInstruction = 0;
+		state.texture = { texels.data(), 2, 2 };
+		const Vertex a { 0, 0, 1, white, {}, .5f, .5f };
+		const Vertex b { 2, 0, 1, white, {}, .5f, .5f };
+		const Vertex c { 0, 2, 1, white, {}, .5f, .5f };
+		cpu.drawTriangle(a, b, c, state);
+
+		u32 gpuState = hybrid::makeState(6, true, true, true, true, 0, 1, 0)
+				| hybrid::AlphaTest | (1u << hybrid::ListTypeShift);
+		auto command = triangle(a, b, c, gpuState);
+		command.textureWidth = command.textureHeight = 2;
+		command.mipOffsets[0] = 0;
+		command.mipLevelCount = 1;
+		command.alphaReference = 255;
+		std::vector<hybrid::Triangle> commands { command };
+		std::vector<u32> texture;
+		for (Color texel : texels)
+			texture.push_back(pack(texel));
+		const std::vector<u32> initialColors(4, pack(background));
+		hybrid::Frame frame { 2, 2, &commands, &texture, &initialColors };
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths));
+		expectEqual(cpu, colors, depths);
+		if (texels[3].a == 0)
+			EXPECT_EQ(cpu.pixel(0, 0), background);
+		else
+			EXPECT_EQ(cpu.pixel(0, 0), (Color { 128, 128, 128, 255 }));
+	}
+}
+
 TEST(HybridTileRenderer, PunchThroughHoleExposesFartherAcceptedFragment)
 {
 	const Color frontTexels[] {
