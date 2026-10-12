@@ -8,6 +8,7 @@
 #include "hw/pvr/pvr_mem.h"
 #include "rend/TexCache.h"
 #include "rend/transform_matrix.h"
+#include "ui/imgui_driver.h"
 #ifdef USE_OPENGL
 #include "rend/gles/quad.h"
 #ifdef TARGET_MAC
