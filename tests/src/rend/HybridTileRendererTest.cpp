@@ -1,6 +1,7 @@
 #include "rend/soft/HybridTileRenderer.h"
 #include "rend/soft/SoftwareRasterizer.h"
 
+#include <array>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <limits>
@@ -31,6 +32,7 @@ hybrid::Triangle triangle(const Vertex& a, const Vertex& b, const Vertex& c,
 		result.u[i] = vertices[i].u;
 		result.v[i] = vertices[i].v;
 		result.color[i] = pack(vertices[i].color);
+		result.offsetColor[i] = pack(vertices[i].offsetColor);
 		result.minX = std::min(result.minX, static_cast<s32>(vertices[i].x));
 		result.minY = std::min(result.minY, static_cast<s32>(vertices[i].y));
 		result.maxX = std::max(result.maxX, static_cast<s32>(vertices[i].x - 1));
@@ -266,6 +268,119 @@ TEST(HybridTileRenderer, MatchesOracleForTextureAddressingModes)
 		std::vector<u32> colors;
 		std::vector<float> depths;
 		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "modes=" << modes;
+		expectEqual(cpu, colors, depths);
+	}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForPunchThroughAlphaTest)
+{
+	const Color texels[] {
+		{ 220, 30, 20, 40 }, { 220, 30, 20, 120 },
+		{ 220, 30, 20, 99 }, { 220, 30, 20, 255 },
+	};
+	const std::vector<u32> texture {
+		pack(texels[0]), pack(texels[1]), pack(texels[2]), pack(texels[3])
+	};
+	const Color background { 15, 40, 180, 255 };
+	const Color white { 255, 255, 255, 255 };
+	SoftwareRasterizer cpu(2, 2);
+	PipelineState opaque;
+	opaque.depthMode = DepthMode::GreaterOrEqual;
+	drawQuad(cpu, 1.f, background, opaque);
+	PipelineState punch;
+	punch.depthMode = DepthMode::GreaterOrEqual;
+	punch.texture = { texels, 2, 2 };
+	punch.alphaTest = true;
+	punch.alphaReference = 100;
+	drawTexturedQuad(cpu, 2.f, white, punch);
+
+	std::vector<hybrid::Triangle> commands;
+	appendQuad(commands, 1.f, background,
+			hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+	u32 state = hybrid::makeState(6, true, true, false, true, 0, 1, 0);
+	state |= hybrid::AlphaTest | (1u << hybrid::ListTypeShift);
+	appendTexturedQuad(commands, 2.f, white, state, 2, 2);
+	for (size_t i = 2; i < commands.size(); ++i)
+		commands[i].alphaReference = 100;
+	hybrid::Frame frame { 2, 2, &commands, &texture };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
+
+TEST(HybridTileRenderer, MatchesOracleForClampAndVertexFog)
+{
+	const Color base { 230, 20, 150, 240 };
+	const Color offset { 40, 70, 30, 128 };
+	const Color fog { 10, 210, 90, 255 };
+	const Color minimum { 60, 50, 80, 100 };
+	const Color maximum { 200, 180, 140, 220 };
+	SoftwareRasterizer cpu(2, 2);
+	PipelineState state;
+	state.depthMode = DepthMode::GreaterOrEqual;
+	state.useOffsetColor = true;
+	state.fogMode = 1;
+	state.fogVertexColor = fog;
+	state.colorClamp = true;
+	state.clampMin = minimum;
+	state.clampMax = maximum;
+	const Vertex a { 0, 0, 1, base, offset };
+	const Vertex b { 2, 0, 1, base, offset };
+	const Vertex c { 0, 2, 1, base, offset };
+	const Vertex d { 2, 2, 1, base, offset };
+	cpu.drawTriangle(a, b, c, state);
+	cpu.drawTriangle(b, d, c, state);
+
+	const u32 gpuState = hybrid::makeState(6, true, false, false, true, 0, 1, 0);
+	std::vector<hybrid::Triangle> commands {
+		triangle(a, b, c, gpuState), triangle(b, d, c, gpuState)
+	};
+	for (hybrid::Triangle& command : commands)
+	{
+		command.effects = hybrid::UseOffsetColor | hybrid::VertexFog | hybrid::ColorClamp;
+		command.clampMin = pack(minimum);
+		command.clampMax = pack(maximum);
+	}
+	const std::vector<u32> texture { 0xffffffffu };
+	hybrid::Frame frame { 2, 2, &commands, &texture };
+	frame.fogVertexColor = pack(fog);
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
+
+TEST(HybridTileRenderer, MatchesOracleForTableFog)
+{
+	std::array<u32, 128> fogTable;
+	for (u32 i = 0; i < fogTable.size(); ++i)
+		fogTable[i] = ((255 - i) << 8) | i;
+	const Color base { 210, 70, 25, 177 };
+	const Color fog { 15, 90, 220, 255 };
+	const std::vector<u32> texture { 0xffffffffu };
+	for (float depth : { .5f, 1.f, 4.f, 32.f })
+	{
+		SoftwareRasterizer cpu(2, 2);
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.fogMode = 0;
+		state.fogRamColor = fog;
+		state.fogDensity = 3.25f;
+		state.fogTable = fogTable.data();
+		drawQuad(cpu, depth, base, state);
+
+		std::vector<hybrid::Triangle> commands;
+		u32 gpuState = hybrid::makeState(6, true, false, false, true, 0, 1, 0);
+		gpuState |= hybrid::LookupFog;
+		appendQuad(commands, depth, base, gpuState);
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		frame.fogTable = fogTable.data();
+		frame.fogColor = pack(fog);
+		frame.fogDensity = 3.25f;
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "depth=" << depth;
 		expectEqual(cpu, colors, depths);
 	}
 }
