@@ -70,6 +70,25 @@ contents, or retained accumulation/presentation buffers. Use them to screen
 candidate captures and investigate mismatches before claiming matched inputs.
 Hashing full VRAM also adds CPU work, so disable it for performance runs.
 
+### Runtime screening observation (2026-10-12)
+
+At commit `19bfde271`, two muted, single-threaded Seaman USA (`MK-51048`)
+REIOS boot runs requested renderer IDs 0 and 7 respectively. Both reached more
+than 230 render frames and emitted fingerprints. The requested IDs are launch
+settings, not independent confirmation of the active renderer.
+
+At frame 4 both emitted TA `882e3566018b73eb`, VRAM `fef1cd3eefa6af1f`,
+and registers `f084342605d4c551`. At frame 5 both emitted TA
+`44a4f4b9ed7f2744` and registers `95ec11a30f3a0424`, but VRAM differed:
+`2515ffd693a5dc2f` versus `cfefd4d7db5aa67e`. These observations validate
+the diagnostic path and reject full-input equality at frame 5. They do not
+identify the differing bytes, establish their relevance to texture reads, or
+attribute the divergence to rendering rather than other emulated state.
+
+Next, record active backend identity and capture differing VRAM ranges before
+making a visual correctness claim from these runs. The earlier equal hashes
+also remain subject to the incomplete-state limitations above.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
