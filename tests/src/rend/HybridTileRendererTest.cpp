@@ -893,6 +893,102 @@ TEST(HybridTileRenderer, MatchesOracleForPerspectiveInterpolationCorpus)
 	}
 }
 
+TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
+{
+	Color texels[16];
+	std::vector<u32> texture;
+	for (u32 i = 0; i < 16; ++i)
+	{
+		texels[i] = { static_cast<u8>(17 + i * 13), static_cast<u8>(239 - i * 9),
+				static_cast<u8>(31 + i * 7), static_cast<u8>(23 + i * 14) };
+		texture.push_back(pack(texels[i]));
+	}
+	u32 fogTable[128];
+	for (u32 i = 0; i < 128; ++i)
+		fogTable[i] = ((i * 5 + 3) & 0xff) << 8 | ((i * 11 + 7) & 0xff);
+	const Color background { 29, 71, 137, 191 };
+	const std::vector<u32> initialColors(64, pack(background));
+	for (u32 sample = 0; sample < 64; ++sample)
+	{
+		SCOPED_TRACE(testing::Message() << "sample=" << sample);
+		auto vertexColor = [sample](u32 vertex) {
+			return Color { static_cast<u8>(43 + sample * 29 + vertex * 53),
+					static_cast<u8>(17 + sample * 47 + vertex * 31),
+					static_cast<u8>(91 + sample * 19 + vertex * 67),
+					static_cast<u8>(61 + sample * 23 + vertex * 41) };
+		};
+		auto offsetColor = [sample](u32 vertex) {
+			return Color { static_cast<u8>(sample * 3 + vertex * 17),
+					static_cast<u8>(sample * 5 + vertex * 11),
+					static_cast<u8>(sample * 7 + vertex * 13),
+					static_cast<u8>(sample * 9 + vertex * 19) };
+		};
+		const Vertex a { 0, 0, .7f + (sample % 5) * .11f, vertexColor(0),
+				offsetColor(0), -.2f, .15f };
+		const Vertex b { 8, 0, 1.9f - (sample % 7) * .09f, vertexColor(1),
+				offsetColor(1), 1.25f, -.1f };
+		const Vertex c { 0, 8, 1.1f + (sample % 3) * .17f, vertexColor(2),
+				offsetColor(2), .1f, 1.2f };
+
+		PipelineState state;
+		state.depthMode = DepthMode::Always;
+		state.texture = { texels, 4, 4 };
+		state.bilinearFilter = (sample & 1) != 0;
+		state.clampU = (sample & 2) != 0;
+		state.clampV = (sample & 4) != 0;
+		state.flipU = (sample & 8) != 0;
+		state.flipV = (sample & 16) != 0;
+		state.shadingInstruction = sample & 3;
+		state.useAlpha = (sample & 4) == 0;
+		state.ignoreTextureAlpha = (sample & 8) != 0;
+		state.useOffsetColor = (sample & 16) != 0;
+		state.fogMode = (sample >> 4) & 3;
+		state.fogTable = fogTable;
+		state.fogDensity = .81f;
+		state.fogRamColor = { 173, 41, 97, 255 };
+		state.fogVertexColor = { 37, 181, 83, 255 };
+		state.colorClamp = (sample & 32) != 0;
+		state.clampMin = { 19, 31, 43, 7 };
+		state.clampMax = { 221, 207, 193, 239 };
+		state.srcBlend = static_cast<BlendFactor>((sample * 5 + 1) & 7);
+		state.dstBlend = static_cast<BlendFactor>((sample * 3 + 2) & 7);
+
+		SoftwareRasterizer cpu(8, 8);
+		cpu.clear(background);
+		cpu.drawTriangle(a, b, c, state);
+
+		u32 gpuState = hybrid::makeState(7, true, true, state.bilinearFilter,
+				state.useAlpha, state.shadingInstruction,
+				static_cast<u32>(state.srcBlend), static_cast<u32>(state.dstBlend));
+		if (state.clampU) gpuState |= hybrid::ClampU;
+		if (state.clampV) gpuState |= hybrid::ClampV;
+		if (state.flipU) gpuState |= hybrid::FlipU;
+		if (state.flipV) gpuState |= hybrid::FlipV;
+		if (state.ignoreTextureAlpha) gpuState |= hybrid::IgnoreTextureAlpha;
+		if (state.fogMode == 0) gpuState |= hybrid::LookupFog;
+		auto command = triangle(a, b, c, gpuState);
+		command.textureWidth = command.textureHeight = 4;
+		command.mipOffsets[0] = 0;
+		command.mipLevelCount = 1;
+		if (state.useOffsetColor) command.effects |= hybrid::UseOffsetColor;
+		if (state.fogMode == 1) command.effects |= hybrid::VertexFog;
+		if (state.fogMode == 3) command.effects |= hybrid::LookupFogAlpha;
+		if (state.colorClamp) command.effects |= hybrid::ColorClamp;
+		command.clampMin = pack(state.clampMin);
+		command.clampMax = pack(state.clampMax);
+		std::vector<hybrid::Triangle> commands { command };
+		hybrid::Frame frame { 8, 8, &commands, &texture, &initialColors };
+		frame.fogTable = fogTable;
+		frame.fogColor = pack(state.fogRamColor);
+		frame.fogVertexColor = pack(state.fogVertexColor);
+		frame.fogDensity = state.fogDensity;
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "sample=" << sample;
+		expectEqual(cpu, colors, depths);
+	}
+}
+
 TEST(HybridTileRenderer, MatchesOracleForCrossingAutosortDepths)
 {
 	const Color red { 230, 30, 20, 128 };

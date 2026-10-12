@@ -674,7 +674,11 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             fogged.w = float(channel(source, 24));
             source = packColor(fogged);
         } else if ((t.effects & 4u) != 0) {
-            const float fog = float(channel(offsetColor, 24)) / 255.0f;
+            // The PVR consumes the interpolated offset alpha directly for
+            // vertex fog. Quantizing it through the packed offset color first
+            // changes the fog result by one or more color levels when other
+            // pixel operations are combined with vertex fog.
+            const float fog = offsetInterpolated.w / 255.0f;
             float4 fogged;
             for (uint component = 0; component < 3; ++component) {
                 const uint shift = component * 8;
