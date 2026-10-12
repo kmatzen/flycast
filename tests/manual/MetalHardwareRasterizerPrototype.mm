@@ -63,6 +63,7 @@ std::vector<uint32_t> reference(std::array<Vertex, 3> triangle,
                        float(w2) / float(area)};
       const float q = triangle[0].z * s[0] + triangle[1].z * s[1] +
                       triangle[2].z * s[2];
+      const float inverseQ = 1.f / q;
       uint32_t packed = 0;
       for (uint32_t component = 0; component < 4; ++component) {
         const uint32_t shift = component * 8;
@@ -70,7 +71,8 @@ std::vector<uint32_t> reference(std::array<Vertex, 3> triangle,
         for (uint32_t vertex = 0; vertex < 3; ++vertex)
           value += float((triangle[vertex].color >> shift) & 255) *
                    triangle[vertex].z * s[vertex];
-        packed |= uint32_t(std::clamp(std::floor(value / q + .5f), 0.f, 255.f))
+        packed |= uint32_t(std::clamp(
+                      std::floor(value * inverseQ + .5f), 0.f, 255.f))
                   << shift;
       }
       result[y * Width + x] = packed;
@@ -118,12 +120,14 @@ fragment uint4 fragmentMain(Output input [[stage_in]],
                          v[2].fixedPosition);
   const float3 s = float3(w0, w1, w2) / float(area);
   const float q = v[0].z * s.x + v[1].z * s.y + v[2].z * s.z;
+  const float inverseQ = 1.0f / q;
   float4 color;
   for (uint component = 0; component < 4; ++component) {
     const uint shift = component * 8;
     color[component] = (float((v[0].color >> shift) & 255) * v[0].z * s.x
                       + float((v[1].color >> shift) & 255) * v[1].z * s.y
-                      + float((v[2].color >> shift) & 255) * v[2].z * s.z) / q;
+                      + float((v[2].color >> shift) & 255) * v[2].z * s.z)
+                      * inverseQ;
   }
   return uint4(clamp(floor(color + .5f), 0.0f, 255.0f));
 }
@@ -166,6 +170,8 @@ fragment uint4 fragmentMain(Output input [[stage_in]],
     std::uniform_real_distribution<float> depth(.05f, 1.f);
     size_t tested = 0;
     size_t interpolationMismatches = 0;
+    size_t lowerChannels = 0;
+    size_t higherChannels = 0;
     for (int32_t sampleOffset : {0, 8}) {
       for (uint32_t iteration = 0; iteration < 2000; ++iteration) {
         std::array<Vertex, 3> triangle;
@@ -216,7 +222,15 @@ fragment uint4 fragmentMain(Output input [[stage_in]],
                 triangle[2].x, triangle[2].y);
             return 1;
           }
-          interpolationMismatches += actual != expected[pixel];
+          if (actual != expected[pixel]) {
+            ++interpolationMismatches;
+            for (uint32_t shift = 0; shift < 32; shift += 8) {
+              const uint32_t expectedChannel = (expected[pixel] >> shift) & 255;
+              const uint32_t actualChannel = (actual >> shift) & 255;
+              lowerChannels += actualChannel < expectedChannel;
+              higherChannels += actualChannel > expectedChannel;
+            }
+          }
         }
         ++tested;
       }
@@ -272,8 +286,9 @@ fragment uint4 fragmentMain(Output input [[stage_in]],
         std::chrono::steady_clock::now() - start).count() / Iterations;
     std::printf("hardware_coverage_triangles=%zu coverage_mismatches=0 "
                 "interpolation_mismatches=%zu stress_triangles=72 "
-                "mean_submit_gpu_ms=%.3f\n",
-                tested, interpolationMismatches, milliseconds);
+                "lower_channels=%zu higher_channels=%zu mean_submit_gpu_ms=%.3f\n",
+                tested, interpolationMismatches, lowerChannels, higherChannels,
+                milliseconds);
   }
   return 0;
 }
