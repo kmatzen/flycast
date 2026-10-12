@@ -50,7 +50,7 @@ int main(int argc, char **argv)
                         frame ? (unsigned long long)frame->sequence : 0, time);
                 });
             const u8 icon[] = {0, 255, 0, 255};
-            auto iconId = driver->updateTexture("probe", icon, 1, 1, false);
+            auto iconId = driver->updateTexture("probe", icon, 1, 1, true);
             if (!iconId || driver->getTexture("probe") != iconId) failed = true;
             for (unsigned frameId = 0; frameId < frameCount && !failed; ++frameId) {
                 SDL_Event event;

@@ -2431,9 +2431,9 @@ completion accounting before invoking the factory. Current SDL display metrics
 have no Metal drawable-size branch, so that integration remains required.
 
 This driver is not ready for runtime adoption: rotation and display filtering
-options are not connected, nearest-sampled UI texture requests explicitly
-throw a renderer error because the upstream backend uses a fixed linear
-sampler, and startup/skip recovery is not implemented. GPU command completion
+options are not connected, and startup/skip recovery is not implemented.
+Nearest-sampled UI textures were initially rejected; the per-texture sampling
+extension described below removes that integration blocker. GPU command completion
 is used to bound in-flight texture ownership but is not reported as actual
 presentation. Live construction, resize, menus, teardown, audio, and cadence
 must still be exercised through the real frontend.
@@ -2542,3 +2542,26 @@ recorded successful retained-image drawing and recreation, then no new content
 publications; it could not satisfy the required post-recreation comparisons.
 That run is not a pass. Use continuously rendering content for this lifecycle
 gate rather than assuming the 660-submission probe lasts through both points.
+
+### Per-texture Metal UI sampling
+
+Flycast's VMU overlay uploads its LCD image with nearest sampling. The native
+driver now honors that request instead of throwing. A small, explicitly marked
+Flycast extension to the imported ImGui Metal backend tracks nearest overrides
+by texture ID and supplies a per-draw shader flag. Unregistered textures,
+including the font atlas, retain the backend's linear sampling. The driver
+clears an old override when replacing or deleting a named texture; backend
+context destruction releases the registry. The imported backend is therefore
+no longer byte-identical to upstream; the original import hashes above are
+provenance, not hashes of the current modified source.
+
+The new offscreen test scales a two-color texture and checks every output
+pixel for exact nearest texel colors, verifies blending with linear sampling,
+then clears the override and verifies linear blending returns. All six Metal
+tests pass with validation on ARM64 and Rosetta:
+`/tmp/pvr-metal-sampling-native.log` and
+`/tmp/pvr-metal-sampling-rosetta.log`.
+The live driver's 660-packet fixed-size probe now uploads a nearest-sampled UI
+texture and passes lifecycle checks with two skipped presentations
+(`/tmp/pvr-metal-sampling-driver.log`). This does not yet validate the actual
+VMU overlay in the emulator frontend or establish lossless frame delivery.

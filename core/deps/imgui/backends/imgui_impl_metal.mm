@@ -76,6 +76,7 @@
 @property (nonatomic, strong) FramebufferDescriptor*        framebufferDescriptor; // framebuffer descriptor for current frame; transient
 @property (nonatomic, strong) NSMutableDictionary*          renderPipelineStateCache; // pipeline cache; keyed on framebuffer descriptors
 @property (nonatomic, strong) NSMutableArray<MetalBuffer*>* bufferCache;
+@property (nonatomic, strong) NSMutableSet<NSNumber*>* nearestTextures; // Flycast user-texture override
 @property (nonatomic, assign) double                        lastBufferCachePurge;
 - (MetalBuffer*)dequeueReusableBufferOfLength:(NSUInteger)length device:(id<MTLDevice>)device;
 - (id<MTLRenderPipelineState>)renderPipelineStateForFramebufferDescriptor:(FramebufferDescriptor*)descriptor device:(id<MTLDevice>)device;
@@ -92,6 +93,15 @@ static ImGui_ImplMetal_Data*    ImGui_ImplMetal_GetBackendData()    { return ImG
 static void                     ImGui_ImplMetal_DestroyBackendData(){ IM_DELETE(ImGui_ImplMetal_GetBackendData()); }
 
 static inline CFTimeInterval    GetMachAbsoluteTimeInSeconds()      { return (CFTimeInterval)(double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9); }
+
+void ImGui_ImplMetal_SetTextureNearest(ImTextureID texture, bool nearest)
+{
+    ImGui_ImplMetal_Data* bd = ImGui_ImplMetal_GetBackendData();
+    IM_ASSERT(bd != nullptr);
+    NSNumber* key = @(texture);
+    if (nearest) [bd->SharedMetalContext.nearestTextures addObject:key];
+    else [bd->SharedMetalContext.nearestTextures removeObject:key];
+}
 
 #ifdef IMGUI_IMPL_METAL_CPP
 
@@ -307,6 +317,8 @@ void ImGui_ImplMetal_RenderDrawData(ImDrawData* draw_data, id<MTLCommandBuffer> 
                 [commandEncoder setScissorRect:scissorRect];
 
                 // Bind texture, Draw
+                const unsigned nearest = [ctx.nearestTextures containsObject:@(pcmd->GetTexID())] ? 1 : 0;
+                [commandEncoder setFragmentBytes:&nearest length:sizeof(nearest) atIndex:0];
                 if (ImTextureID tex_id = pcmd->GetTexID())
                     [commandEncoder setFragmentTexture:(__bridge id<MTLTexture>)(void*)(intptr_t)(tex_id) atIndex:0];
 
@@ -512,6 +524,7 @@ void ImGui_ImplMetal_DestroyDeviceObjects()
     {
         self.renderPipelineStateCache = [NSMutableDictionary dictionary];
         self.bufferCache = [NSMutableArray array];
+        self.nearestTextures = [NSMutableSet set];
         _lastBufferCachePurge = GetMachAbsoluteTimeInSeconds();
     }
     return self;
@@ -588,9 +601,11 @@ void ImGui_ImplMetal_DestroyDeviceObjects()
     "}\n"
     "\n"
     "fragment half4 fragment_main(VertexOut in [[stage_in]],\n"
-    "                             texture2d<half, access::sample> texture [[texture(0)]]) {\n"
+    "                             texture2d<half, access::sample> texture [[texture(0)]],\n"
+    "                             constant uint& nearest [[buffer(0)]]) {\n"
     "    constexpr sampler linearSampler(coord::normalized, min_filter::linear, mag_filter::linear, mip_filter::linear);\n"
-    "    half4 texColor = texture.sample(linearSampler, in.texCoords);\n"
+    "    constexpr sampler nearestSampler(coord::normalized, min_filter::nearest, mag_filter::nearest);\n"
+    "    half4 texColor = nearest ? texture.sample(nearestSampler, in.texCoords) : texture.sample(linearSampler, in.texCoords);\n"
     "    return half4(in.color) * texColor;\n"
     "}\n";
 

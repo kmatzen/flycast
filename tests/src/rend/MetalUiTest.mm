@@ -19,6 +19,64 @@
 }
 @end
 
+TEST(MetalUi, UserTextureSamplingOverrideCanBeCleared)
+{
+    @autoreleasepool {
+        using namespace rend::soft;
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        ASSERT_NE(device, nil);
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        auto source = PresentationFrame::create(2, 1, 2.f, {},
+            {{255, 0, 0, 255}, {0, 0, 255, 255}});
+        id<MTLTexture> texture = uploadMetalPresentationFrame(device, *source);
+        const ImTextureID textureId = (ImTextureID)(uintptr_t)(__bridge void*)texture;
+        ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr;
+        ASSERT_TRUE(ImGui_ImplMetal_Init(device));
+        for (bool nearest : {false, true, false}) {
+            ImGui_ImplMetal_SetTextureNearest(textureId, nearest);
+            auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                width:8 height:8 mipmapped:NO];
+            descriptor.usage = MTLTextureUsageRenderTarget;
+            descriptor.storageMode = MTLStorageModeShared;
+            id<MTLTexture> target = [device newTextureWithDescriptor:descriptor];
+            auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = target;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            ImGui::GetIO().DisplaySize = ImVec2(8, 8);
+            ImGui::GetIO().DeltaTime = 1.f / 60;
+            ImGui_ImplMetal_NewFrame(pass);
+            ImGui::NewFrame();
+            ImGui::GetForegroundDrawList()->AddImage(ImTextureRef(textureId), ImVec2(0, 0), ImVec2(8, 8));
+            ImGui::Render();
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+            ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), command, encoder);
+            [encoder endEncoding];
+            [command commit];
+            [command waitUntilCompleted];
+            ASSERT_EQ(command.status, MTLCommandBufferStatusCompleted);
+            std::vector<Color> pixels(64);
+            [target getBytes:pixels.data() bytesPerRow:8 * sizeof(Color)
+                fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+            for (unsigned y = 0; y < 8; ++y)
+                for (unsigned x = 0; x < 8; ++x) {
+                    const Color pixel = pixels[y * 8 + x];
+                    if (nearest) EXPECT_EQ(pixel, source->pixels[x < 4 ? 0 : 1]);
+                    else if (x == 3 || x == 4) {
+                        EXPECT_GT(pixel.r, 0);
+                        EXPECT_GT(pixel.b, 0);
+                        EXPECT_LT(pixel.r, 255);
+                        EXPECT_LT(pixel.b, 255);
+                    }
+                }
+        }
+        ImGui_ImplMetal_Shutdown();
+        ImGui::DestroyContext();
+    }
+}
+
 TEST(MetalUi, AllocationFailureReturnsNoTexture)
 {
     @autoreleasepool {

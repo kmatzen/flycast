@@ -93,9 +93,6 @@ public:
     }
     ImTextureID updateTexture(const std::string& name, const u8 *data, int width, int height, bool nearest) override
     {
-        // Upstream ImGui Metal uses a fixed linear sampler. Fail closed until
-        // per-texture nearest sampling is implemented instead of ignoring it.
-        if (nearest) throw FlycastException("Metal UI nearest texture sampling is not implemented");
         if (!data || width <= 0 || height <= 0 || width > 16384 || height > 16384)
             throw FlycastException("Invalid Metal UI texture");
         MTLTextureDescriptor *description = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -105,10 +102,16 @@ public:
         id<MTLTexture> texture = [layer.device newTextureWithDescriptor:description];
         if (!texture) throw FlycastException("Metal UI texture allocation failed");
         [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:data bytesPerRow:size_t(width) * 4];
+        deleteTexture(name);
         textures[name] = texture;
+        ImGui_ImplMetal_SetTextureNearest(getTexture(name), nearest);
         return getTexture(name);
     }
-    void deleteTexture(const std::string& name) override { textures.erase(name); }
+    void deleteTexture(const std::string& name) override
+    {
+        if (auto id = getTexture(name)) ImGui_ImplMetal_SetTextureNearest(id, false);
+        textures.erase(name);
+    }
 private:
     void prepare()
     {
