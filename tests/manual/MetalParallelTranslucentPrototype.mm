@@ -1,5 +1,6 @@
 // Feasibility test for parallel PVR translucent shading followed by an exact
-// per-pixel ordered resolve.
+// per-pixel ordered resolve. It compares a global intermediate buffer with an
+// on-chip threadgroup tile.
 // clang++ -std=c++20 -O3 -fobjc-arc -framework Foundation -framework Metal \
 //   tests/manual/MetalParallelTranslucentPrototype.mm -o /tmp/metal-parallel-tr
 
@@ -134,6 +135,24 @@ kernel void resolve(const device uint *fragments [[buffer(0)]],
     color = alphaBlend(fragments[layer * c.width * c.height + index], color);
   output[index] = color;
 }
+
+kernel void threadgroupShade(const device uint *texture [[buffer(0)]],
+                             device uint *output [[buffer(1)]],
+                             constant Constants& c [[buffer(2)]],
+                             uint3 position [[thread_position_in_grid]],
+                             uint3 local [[thread_position_in_threadgroup]]) {
+  threadgroup uint colors[8 * 8 * 14];
+  const uint localPixel = local.y * 8 + local.x;
+  colors[local.z * 64 + localPixel] =
+      shadeFragment(texture, position.xy, position.z, c);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (local.z == 0) {
+    uint color = 0xff000000u;
+    for (uint layer = 0; layer < 14; ++layer)
+      color = alphaBlend(colors[layer * 64 + localPixel], color);
+    output[position.y * c.width + position.x] = color;
+  }
+}
 )METAL";
     __block NSError *error = nil;
     MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
@@ -153,7 +172,8 @@ kernel void resolve(const device uint *fragments [[buffer(0)]],
     id<MTLComputePipelineState> serial = pipeline(@"serialShade");
     id<MTLComputePipelineState> parallel = pipeline(@"parallelShade");
     id<MTLComputePipelineState> resolve = pipeline(@"resolve");
-    if (serial == nil || parallel == nil || resolve == nil)
+    id<MTLComputePipelineState> threadgroup = pipeline(@"threadgroupShade");
+    if (serial == nil || parallel == nil || resolve == nil || threadgroup == nil)
       return 2;
     std::vector<uint32_t> texture(TextureSize * TextureSize);
     uint32_t state = 0x505652u;
@@ -169,16 +189,18 @@ kernel void resolve(const device uint *fragments [[buffer(0)]],
         options:MTLResourceStorageModeShared];
     id<MTLBuffer> parallelOutput = [device newBufferWithLength:pixels * 4
         options:MTLResourceStorageModeShared];
+    id<MTLBuffer> threadgroupOutput = [device newBufferWithLength:pixels * 4
+        options:MTLResourceStorageModeShared];
     id<MTLBuffer> fragments = [device newBufferWithLength:pixels * Layers * 4
         options:MTLResourceStorageModePrivate];
     id<MTLCommandQueue> queue = [device newCommandQueue];
     const Constants constants{Width, Height, Layers, TextureSize};
     const MTLSize group2D = MTLSizeMake(8, 8, 1);
-    auto run = [&](bool useParallel) {
+    auto run = [&](int mode) {
       const auto start = std::chrono::steady_clock::now();
       for (uint32_t iteration = 0; iteration < Iterations; ++iteration) {
         id<MTLCommandBuffer> command = [queue commandBuffer];
-        if (useParallel) {
+        if (mode == 1) {
           id<MTLComputeCommandEncoder> shade = [command computeCommandEncoder];
           [shade setComputePipelineState:parallel];
           [shade setBuffer:textureBuffer offset:0 atIndex:0];
@@ -195,6 +217,15 @@ kernel void resolve(const device uint *fragments [[buffer(0)]],
           [blend dispatchThreads:MTLSizeMake(Width, Height, 1)
                  threadsPerThreadgroup:group2D];
           [blend endEncoding];
+        } else if (mode == 2) {
+          id<MTLComputeCommandEncoder> shade = [command computeCommandEncoder];
+          [shade setComputePipelineState:threadgroup];
+          [shade setBuffer:textureBuffer offset:0 atIndex:0];
+          [shade setBuffer:threadgroupOutput offset:0 atIndex:1];
+          [shade setBytes:&constants length:sizeof(constants) atIndex:2];
+          [shade dispatchThreads:MTLSizeMake(Width, Height, Layers)
+                 threadsPerThreadgroup:MTLSizeMake(8, 8, Layers)];
+          [shade endEncoding];
         } else {
           id<MTLComputeCommandEncoder> shade = [command computeCommandEncoder];
           [shade setComputePipelineState:serial];
@@ -211,16 +242,24 @@ kernel void resolve(const device uint *fragments [[buffer(0)]],
       return std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - start).count() / Iterations;
     };
-    const double serialMilliseconds = run(false);
-    const double parallelMilliseconds = run(true);
-    size_t mismatches = 0;
+    const double serialMilliseconds = run(0);
+    const double parallelMilliseconds = run(1);
+    const double threadgroupMilliseconds = run(2);
+    size_t parallelMismatches = 0;
+    size_t threadgroupMismatches = 0;
     const uint32_t *a = static_cast<const uint32_t *>(serialOutput.contents);
     const uint32_t *b = static_cast<const uint32_t *>(parallelOutput.contents);
-    for (size_t pixel = 0; pixel < pixels; ++pixel)
-      mismatches += a[pixel] != b[pixel];
-    std::printf("pixels=%zu layers=%u serial_ms=%.3f parallel_ms=%.3f "
-                "mismatches=%zu\n", pixels, Layers, serialMilliseconds,
-                parallelMilliseconds, mismatches);
-    return mismatches == 0 ? 0 : 1;
+    const uint32_t *c = static_cast<const uint32_t *>(threadgroupOutput.contents);
+    for (size_t pixel = 0; pixel < pixels; ++pixel) {
+      parallelMismatches += a[pixel] != b[pixel];
+      threadgroupMismatches += a[pixel] != c[pixel];
+    }
+    std::printf("pixels=%zu layers=%u serial_ms=%.3f global_ms=%.3f "
+                "tile_ms=%.3f tile_speedup=%.2fx global_mismatches=%zu "
+                "tile_mismatches=%zu\n", pixels, Layers, serialMilliseconds,
+                parallelMilliseconds, threadgroupMilliseconds,
+                serialMilliseconds / threadgroupMilliseconds,
+                parallelMismatches, threadgroupMismatches);
+    return parallelMismatches == 0 && threadgroupMismatches == 0 ? 0 : 1;
   }
 }
