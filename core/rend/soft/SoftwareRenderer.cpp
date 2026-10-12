@@ -1092,13 +1092,14 @@ private:
 		std::vector<u8> opaqueMask;
 		std::vector<u8> punchMask;
 		std::vector<u8> translucentMask;
+		std::vector<u8> modifierCoverage;
 		if (!passRegions[0].empty())
 		{
 			const size_t pixelCount = static_cast<size_t>(width) * height;
 			opaqueMask.resize(pixelCount);
 			punchMask.resize(pixelCount);
 			translucentMask.resize(pixelCount);
-			std::vector<u8> modifierCoverage(pixelCount);
+			modifierCoverage.resize(pixelCount);
 			for (const RegionInfo& region : passRegions[0])
 			{
 				if (hasTranslucent && region.translucentPresent
@@ -1118,10 +1119,6 @@ private:
 					if (region.opaqueModifierPresent) std::fill(modifierCoverage.begin() + first, modifierCoverage.begin() + last, 1);
 				}
 			}
-			if (useOpaqueModifiers
-					&& std::find(modifierCoverage.begin(), modifierCoverage.end(), 0)
-							!= modifierCoverage.end())
-				return reject("partial-modifier-coverage");
 		}
 		const bool cpuTranslucent = hasTranslucent && (regionSortDiffers
 				|| (config::ModifierVolumes
@@ -1168,8 +1165,12 @@ private:
 			SoftwareRasterizer modifierRasterizer(width, height);
 			modifierRasterizer.restoreDepth(depth);
 			SoftwareRasterizer *savedRasterizer = rasterizer;
+			const std::vector<u8> *savedCoverageMask = activeCoverageMask;
 			rasterizer = &modifierRasterizer;
+			if (!modifierCoverage.empty())
+				activeCoverageMask = &modifierCoverage;
 			drawModifierVolumes(rendContext->global_param_mvo, 0, pass.mvo_count);
+			activeCoverageMask = savedCoverageMask;
 			rasterizer = savedRasterizer;
 			modifierMask.resize(static_cast<size_t>(width) * height);
 			const std::vector<u8>& stencil = modifierRasterizer.stencilBuffer();
