@@ -2284,3 +2284,32 @@ before and after both runs:
 Earlier exploratory logs are not this serial comparison. The next pacing
 experiment must keep the skipped-frame criterion rather than simply exclude
 the observed startup losses after the fact.
+
+The probe accepts `--paced` to use
+`presentDrawable:afterMinimumDuration:1.0/60.0`. The SDK describes this as
+delaying presentation until the previous frame's actual presentation time is
+known; it does not guarantee that a drawable is delivered. Run two alternating
+pairs on one unchanged binary with:
+
+```sh
+node tools/run-metal-window-probe.mjs \
+  build-renderer-tests/tests/flycast-metal-window-probe /new/output/directory
+```
+
+The runner preserves raw streams, checks all IDs/callback counts, rejects
+zero-time frames as skips, validates monotonic nonzero presentation times,
+and verifies the binary hash before/after every process. It reports intervals
+between delivered callbacks separately from the missing IDs. Timeout or
+unexpected termination invalidates a capture; a valid capture with skips
+still fails the overall gate after collecting all four cases.
+
+In `/tmp/pvr-metal-pacing-20261012/report.json`, immediate runs skipped IDs
+0/1/2 and 1 respectively; both paced runs skipped IDs 0/1. Thus every run
+failed lossless delivery. Delivered-interval medians were approximately
+16.666 ms in all four runs, but maxima were approximately 50, 33.3, 116.7,
+and 50 ms in execution order. Minimum-duration presentation alone is not
+a fix. Binary SHA-256:
+`2db871a47155d65bfa5b72766906d8a653707358d76fb306696db6190bbd6880`.
+All runs enabled Metal API validation and included startup; no warmup frames
+were silently removed. This evidence motivates explicit drawable-readiness
+and skipped-presentation handling before native emulator integration.

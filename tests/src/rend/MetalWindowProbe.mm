@@ -6,13 +6,15 @@
 #include <atomic>
 #include <cstdio>
 #include <memory>
+#include <cstring>
 
 // Manual host-window probe, not a Dreamcast conformance or gameplay benchmark.
-static int runProbe() API_AVAILABLE(macos(10.15.4));
-static int runProbe()
+static int runProbe(bool paced) API_AVAILABLE(macos(10.15.4));
+static int runProbe(bool paced)
 {
     @autoreleasepool {
         SDL_SetMainReady();
+        std::fprintf(stderr, "METAL_WINDOW_BEGIN mode=%s frames=120\n", paced ? "minimum-duration" : "immediate");
         if (SDL_Init(SDL_INIT_VIDEO) != 0) return 1;
         SDL_Window *window = SDL_CreateWindow("Flycast native Metal presentation probe",
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480,
@@ -79,7 +81,10 @@ static int runProbe()
                 [encoder setFragmentTexture:texture atIndex:0];
                 [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                 [encoder endEncoding];
-                [command presentDrawable:drawable];
+                if (paced)
+                    [command presentDrawable:drawable afterMinimumDuration:1.0 / 60.0];
+                else
+                    [command presentDrawable:drawable];
                 [command commit];
                 [command waitUntilCompleted];
                 if (command.status != MTLCommandBufferStatusCompleted) { failed = true; break; }
@@ -100,9 +105,13 @@ static int runProbe()
     }
 }
 
-int main()
+int main(int argc, char **argv)
 {
-    if (@available(macOS 10.15.4, *)) return runProbe();
+    if (argc > 2 || (argc == 2 && std::strcmp(argv[1], "--paced") != 0)) {
+        std::fprintf(stderr, "Usage: flycast-metal-window-probe [--paced]\n");
+        return 7;
+    }
+    if (@available(macOS 10.15.4, *)) return runProbe(argc == 2);
     std::fprintf(stderr, "METAL_WINDOW requires macOS 10.15.4 presentation callbacks\n");
     return 6;
 }
