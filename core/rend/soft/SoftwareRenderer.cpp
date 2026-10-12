@@ -1007,8 +1007,7 @@ private:
 		const bool autosort = !config::PerStripSorting && pass.autosort;
 		const bool hasTranslucent = pass.tr_count != 0;
 		const bool useOpaqueModifiers = config::ModifierVolumes && pass.mvo_count != 0;
-		const bool cpuTranslucent = config::ModifierVolumes && hasTranslucent
-				&& (pass.mvo_count != 0 || pass.mvo_tr_count != 0);
+		bool regionSortDiffers = false;
 		std::vector<u8> opaqueMask;
 		std::vector<u8> punchMask;
 		std::vector<u8> translucentMask;
@@ -1023,7 +1022,7 @@ private:
 			{
 				if (hasTranslucent && region.translucentPresent
 						&& region.autosort != autosort)
-					return reject("mixed-translucent-sort");
+					regionSortDiffers = true;
 				const s32 x0 = std::clamp<s32>(region.x0, 0, width);
 				const s32 y0 = std::clamp<s32>(region.y0, 0, height);
 				const s32 x1 = std::clamp<s32>(region.x1, 0, width);
@@ -1043,6 +1042,9 @@ private:
 							!= modifierCoverage.end())
 				return reject("partial-modifier-coverage");
 		}
+		const bool cpuTranslucent = hasTranslucent && (regionSortDiffers
+				|| (config::ModifierVolumes
+						&& (pass.mvo_count != 0 || pass.mvo_tr_count != 0)));
 
 		std::vector<hybrid::Triangle> commands;
 		std::vector<u32> textureAtlas { 0xffffffffu };
