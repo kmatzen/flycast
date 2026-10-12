@@ -506,3 +506,26 @@ Configuration must select `/opt/homebrew/lib/libpng.dylib` and the corresponding
 Homebrew include directory: default discovery selected an x86_64-only library
 under `/usr/local/lib` on this host. Configuration success alone is not proof
 that the Vulkan renderer can initialize or capture a frame.
+
+The isolated build subsequently completed after also setting
+`ZLIB_LIBRARY=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib/libz.tbd`.
+Default detection returned `-lz`, which Make incorrectly treated as a file
+dependency. These are local build-cache corrections, not renderer changes.
+
+### Vulkan via MoltenVK: first matched capture
+
+A muted Seaman frame-4 run of the isolated app with `pvr.rend=4`, single-threaded
+rendering, and full framebuffer emulation logged `backend=vulkan` and successful
+VRAM, register, TA, and context snapshots. Artifacts use the `vk` prefix in
+`/tmp/pvr-context-capture.c8w16g/`. The captured-input gate passes against `sw`.
+The output VRAM is byte-identical to conventional OpenGL's `gl.rendered.vram`
+(confirmed by `cmp`), SHA256
+`567a4fa052e0cfddfa87ea0369bf633d084fb3c0b51c9366273fe0c41f3f15e6`.
+It therefore reproduces the same 1732 framebuffer-pixel differences from
+software, with maximum native RGB565 channel errors `[1,1,1]`.
+
+Reports are `vk-input-comparison.json` and `vk-comparison.json`; runtime log
+is `vk.log`. MoltenVK logged warnings about unsupported disabling of primitive
+restart; retain those warnings with the evidence. The owned process was stopped
+after capture. This establishes a conventional Vulkan/MoltenVK result on this
+M1 for one input, not Vulkan OIT, other Vulkan drivers, or hardware accuracy.
