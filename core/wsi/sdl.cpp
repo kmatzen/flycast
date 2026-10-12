@@ -23,6 +23,9 @@
 #include "ui/gui.h"
 #include "sdl/sdl.h"
 #include "cfg/option.h"
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 SDLGLGraphicsContext::SDLGLGraphicsContext(void *window, void *display)
 	: GLGraphicsContext(window, display)
@@ -119,7 +122,30 @@ void SDLGLGraphicsContext::swap()
 {
 	do_swap_automation();
 	changeGLSwapInterval();
+	const bool traceSwap = std::getenv("FLYCAST_PVR_TRACE_SWAP") != nullptr;
+	const auto swapStart = traceSwap ? std::chrono::steady_clock::now()
+			: std::chrono::steady_clock::time_point{};
 	SDL_GL_SwapWindow((SDL_Window *)window);
+	if (traceSwap)
+	{
+		// Host presentation calls, including repeated game frames. This is not
+		// game FPS or an emulated-time measurement.
+		static unsigned count = 0;
+		static double totalMs = 0;
+		static double maxMs = 0;
+		const double ms = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - swapStart).count();
+		totalMs += ms;
+		if (ms > maxMs)
+			maxMs = ms;
+		if (++count == 120)
+		{
+			std::fprintf(stderr, "PVR_SWAP calls=%u interval=%d mean_ms=%.3f max_ms=%.3f\n",
+					count, SDL_GL_GetSwapInterval(), totalMs / count, maxMs);
+			count = 0;
+			totalMs = maxMs = 0;
+		}
+	}
 
 	// Check if drawable has been resized
 	SDL_GL_GetDrawableSize((SDL_Window *)window, &settings.display.width, &settings.display.height);
@@ -168,4 +194,3 @@ void SDLGLGraphicsContext::Create(void *window, void *display) {
 }
 
 #endif
-

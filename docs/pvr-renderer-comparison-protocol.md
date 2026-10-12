@@ -665,3 +665,22 @@ the detected game swap interval, unlike OpenGL. Neither observation alone
 establishes the cause of the whole slowdown. Measure presentation waits and
 emulator pacing before changing their policy; do not remove framebuffer
 operations to improve this result.
+
+`FLYCAST_PVR_TRACE_SWAP=1` now measures only `SDL_GL_SwapWindow`, reporting
+mean and maximum wall time per 120 host presentation calls and the current SDL
+swap interval. These windows include repeated game frames and must not be
+interpreted as game FPS. Use a fresh process without backend or interval
+changes inside a window. Timing is opt-in and does not change swap policy.
+
+A VSync-enabled hybrid run reproduced 0.6422–0.6489 emulation speed in three
+later render windows. Nearby swap windows reported means of 10.048–11.350 ms
+and maxima of 16.190–16.756 ms, at interval 1. Log:
+`/tmp/pvr-swap-hybrid.log`; the owned process was stopped afterward. Source
+inspection also narrows the interval hypothesis: `rend_start_render` assigns
+interval 1 when full framebuffer emulation is enabled, so the software path's
+missing game-interval forwarding does not explain this configuration.
+`rend_vblank` requests framebuffer reconstruction and presentation on every
+emulated VBlank, even if the game has not submitted another render. In the
+single-threaded configuration these presentation waits serialize with
+emulation. Next isolate the threaded configuration and measure its emulated
+progress safely, rather than assuming the same result applies to it.
