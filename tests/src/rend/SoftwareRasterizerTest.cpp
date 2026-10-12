@@ -879,9 +879,27 @@ TEST(SoftwareRasterizer, AppliesFramebufferDitherMatrix)
 
 TEST(SoftwareRasterizer, DithersFinalFramebufferAfterBlending)
 {
-	std::vector<Color> pixels(1, { 100, 100, 100, 100 });
+	SoftwareRasterizer rasterizer(1, 1);
+	rasterizer.clear({ 0, 0, 0, 0 });
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.srcBlend = BlendFactor::One;
+	state.dstBlend = BlendFactor::One;
+	const Color source { 2, 2, 2, 0 };
+	for (int layer = 0; layer < 2; ++layer)
+		rasterizer.drawTriangle({ 0, 0, 1, source }, { 2, 0, 1, source },
+				{ 0, 2, 1, source }, state);
+	ASSERT_EQ(rasterizer.pixel(0, 0), (Color { 4, 4, 4, 0 }));
+	std::vector<Color> pixels = rasterizer.colorBuffer();
 	SoftwareRasterizer::ditherFramebuffer(pixels, 1, 1, 1);
-	EXPECT_EQ(pixels[0], (Color { 102, 101, 102, 101 }));
+	EXPECT_EQ(pixels[0], (Color { 6, 5, 6, 1 }));
+	// At (0,0), RGB565 dither adds (2,1,2). Applying it to each
+	// source before additive blending would produce (8,6,8), crossing
+	// the red and blue 5-bit packing boundary incorrectly for this model.
+	const u16 packed = (pixels[0].r >> 3) << 11
+			| (pixels[0].g >> 2) << 5 | (pixels[0].b >> 3);
+	EXPECT_EQ(packed, 0x0020);
+	EXPECT_NE(packed, 0x0821);
 }
 
 TEST(SoftwareRasterizer, QuantizesFramebufferAndAppendsDisplayConcatBits)

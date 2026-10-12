@@ -142,6 +142,18 @@ The signed software-minus-OpenGL channel sums are R=410, G=603, B=548.
 This makes dithering and rounding useful next candidates to isolate, without
 establishing either implementation as the hardware-correct result.
 
+Source inspection identifies an ordering difference worth isolating:
+`core/rend/gles/gles.cpp` adds dither to fragment color before returning it
+for host blending. `SoftwareRenderer::writeDisplayFramebufferToVram` applies
+it to completed frame-store pixels before packing. The reference manual's
+`FB_W_CTRL.fb_dither` description places dithering upon framebuffer writing,
+but does not by itself settle every intermediate precision detail.
+The strengthened `DithersFinalFramebufferAfterBlending` test now actually draws
+two additive layers: at (0,0), RGB (2,2,2) + (2,2,2), then RGB565 dither
+(2,1,2), packs to `0020`. Dithering each layer before blending would pack to
+`0821`. This tests the software model's intended stage ordering; it does not
+yet prove that this difference explains all 1,732 Seaman words.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
