@@ -32,6 +32,7 @@ struct Vertex {
 struct Constants {
   float targetSize[2];
   float bias;
+  uint32_t primitiveCount;
 };
 
 int64_t edge(const Vertex &a, const Vertex &b, int32_t x, int32_t y) {
@@ -89,7 +90,7 @@ int main() {
 #include <metal_stdlib>
 using namespace metal;
 struct Input { int2 fixedPosition; float z; };
-struct Constants { float2 targetSize; float bias; };
+struct Constants { float2 targetSize; float bias; uint primitiveCount; };
 struct Varying { float4 position [[position]]; };
 struct FragmentOutput { uint primitive [[color(0)]]; };
 vertex Varying vertexMain(const device Input *vertices [[buffer(0)]],
@@ -112,16 +113,75 @@ fragment FragmentOutput fragmentMain(uint primitive [[primitive_id]]) {
   result.primitive = primitive + 1;
   return result;
 }
-kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
-                  device uint *colors [[buffer(0)]],
+kernel void correctVisibility(
+                  texture2d<uint, access::read> visibility [[texture(0)]],
+                  const device Input *vertices [[buffer(0)]],
+                  device uint *corrected [[buffer(1)]],
+                  constant Constants& constants [[buffer(2)]],
                   uint2 pixel [[thread_position_in_grid]]) {
-  // Stand-in for the exact TSP kernel: proves the visibility-to-compute handoff
-  // without depending on fragment interpolation or a render-target readback.
   if (pixel.x >= visibility.get_width() || pixel.y >= visibility.get_height())
     return;
-  const uint id = visibility.read(pixel).x;
+  const uint candidate = visibility.read(pixel).x;
   const uint index = pixel.y * visibility.get_width() + pixel.x;
-  colors[index] = id == 0 ? 0xff000000u : 0xff000000u | (id * 2654435761u);
+  if (candidate == 0) {
+    corrected[index] = 0;
+    return;
+  }
+  const int2 sample = int2(pixel) * 16
+          + int2(constants.bias == 0.0f ? 8 : 0);
+  const uint candidatePrimitive = candidate - 1;
+  const device Input *winner = vertices + candidatePrimitive * 3;
+  const long candidateArea = edge(winner[0].fixedPosition,
+          winner[1].fixedPosition, winner[2].fixedPosition);
+  const long candidateW0 = edge(winner[1].fixedPosition,
+          winner[2].fixedPosition, sample);
+  const long candidateW1 = edge(winner[2].fixedPosition,
+          winner[0].fixedPosition, sample);
+  const long candidateW2 = edge(winner[0].fixedPosition,
+          winner[1].fixedPosition, sample);
+  const float candidateS0 = float(candidateW0) / float(candidateArea);
+  const float candidateS1 = float(candidateW1) / float(candidateArea);
+  const float candidateS2 = float(candidateW2) / float(candidateArea);
+  float bestDepth = winner[0].z * candidateS0 + winner[1].z * candidateS1
+          + winner[2].z * candidateS2;
+  uint bestPrimitive = candidatePrimitive;
+  for (uint primitive = 0; primitive < constants.primitiveCount; ++primitive) {
+    if (primitive == candidatePrimitive)
+      continue;
+    const device Input *v = vertices + primitive * 3;
+    if (max(v[0].z, max(v[1].z, v[2].z)) < bestDepth)
+      continue;
+    const long w0 = edge(v[1].fixedPosition, v[2].fixedPosition, sample);
+    const long w1 = edge(v[2].fixedPosition, v[0].fixedPosition, sample);
+    const long w2 = edge(v[0].fixedPosition, v[1].fixedPosition, sample);
+    // Fixed-function coverage has already proved the candidate. Potential
+    // replacements use the exact PVR 1/16 grid and top-left convention.
+    const bool covered = w0 > 0 || (w0 == 0 &&
+            (v[2].fixedPosition.y - v[1].fixedPosition.y < 0 ||
+             (v[2].fixedPosition.y == v[1].fixedPosition.y &&
+              v[2].fixedPosition.x - v[1].fixedPosition.x > 0)));
+    const bool covered1 = w1 > 0 || (w1 == 0 &&
+            (v[0].fixedPosition.y - v[2].fixedPosition.y < 0 ||
+             (v[0].fixedPosition.y == v[2].fixedPosition.y &&
+              v[0].fixedPosition.x - v[2].fixedPosition.x > 0)));
+    const bool covered2 = w2 > 0 || (w2 == 0 &&
+            (v[1].fixedPosition.y - v[0].fixedPosition.y < 0 ||
+             (v[1].fixedPosition.y == v[0].fixedPosition.y &&
+              v[1].fixedPosition.x - v[0].fixedPosition.x > 0)));
+    if (!covered || !covered1 || !covered2)
+      continue;
+    const long area = edge(v[0].fixedPosition, v[1].fixedPosition,
+                           v[2].fixedPosition);
+    const float s0 = float(w0) / float(area);
+    const float s1 = float(w1) / float(area);
+    const float s2 = float(w2) / float(area);
+    const float depth = v[0].z * s0 + v[1].z * s1 + v[2].z * s2;
+    if (depth > bestDepth || (depth == bestDepth && primitive > bestPrimitive)) {
+      bestDepth = depth;
+      bestPrimitive = primitive;
+    }
+  }
+  corrected[index] = bestPrimitive + 1;
 }
 )METAL";
     NSError *error = nil;
@@ -150,7 +210,8 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
     id<MTLRenderPipelineState> renderPipeline =
         [device newRenderPipelineStateWithDescriptor:renderDescriptor error:&error];
     id<MTLComputePipelineState> shadePipeline = [device
-        newComputePipelineStateWithFunction:[library newFunctionWithName:@"shade"]
+        newComputePipelineStateWithFunction:
+            [library newFunctionWithName:@"correctVisibility"]
         error:&error];
     if (renderPipeline == nil || shadePipeline == nil) {
       std::fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
@@ -186,6 +247,7 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
     size_t scenes = 0;
     size_t randomVisibilityMismatches = 0;
     size_t nearEqualVisibilityMismatches = 0;
+    size_t correctedVisibilityMismatches = 0;
     bool reportedFirstMismatch = false;
     for (int32_t sampleOffset : {0, 8}) {
       for (uint32_t iteration = 0; iteration < 250; ++iteration) {
@@ -214,7 +276,11 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
             length:vertices.size() * sizeof(Vertex)
             options:MTLResourceStorageModeShared];
         Constants constants{{float(Width), float(Height)},
-                            sampleOffset == 0 ? .5f : 0.f};
+                            sampleOffset == 0 ? .5f : 0.f,
+                            uint32_t(vertices.size() / 3)};
+        id<MTLBuffer> correctedBuffer = [device newBufferWithLength:
+            Width * Height * sizeof(uint32_t)
+            options:MTLResourceStorageModeShared];
         MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = visibility;
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -235,6 +301,16 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
                     vertexCount:vertices.size()];
         [encoder endEncoding];
+        id<MTLComputeCommandEncoder> correction =
+            [command computeCommandEncoder];
+        [correction setComputePipelineState:shadePipeline];
+        [correction setTexture:visibility atIndex:0];
+        [correction setBuffer:vertexBuffer offset:0 atIndex:0];
+        [correction setBuffer:correctedBuffer offset:0 atIndex:1];
+        [correction setBytes:&constants length:sizeof(constants) atIndex:2];
+        [correction dispatchThreads:MTLSizeMake(Width, Height, 1)
+                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [correction endEncoding];
         [command commit];
         [command waitUntilCompleted];
         if (command.status == MTLCommandBufferStatusError) {
@@ -243,6 +319,8 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
           return 2;
         }
         std::vector<uint32_t> actual(Width * Height);
+        const uint32_t *corrected =
+            static_cast<const uint32_t *>(correctedBuffer.contents);
         [visibility getBytes:actual.data() bytesPerRow:Width * sizeof(uint32_t)
                   fromRegion:MTLRegionMake2D(0, 0, Width, Height) mipmapLevel:0];
         for (size_t pixel = 0; pixel < actual.size(); ++pixel) {
@@ -258,6 +336,7 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
               reportedFirstMismatch = true;
             }
           }
+          correctedVisibilityMismatches += corrected[pixel] != expected[pixel];
         }
         ++scenes;
       }
@@ -287,7 +366,8 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
     id<MTLBuffer> stressColors = [device newBufferWithLength:
         StressWidth * StressHeight * sizeof(uint32_t)
         options:MTLResourceStorageModePrivate];
-    Constants constants{{float(StressWidth), float(StressHeight)}, 0.f};
+    Constants constants{{float(StressWidth), float(StressHeight)}, 0.f,
+                        uint32_t(stressVertices.size() / 3)};
     constexpr uint32_t Iterations = 100;
     const auto start = std::chrono::steady_clock::now();
     for (uint32_t iteration = 0; iteration < Iterations; ++iteration) {
@@ -313,7 +393,9 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
       id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
       [compute setComputePipelineState:shadePipeline];
       [compute setTexture:stressVisibility atIndex:0];
-      [compute setBuffer:stressColors offset:0 atIndex:0];
+      [compute setBuffer:stressVerticesBuffer offset:0 atIndex:0];
+      [compute setBuffer:stressColors offset:0 atIndex:1];
+      [compute setBytes:&constants length:sizeof(constants) atIndex:2];
       const MTLSize group = MTLSizeMake(16, 16, 1);
       [compute dispatchThreads:MTLSizeMake(StressWidth, StressHeight, 1)
              threadsPerThreadgroup:group];
@@ -325,11 +407,12 @@ kernel void shade(texture2d<uint, access::read> visibility [[texture(0)]],
         std::chrono::steady_clock::now() - start).count() / Iterations;
     (void)stressColors;
     std::printf("visibility_scenes=%zu random_visibility_mismatches=%zu "
-                "near_equal_visibility_mismatches=%zu stress_triangles=72 "
+                "near_equal_visibility_mismatches=%zu "
+                "corrected_visibility_mismatches=%zu stress_triangles=72 "
                 "mean_submit_gpu_ms=%.3f\n", scenes,
                 randomVisibilityMismatches, nearEqualVisibilityMismatches,
-                milliseconds);
-    if (randomVisibilityMismatches != 0)
+                correctedVisibilityMismatches, milliseconds);
+    if (randomVisibilityMismatches != 0 || correctedVisibilityMismatches != 0)
       return 1;
   }
   return 0;
