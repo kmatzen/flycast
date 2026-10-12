@@ -112,13 +112,17 @@ vertex VisibilityVarying visibilityVertex(
         const device VisibilityVertex *vertices [[buffer(0)]],
         constant Constants& constants [[buffer(1)]], uint id [[vertex_id]])
 {
-    const float2 screen = float2(vertices[id].fixedPosition) / 16.0f
-            + constants.visibilityBias;
+    // Vertices describe a conservative pixel-bounds rectangle, not the PVR
+    // triangle. Fragment coverage below applies the exact sample offset.
+    const float2 screen = float2(vertices[id].fixedPosition) / 16.0f;
     VisibilityVarying result;
     result.position = float4(screen.x / float(constants.width) * 2.0f - 1.0f,
             1.0f - screen.y / float(constants.height) * 2.0f, 0.5f, 1.0f);
     return result;
 }
+
+inline long edge(int ax, int ay, int bx, int by, int x, int y);
+inline bool topLeft(int ax, int ay, int bx, int by);
 
 fragment uint visibilityFragment(
         VisibilityVarying input [[stage_in]],
@@ -134,6 +138,14 @@ fragment uint visibilityFragment(
     if (pixel.x < triangle.minX || pixel.x > triangle.maxX ||
         pixel.y < triangle.minY || pixel.y > triangle.maxY)
         discard_fragment();
+    const int sx = pixel.x * 16 + triangle.fpuSampleOffset;
+    const int sy = pixel.y * 16 + triangle.fpuSampleOffset;
+    for (uint a = 0; a < 3; ++a) {
+        const uint b = (a + 1) % 3;
+        const long w = edge(triangle.x[a], triangle.y[a], triangle.x[b], triangle.y[b], sx, sy);
+        if (w < 0 || (w == 0 && !topLeft(triangle.x[a], triangle.y[a], triangle.x[b], triangle.y[b])))
+            discard_fragment();
+    }
     return index + 1;
 }
 
@@ -412,8 +424,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                         candidateTriangle.x[0], candidateTriangle.y[0], sx, sy)) / float(area);
                 const float s2 = float(edge(candidateTriangle.x[0], candidateTriangle.y[0],
                         candidateTriangle.x[1], candidateTriangle.y[1], sx, sy)) / float(area);
-                const float candidateDepth = candidateTriangle.z[0] * s0
-                        + candidateTriangle.z[1] * s1 + candidateTriangle.z[2] * s2;
+                const float candidateDepth = fma(candidateTriangle.z[2], s2,
+                        fma(candidateTriangle.z[1], s1, candidateTriangle.z[0] * s0));
                 if ((candidateTriangle.state & 7) == 7 || candidateDepth >= depth) {
                     opaqueWinnerTriangle = candidateIndex;
                     opaqueFinalDepth = candidateDepth;
@@ -466,7 +478,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             const float s0 = float(w0) / float(area);
             const float s1 = float(w1) / float(area);
             const float s2 = float(w2) / float(area);
-            const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
+            const float depthZ = fma(t.z[2], s2, fma(t.z[1], s1, t.z[0] * s0));
             if (reverseOpaque && opaqueWinnerTriangle != 0xffffffffu
                     ? !(depthZ > opaqueFinalDepth)
                     : !depthTest(t.state, depthZ, opaqueFinalDepth))
@@ -528,7 +540,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const float s0 = float(w0) / float(area);
         const float s1 = float(w1) / float(area);
         const float s2 = float(w2) / float(area);
-        const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
+        const float depthZ = fma(t.z[2], s2, fma(t.z[1], s1, t.z[0] * s0));
         if (!deferredOpaque && !depthTest(t.state, depthZ, depth))
             continue;
         if (SimpleTranslucent && listType == 2) {
@@ -1501,7 +1513,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   }
   useHardwareVisibility = useHardwareVisibility && hasOpaque &&
       deferOpaqueShading && frame.modifierMask == nullptr &&
-      frame.initialDepths == nullptr;
+      frame.initialDepths == nullptr && frame.width <= 32768 && frame.height <= 32768;
   std::vector<VisibilityVertex> visibilityVertices;
   std::vector<u32> visibilityPrimitiveIndices;
   std::vector<u8> hardwareVisibilityTiles(bins.size());
@@ -1533,22 +1545,26 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
             return std::min({a.z[0], a.z[1], a.z[2]}) <
                 std::min({b.z[0], b.z[1], b.z[2]});
           });
-      float previousMaximum = -std::numeric_limits<float>::infinity();
+      auto depthBounds = [](const Triangle &triangle) {
+        const double minimum = std::min({double(triangle.z[0]), double(triangle.z[1]), double(triangle.z[2])});
+        const double maximum = std::max({double(triangle.z[0]), double(triangle.z[1]), double(triangle.z[2])});
+        const double error = 32. * std::numeric_limits<float>::epsilon()
+            * std::max({std::abs(minimum), std::abs(maximum), 1e-30});
+        return std::pair<double, double>{minimum - error, maximum + error};
+      };
+      double previousMaximum = -std::numeric_limits<double>::infinity();
       for (u32 index : alwaysReferences) {
         const Triangle &triangle = (*frame.triangles)[index];
-        previousMaximum = std::max(previousMaximum,
-            std::max({triangle.z[0], triangle.z[1], triangle.z[2]}));
+        previousMaximum = std::max(previousMaximum, depthBounds(triangle).second);
       }
       for (u32 index : depthReferences) {
         const Triangle &triangle = (*frame.triangles)[index];
-        const float minimum = std::min({triangle.z[0], triangle.z[1],
-                                        triangle.z[2]});
+        const auto [minimum, maximum] = depthBounds(triangle);
         if (minimum <= previousMaximum) {
           ordered = false;
           break;
         }
-        previousMaximum = std::max({triangle.z[0], triangle.z[1],
-                                    triangle.z[2]});
+        previousMaximum = maximum;
       }
       if (!ordered)
         continue;
@@ -1558,10 +1574,17 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
                               depthReferences.end());
       for (u32 index : alwaysReferences) {
         const Triangle &triangle = (*frame.triangles)[index];
+        // Rasterize a conservative rectangle. Native triangle edge rounding
+        // can both add and lose fixed-point samples; fragment testing must
+        // decide exact PVR coverage rather than merely filter a native triangle.
+        const s32 x0 = triangle.minX * 16, y0 = triangle.minY * 16;
+        const s32 x1 = (triangle.maxX + 1) * 16, y1 = (triangle.maxY + 1) * 16;
         visibilityPrimitiveIndices.push_back(index);
-        for (u32 vertex = 0; vertex < 3; ++vertex)
-          visibilityVertices.push_back({triangle.x[vertex], triangle.y[vertex],
-                                        triangle.z[vertex], 0});
+        visibilityPrimitiveIndices.push_back(index);
+        for (const auto &point : std::array<std::array<s32, 2>, 6>{{
+            {{x0, y0}}, {{x1, y0}}, {{x0, y1}},
+            {{x1, y0}}, {{x1, y1}}, {{x0, y1}}}})
+          visibilityVertices.push_back({point[0], point[1], 0.f, 0});
       }
       visibilityDrawCounts[tile] =
           static_cast<u32>(visibilityVertices.size()) - visibilityDrawStarts[tile];

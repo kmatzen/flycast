@@ -204,6 +204,43 @@ TEST(HybridTileRenderer, HardwareVisibilityShadesOnlyOpaqueIspWinner)
 	EXPECT_EQ(timing.hardwareVisibilityTiles, 1u);
 }
 
+TEST(HybridTileRenderer, VisibilitySelectionPreservesCoverageAcrossDifferentGeometry)
+{
+	for (u32 scene = 0; scene < 64; ++scene)
+	  for (bool centered : {false, true})
+	   for (bool nearDepth : {false, true}) {
+		SCOPED_TRACE(scene);
+		SCOPED_TRACE(centered);
+		SCOPED_TRACE(nearDepth);
+		SoftwareRasterizer cpu(16, 16);
+		cpu.clear({});
+		std::vector<hybrid::Triangle> commands;
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.fpuPixelCenter = centered;
+		for (u32 layer = 0; layer < 2; ++layer) {
+			const float z = layer == 0 ? 1.f : (nearDepth ? std::nextafter(1.f, 2.f) : 2.f);
+			const Color color = layer == 0 ? Color {255, 0, 0, 255} : Color {0, 255, 0, 255};
+			const float x = 17.f + ((scene * 7 + layer * 11) % 23);
+			const float y = 17.f + ((scene * 13 + layer * 5) % 19);
+			const Vertex a {0, 0, z, color}, b {x, 0, z, color}, c {0, y, z, color};
+			cpu.drawTriangle(a, b, c, state);
+			auto command = triangle(a, b, c, hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+			command.maxX = command.maxY = 15;
+			command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
+			commands.push_back(command);
+		}
+		const std::vector<u32> texture {0xffffffffu}, initial(256, pack(Color {}));
+		hybrid::Frame frame {16, 16, &commands, &texture, &initial};
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		hybrid::Timing timing;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+		expectEqual(cpu, colors, depths);
+		EXPECT_EQ(timing.hardwareVisibilityTiles, nearDepth ? 0u : 1u);
+	}
+}
+
 TEST(HybridTileRenderer, OpaqueVisibilityPreservesTiesNearTiesAndSlopedDepth)
 {
 	const std::array<float, 8> values {0.f, .25f, .5f,

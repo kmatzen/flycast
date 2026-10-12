@@ -1262,7 +1262,10 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 			const float b0 = static_cast<float>(w0 * inverseArea);
 			const float b1 = static_cast<float>(w1 * inverseArea);
 			const float b2 = static_cast<float>(w2 * inverseArea);
-			const float z = vertices[0].z * b0 + vertices[1].z * b1 + vertices[2].z * b2;
+			// Explicitly retain the fused evaluation used by the ARM reference;
+			// host-dependent contraction otherwise changes near-depth winners.
+			const float z = std::fma(vertices[2].z, b2,
+					std::fma(vertices[1].z, b1, vertices[0].z * b0));
 			const size_t offset = static_cast<size_t>(y) * width_ + static_cast<u32>(x);
 			if (state.coverageMask != nullptr && state.coverageMask[offset] == 0)
 				continue;

@@ -1706,3 +1706,54 @@ The experiment, its buffer, and its disable switch were removed. The existing
 reverse scan with individual conservative rejection remains unchanged. This
 does not establish a correctness problem with early exit; it rejects this
 particular implementation as an insufficient performance tradeoff.
+
+### Exact visibility coverage and host-independent near-depth evaluation
+
+A new different-geometry comparison exposed holes in hardware-assisted
+visibility. Two triangles with different slopes covered a 16x16 bin; native
+rasterization included samples on an edge that the fixed-point top-left rule
+excluded. That spurious candidate overwrote the valid background winner and
+was later rejected in compute shading. The original reproducer fails in
+`/tmp/pvr-near-visibility-before.log`, including scene 2, pixel 233.
+
+The visibility pass now draws the integer pixel-bounds rectangle of each
+triangle (two native triangles) and evaluates the actual triangle's fixed-point
+edges, sample offset, top-left ownership, and clipped bounds in the fragment
+shader before writing its index. A rectangle is deliberately used instead of
+merely filtering native triangle coverage: filtering cannot restore samples
+that host triangle rasterization omitted. Bounding rectangles are independent
+of the FPU sample offset; that offset is applied only in the exact edge test.
+This path is limited to framebuffer dimensions at most 32768 to bound fixed
+coordinate construction and native rectangle-position precision. Larger
+dimensions retain compute visibility.
+
+Rosetta then exposed a distinct near-depth issue: the software reference could
+choose red where native ARM64 and Metal chose green for depths one float step
+apart. Margin-free vertex bounds were not enough to prove the order of
+interpolated values, and compute fallback alone did not eliminate the host
+disagreement. Software depth interpolation now explicitly uses nested `fma`
+operations, with the same evaluation in all three Metal visibility/shading
+depth calculations. This removes compiler-dependent contraction from the
+depth winner decision while retaining the fused ARM reference evaluation for
+the tested cases. It is a deterministic model choice, not independent proof
+of original-PVR arithmetic.
+
+Hardware depth eligibility now expands vertex depth intervals by a conservative
+32-float-epsilon margin, rejecting ambiguous orders to compute visibility.
+`VisibilitySelectionPreservesCoverageAcrossDifferentGeometry` covers 64 shape
+pairs, both sample offsets, and both wide and one-float-step depth separation
+(256 cases). It asserts that wide separation still uses hardware-assisted
+visibility and near separation uses compute, then compares all color/depth
+pixels. The full 142-test suite passes on ARM64 and Rosetta. Intermediate
+Rosetta failures are retained in `/tmp/pvr-exact-coverage-rosetta.log` and
+`/tmp/pvr-exact-depth-rosetta.log`; final passing logs are
+`/tmp/pvr-exact-final-{native,rosetta}.log`.
+
+The final gated timing run (`/tmp/pvr-exact-final-gates.xml`) still narrowly
+fails small-triangle wall p95: 17.135 ms, with GPU p95 11.576 ms. Six-layer
+wall/GPU p95 15.632/10.044 ms passes. The opaque-visibility overhead workload
+records wall/GPU p95 9.725/5.860 ms. These correctness fixes are retained
+without claiming that the performance or hardware-validation goals are met.
+All twenty final rebuilt-app RTT cases also pass their stated checks in
+`/tmp/pvr-rtt-exact-final-20261012/report.json`, including zero color/full-VRAM
+differences; the six dither cases retain differential-only acceptance.
