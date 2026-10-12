@@ -613,6 +613,81 @@ TEST(HybridTileRenderer, MatchesOracleForSecondaryAccumulation)
 		EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i])) << "pixel=" << i;
 }
 
+TEST(HybridTileRenderer, MatchesThreePassTranslucentTrilinearRecipe)
+{
+	std::array<Color, 20> texels;
+	std::fill(texels.begin(), texels.begin() + 16, Color { 200, 40, 20, 128 });
+	std::fill(texels.begin() + 16, texels.end(), Color { 20, 80, 220, 128 });
+	TextureView textureView { texels.data(), 4, 4 };
+	textureView.mipLevels[0] = texels.data();
+	textureView.mipLevels[1] = texels.data() + 16;
+	textureView.mipLevelCount = 2;
+	std::vector<u32> texture;
+	for (Color color : texels)
+		texture.push_back(pack(color));
+	const Color background { 30, 60, 90, 255 };
+	const Color white { 255, 255, 255, 255 };
+	constexpr float pvrD = 1.25f;
+
+	SoftwareRasterizer cpu(2, 2);
+	cpu.clear(background);
+	PipelineState passA;
+	passA.depthMode = DepthMode::Always;
+	passA.texture = textureView;
+	passA.bilinearFilter = true;
+	passA.trilinearFilter = true;
+	passA.dstSelect = true;
+	drawTexturedQuad(cpu, 1.f, white, passA, 0.f, pvrD / 2.f);
+	PipelineState passB = passA;
+	passB.trilinearPassB = true;
+	passB.dstBlend = BlendFactor::One;
+	drawTexturedQuad(cpu, 1.f, white, passB, 0.f, pvrD / 2.f);
+	PipelineState resolve;
+	resolve.depthMode = DepthMode::Always;
+	resolve.srcSelect = true;
+	resolve.srcBlend = BlendFactor::SrcAlpha;
+	resolve.dstBlend = BlendFactor::OneMinusSrcAlpha;
+	drawQuad(cpu, 1.f, {}, resolve);
+	for (u32 y = 0; y < 2; ++y)
+		for (u32 x = 0; x < 2; ++x)
+		{
+			const size_t offset = y * 2 + x;
+			EXPECT_EQ(cpu.secondaryBuffer()[offset], (Color { 155, 50, 70, 128 }));
+			EXPECT_EQ(cpu.pixel(x, y), (Color { 93, 55, 80, 191 }));
+		}
+
+	std::vector<hybrid::Triangle> commands;
+	u32 stateA = hybrid::makeState(7, true, true, true, true, 0, 1, 0)
+			| hybrid::Trilinear;
+	appendTexturedQuad(commands, 1.f, white, stateA, 4, 4, 0.f, pvrD / 2.f);
+	u32 stateB = hybrid::makeState(7, true, true, true, true, 0, 1, 1)
+			| hybrid::Trilinear | hybrid::TrilinearPassB;
+	appendTexturedQuad(commands, 1.f, white, stateB, 4, 4, 0.f, pvrD / 2.f);
+	for (u32 i = 0; i < 4; ++i)
+	{
+		commands[i].effects |= hybrid::DestinationSelect;
+		commands[i].mipOffsets[0] = 0;
+		commands[i].mipOffsets[1] = 16;
+		commands[i].mipLevelCount = 2;
+		commands[i].mipNumerator = pvrD;
+	}
+	u32 resolveState = hybrid::makeState(7, true, false, false, true, 0, 4, 5);
+	appendQuad(commands, 1.f, {}, resolveState);
+	commands[4].effects |= hybrid::SourceSelect;
+	commands[5].effects |= hybrid::SourceSelect;
+
+	const std::vector<u32> initialColors(4, pack(background));
+	hybrid::Frame frame { 2, 2, &commands, &texture, &initialColors };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	std::vector<u32> secondary;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, nullptr, &secondary));
+	expectEqual(cpu, colors, depths);
+	ASSERT_EQ(secondary.size(), cpu.secondaryBuffer().size());
+	for (size_t i = 0; i < secondary.size(); ++i)
+		EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i])) << "pixel=" << i;
+}
+
 TEST(HybridTileRenderer, MatchesOracleForModifierAreaSelection)
 {
 	const Color red { 230, 20, 30, 255 };
