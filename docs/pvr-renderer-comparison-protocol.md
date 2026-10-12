@@ -974,3 +974,15 @@ Log: `/tmp/pvr-kos-probe.V8emEs/toolchain.log`. The first observed stage was
 downloading GCC 15.2.0; no compiler completion is claimed. Initial free disk
 space was about 11 GiB, so inspect usage before allowing later build stages
 to continue. This preparation does not install over system toolchains.
+
+`tests/manual/pvr-rtt-probe` now contains an initial SDK probe source and
+Makefile, not yet cross-compiled or run. It allocates an interior 32 × 32
+RGB565 target with 36-pixel stride and 32-byte surrounding guards, submits a
+solid quad, waits for TA readiness and render completion, and prints final
+registers plus every allocation byte. It requests no dithering and labels
+execution `unclassified`. It intentionally does not test end-of-VRAM wrapping
+before ordinary allocated-target behavior is established. After configuring
+the pinned SDK environment, build with `make -C tests/manual/pvr-rtt-probe`.
+The toolchain build has advanced through GCC download/unpacking/patching;
+free disk space at this point was about 9.5 GiB. Compiler and probe execution
+remain pending, so source inspection is not counted as a test pass.

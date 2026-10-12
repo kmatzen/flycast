@@ -1,0 +1,71 @@
+/* Raw RTT evidence collector. Output is unclassified until its execution
+ * environment has been independently recorded. No emulator-derived golden. */
+#include <kos.h>
+#include <dc/pvr.h>
+#include <stdio.h>
+#include <stdint.h>
+
+enum { WIDTH = 32, HEIGHT = 32, STRIDE = 36, GUARD = 32,
+       TARGET_BYTES = STRIDE * HEIGHT * 2, ALLOCATION_BYTES = TARGET_BYTES + GUARD * 2 };
+
+int main(void)
+{
+    if (pvr_init_defaults() < 0)
+        return 1;
+    pvr_ptr_t allocation = pvr_mem_malloc(ALLOCATION_BYTES);
+    if (!allocation)
+        return 2;
+    volatile uint8_t *memory = (volatile uint8_t *)allocation;
+    for (unsigned i = 0; i < ALLOCATION_BYTES; ++i)
+        memory[i] = 0xa5;
+    pvr_ptr_t target = (void *)((uintptr_t)allocation + GUARD);
+    pvr_set_bg_color(0, 0, 0);
+    if (pvr_wait_ready() < 0 || pvr_wait_render_done() < 0)
+        return 3;
+
+    /* RGB565 without dither. pvr_render_start at the pinned SDK revision
+     * does not replace FB_CFG_2; dump its final value to verify that assumption. */
+    const uint32_t previous_pack = PVR_GET(PVR_FB_CFG_2);
+    PVR_SET(PVR_FB_CFG_2, 1);
+    if (pvr_scene_begin_rtt(target, WIDTH, HEIGHT, STRIDE) < 0)
+        return 4;
+    pvr_poly_cxt_t context;
+    pvr_poly_hdr_t header __attribute__((aligned(32)));
+    pvr_poly_cxt_col(&context, PVR_LIST_OP_POLY);
+    pvr_poly_compile(&header, &context);
+    if (pvr_list_begin(PVR_LIST_OP_POLY) < 0 || pvr_prim(&header, sizeof(header)) < 0)
+        return 5;
+    const float xy[4][2] = { {4, 28}, {4, 4}, {28, 28}, {28, 4} };
+    for (unsigned i = 0; i < 4; ++i) {
+        pvr_vertex_t vertex __attribute__((aligned(32))) = {0};
+        vertex.flags = i == 3 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        vertex.x = xy[i][0];
+        vertex.y = xy[i][1];
+        vertex.z = 1;
+        vertex.argb = 0xffabcdef;
+        if (pvr_prim(&vertex, sizeof(vertex)) < 0)
+            return 6;
+    }
+    if (pvr_list_finish() < 0 || pvr_scene_finish() < 0
+            || pvr_wait_ready() < 0 || pvr_wait_render_done() < 0)
+        return 7;
+
+    printf("PVR_RTT_PROBE schema=1 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u\n",
+           WIDTH, HEIGHT, STRIDE, GUARD, ALLOCATION_BYTES);
+    printf("PVR_RTT_REG pack=%08lx base=%08lx stride=%08lx clipx=%08lx clipy=%08lx\n",
+           (unsigned long)PVR_GET(PVR_FB_CFG_2), (unsigned long)PVR_GET(PVR_RENDER_ADDR),
+           (unsigned long)PVR_GET(PVR_RENDER_MODULO), (unsigned long)PVR_GET(PVR_PCLIP_X),
+           (unsigned long)PVR_GET(PVR_PCLIP_Y));
+    for (unsigned i = 0; i < ALLOCATION_BYTES; i += 32) {
+        printf("PVR_RTT_BYTES offset=%04x data=", i);
+        for (unsigned j = 0; j < 32 && i + j < ALLOCATION_BYTES; ++j)
+            printf("%02x", (unsigned)memory[i + j]);
+        putchar('\n');
+    }
+    puts("PVR_RTT_END");
+    fflush(stdout);
+    PVR_SET(PVR_FB_CFG_2, previous_pack);
+    pvr_mem_free(allocation);
+    pvr_shutdown();
+    return 0;
+}
