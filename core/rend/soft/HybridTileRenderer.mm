@@ -121,10 +121,20 @@ vertex VisibilityVarying visibilityVertex(
 }
 
 fragment uint visibilityFragment(
+        VisibilityVarying input [[stage_in]],
         const device uint *primitiveIndices [[buffer(0)]],
+        const device Triangle *triangles [[buffer(1)]],
         uint primitive [[primitive_id]])
 {
-    return primitiveIndices[primitive] + 1;
+    const uint index = primitiveIndices[primitive];
+    const device Triangle& triangle = triangles[index];
+    const int2 pixel = int2(input.position.xy);
+    // Binning/scissors only enforce coarse tile bounds. Reject clipped
+    // fragments here, before they can overwrite an earlier valid winner.
+    if (pixel.x < triangle.minX || pixel.x > triangle.maxX ||
+        pixel.y < triangle.minY || pixel.y > triangle.maxY)
+        discard_fragment();
+    return index + 1;
 }
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -1622,6 +1632,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
     [visibilityEncoder setRenderPipelineState:metal.visibilityPipeline];
     [visibilityEncoder setVertexBuffer:visibilityVertexBuffer offset:0 atIndex:0];
     [visibilityEncoder setVertexBytes:&constants length:sizeof(constants) atIndex:1];
+    [visibilityEncoder setFragmentBuffer:triangleBuffer offset:0 atIndex:1];
     [visibilityEncoder setCullMode:MTLCullModeNone];
     for (u32 tile = 0; tile < bins.size(); ++tile) {
       if (visibilityDrawCounts[tile] == 0)

@@ -203,6 +203,46 @@ TEST(HybridTileRenderer, HardwareVisibilityShadesOnlyOpaqueIspWinner)
 	EXPECT_EQ(timing.hardwareVisibilityTiles, 1u);
 }
 
+TEST(HybridTileRenderer, HardwareVisibilityRespectsClippedBoundsInsideTiles)
+{
+	constexpr u32 width = 32, height = 32;
+	for (bool centered : {false, true}) {
+		SCOPED_TRACE(centered);
+		SoftwareRasterizer cpu(width, height);
+		cpu.clear({});
+		std::vector<hybrid::Triangle> commands;
+		for (u32 layer = 0; layer < 2; ++layer) {
+			const Color color = layer == 0 ? Color {255, 0, 0, 255} : Color {0, 255, 0, 255};
+			const float z = 1.f + layer;
+			const Vertex a {0, 0, z, color}, b {64, 0, z, color}, c {0, 64, z, color};
+			PipelineState state;
+			state.depthMode = DepthMode::GreaterOrEqual;
+			state.fpuPixelCenter = centered;
+			state.scissorEnabled = true;
+			state.scissorX0 = layer == 0 ? 0 : 3;
+			state.scissorY0 = layer == 0 ? 0 : 5;
+			state.scissorX1 = layer == 0 ? width : 23;
+			state.scissorY1 = layer == 0 ? height : 27;
+			cpu.drawTriangle(a, b, c, state);
+			auto command = triangle(a, b, c, hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+			command.minX = state.scissorX0;
+			command.minY = state.scissorY0;
+			command.maxX = state.scissorX1 - 1;
+			command.maxY = state.scissorY1 - 1;
+			command.fpuSampleOffset = centered ? 8 : 0;
+			commands.push_back(command);
+		}
+		const std::vector<u32> texture {0xffffffffu}, initial(width * height, pack(Color {}));
+		hybrid::Frame frame {width, height, &commands, &texture, &initial};
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		hybrid::Timing timing;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+		expectEqual(cpu, colors, depths);
+		EXPECT_EQ(timing.hardwareVisibilityTiles, 4u);
+	}
+}
+
 TEST(HybridTileRenderer, VisibilityBatchingPreservesGapsDifferentListsAndPartialRows)
 {
 	constexpr u32 width = 65, height = 33;

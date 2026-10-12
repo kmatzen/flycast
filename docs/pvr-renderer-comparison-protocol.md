@@ -1548,3 +1548,41 @@ The rebuilt app also completes all twenty RTT probe cases in
 `/tmp/pvr-rtt-batched-20261012/report.json`, with zero color/full-VRAM
 differences. The six dither cases retain their restricted differential-only
 acceptance scope; none of these runs establishes original-hardware accuracy.
+
+### Fix clipped opaque visibility inside a work bin
+
+`HardwareVisibilityRespectsClippedBoundsInsideTiles` exposed a concrete
+software/Metal disagreement. A red background covers a 32x32 framebuffer;
+a nearer green triangle has the same oversized geometry but pixel bounds
+x=3..22, y=5..26. These bounds cut through four 16x16 work bins. Previously,
+the hardware visibility fragment shader wrote the green triangle's index
+outside its bounds because only coarse bin scissors were applied. The compute
+shading pass then rejected that candidate by its bounds, leaving a hole instead
+of selecting the valid red background. The regression failed at both sample
+offsets, including color and depth at pixel zero. Failure log:
+`/tmp/pvr-visibility-clip-before.log`.
+
+The visibility fragment shader now reads the selected triangle's integer
+pixel bounds and discards out-of-bounds fragments before writing the winner
+index. Rejecting only in the later shading pass cannot recover the overwritten
+background candidate. No eligibility restriction or software fallback was
+added: all four bins still use hardware visibility. The regression passes
+with batching enabled and with `FLYCAST_HYBRID_DISABLE_VISIBILITY_BATCHING=1`.
+All 139 focused tests pass on native ARM64 and Rosetta; the app builds.
+
+The first post-fix timing run, `/tmp/pvr-clip-gates.xml`, fails the small-triangle
+wall gate narrowly: p95 16.799 ms versus 16.667 ms; GPU p95 is 11.288 ms.
+The six-layer workload passes at wall/GPU p95 8.929/4.243 ms. This failure
+remains evidence of insufficient performance margin, not a reason to restore
+incorrect clipping or weaken the gate. The small-triangle case does not use
+hardware visibility, so it does not isolate the cost of the added fragment
+bounds check. Hardware accuracy and sustained gameplay are still unproven.
+After the live probe suite finished, a separate repeat
+(`/tmp/pvr-clip-gates-repeat.xml`) also narrowly fails the small-triangle wall
+gate at 16.867 ms (GPU p95 12.511 ms); the six-layer case passes at
+11.909/8.099 ms. Both failed timing runs are retained. All twenty live RTT
+cases completed in `/tmp/pvr-rtt-visibility-clip-20261012/report.json` with
+zero software/Metal color and full-VRAM differences; dither acceptance remains
+differential-only. Production `makeHybridTriangle` also clips its command
+bounds against scissor/region state, confirming this is a relevant input path
+rather than solely an artificial test construction.
