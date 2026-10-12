@@ -2822,3 +2822,36 @@ from the earlier 17.135 ms small-triangle p95 failure cannot be credited to a
 specific optimization without controlled attribution. These renderer-boundary
 tests exclude the full emulator, audio scheduling, and window presentation;
 they do not supersede the observed missing-frame/long-gap evidence.
+
+### Rejected per-frame GPU-wait removal
+
+An opt-in native-driver experiment removed `waitUntilCompleted` from each
+presentation, retaining the final teardown wait and using a shared error queue
+for asynchronous command failures. Resource-retaining command buffers and
+available drawables bounded ownership. The standalone 660-frame resize probe
+completed its lifecycle checks with five presentation skips
+(`/tmp/pvr-async-display-probe.log`).
+
+Four serial timing runs used experimental application SHA-256
+`2a12586192c1c97d9ef339740573ab9089584d001dfcbf63172b6c3c9e4732db`:
+
+| Run | Missing IDs | Audio underruns | Gaps over 20 ms |
+| --- | --- | --- | --- |
+| Synchronous 1 | 639 | 0 | 0 |
+| Asynchronous 1 | None | 1 | 1 |
+| Synchronous 2 | None | 0 | 1 |
+| Asynchronous 2 | None | 0 | 2 |
+
+All zero-time callback counts were zero; long gaps were about 33.332 ms.
+Reports are `/tmp/pvr-async-{control1,test1,control2,test2}-20261012/report.json`.
+These samples do not establish a practical improvement. The async switch,
+runner option, and deferred error machinery were removed rather than adopted.
+Explicit checks for command-buffer/encoder creation were retained.
+
+The restored synchronous app and standalone probe rebuild successfully.
+The restored app's verification run passes with 660 matching VRAM comparisons,
+all probe IDs, and zero skipped callbacks at
+`/tmp/pvr-display-wait-restored-20261012/report.json`, application SHA-256
+`2c901cc0495fd5c6daa145ac8f8d1b0f1dd89f08b59bf6f4567c9b0c75b006b7`.
+That validation-enabled run still has long gaps (maximum 49.998 ms); it is
+not a timing comparison against the unverified experimental runs.

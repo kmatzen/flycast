@@ -57,7 +57,10 @@ public:
         const Color border = frame ? frame->border : Color{0, 0, 0, 255};
         pass.colorAttachments[0].clearColor = MTLClearColorMake(border.r / 255., border.g / 255., border.b / 255., 1);
         id<MTLCommandBuffer> command = [queue commandBuffer];
+        if (!command || !command.retainedReferences)
+            throw FlycastException("Metal UI requires a resource-retaining command buffer");
         id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+        if (!encoder) throw FlycastException("Metal UI encoder creation failed");
         if (frame) {
             const double width = drawable.texture.width, height = drawable.texture.height;
             const double imageWidth = std::min(width, height * frame->aspectRatio);
