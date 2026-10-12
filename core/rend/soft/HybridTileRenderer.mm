@@ -330,6 +330,9 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
         const uint triangleIndex = tileReferences[i];
         const device Triangle& base = triangles[triangleIndex];
+        if ((base.effects & 512u) != 0
+                && (constants.useModifierMask == 0 || modifierMask[offset] == 0))
+            continue;
         const bool selectArea1 = constants.useModifierMask != 0
                 && modifierMask[offset] != 0 && base.area1Index != 0xffffffffu;
         const uint selectedIndex = selectArea1 ? base.area1Index : triangleIndex;
@@ -697,7 +700,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
           return false;
       }
     }
-    if ((triangle.state & Area1Only) != 0)
+    if ((triangle.state & Area1Only) != 0 &&
+        (triangle.effects & ModifierArea1Only) == 0)
       continue;
     for (s32 y = triangle.minY / static_cast<s32>(TileSize);
          y <= triangle.maxY / static_cast<s32>(TileSize); ++y)

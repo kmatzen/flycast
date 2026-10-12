@@ -42,6 +42,7 @@ enum EffectBits : u32 {
   Dither = 1 << 6,
   LookupFogAlpha = 1 << 7,
   ExcludeClip = 1 << 8,
+  ModifierArea1Only = 1 << 9,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,

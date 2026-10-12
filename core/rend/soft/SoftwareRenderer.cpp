@@ -826,8 +826,6 @@ private:
 			PipelineState area1State;
 			if (hasArea1)
 			{
-				if (punchThrough)
-					return false;
 				area1State = state;
 				configureArea1(poly, area1State);
 				area1State.deferBlend = sorting;
@@ -867,7 +865,10 @@ private:
 					if (commands.size() != area1Index + 1
 							|| area1Index > std::numeric_limits<u32>::max())
 						return false;
-					commands[primaryIndex].area1Index = static_cast<u32>(area1Index);
+					if (punchThrough)
+						commands[area1Index].effects |= hybrid::ModifierArea1Only;
+					else
+						commands[primaryIndex].area1Index = static_cast<u32>(area1Index);
 				}
 			}
 		}

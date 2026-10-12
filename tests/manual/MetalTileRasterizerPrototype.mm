@@ -465,6 +465,31 @@ int main() {
   }
 
   {
+    const u32 punchState = rend::soft::hybrid::makeState(
+        6, true, false, false, true, 0, 1, 0) |
+        rend::soft::hybrid::AlphaTest |
+        (1u << rend::soft::hybrid::ListTypeShift);
+    Triangle area0 = testTriangle(0xff0000ffu, 1.f, punchState);
+    area0.alphaReference = 128;
+    Triangle area1 = testTriangle(0x4000ff00u, 1.f,
+        punchState | rend::soft::hybrid::Area1Only);
+    area1.alphaReference = 128;
+    area1.effects = rend::soft::hybrid::ModifierArea1Only;
+    std::vector<Triangle> commands{area0, area1};
+    const std::vector<u8> modifierMask{1};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    test.modifierMask = &modifierMask;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff0000ffu)
+      return 1;
+    commands[1].color[0] = commands[1].color[1] = commands[1].color[2] =
+        0xff00ff00u;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff00ff00u)
+      return 1;
+  }
+
+  {
     const std::vector<u32> superTexture{
         0xff0000ffu, 0xff00ff00u, 0xffff0000u, 0xffffffffu};
     Triangle command = testTriangle(
