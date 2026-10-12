@@ -208,7 +208,9 @@ private:
 		TA_context *taContext = DequeueRender();
 		if (taContext == nullptr)
 			return;
-		const bool traceCadence = std::getenv("FLYCAST_PVR_TRACE_CADENCE") != nullptr;
+		// Scheduler time is read only on the emulation thread.
+		const bool traceCadence = std::getenv("FLYCAST_PVR_TRACE_CADENCE") != nullptr
+				&& !config::ThreadedRendering;
 		const auto renderStarted = traceCadence ? std::chrono::steady_clock::now()
 				: std::chrono::steady_clock::time_point {};
 		auto fingerprintStage = [&](const char *stage) {
@@ -440,11 +442,18 @@ private:
 			// can repeat a frame. Async backends may still have GPU work queued.
 			using Clock = std::chrono::steady_clock;
 			static auto windowStart = Clock::time_point {};
+			static u64 emulatedStart = 0;
 			static u32 count = 0;
 			static double renderMilliseconds = 0.;
 			const auto now = Clock::now();
-			if (windowStart == Clock::time_point {})
+			const u64 emulatedNow = sh4_sched_now64();
+			if (windowStart == Clock::time_point {} || emulatedNow < emulatedStart)
+			{
 				windowStart = now;
+				emulatedStart = emulatedNow;
+				count = 0;
+				renderMilliseconds = 0.;
+			}
 			else
 			{
 				++count;
@@ -452,9 +461,12 @@ private:
 				if (count == 120)
 				{
 					const double seconds = std::chrono::duration<double>(now - windowStart).count();
-					std::fprintf(stderr, "PVR_CADENCE backend=%s renders=%u seconds=%.6f renders_per_second=%.3f render_call_mean_ms=%.3f\n",
-							rendererBackend, count, seconds, count / seconds, renderMilliseconds / count);
+					const double emulatedSeconds = double(emulatedNow - emulatedStart) / SH4_MAIN_CLOCK;
+					std::fprintf(stderr, "PVR_CADENCE backend=%s renders=%u seconds=%.6f renders_per_second=%.3f render_call_mean_ms=%.3f emulated_seconds=%.6f emulation_speed=%.4f\n",
+							rendererBackend, count, seconds, count / seconds, renderMilliseconds / count,
+							emulatedSeconds, emulatedSeconds / seconds);
 					windowStart = now;
+					emulatedStart = emulatedNow;
 					count = 0;
 					renderMilliseconds = 0.;
 				}

@@ -610,7 +610,8 @@ presentation as new rendering. It measures wall-clock render-call throughput
 and mean time inside the render routine; async GPU completion is not implied.
 Use a fresh process for a measurement and avoid pauses, state loads, or backend
 changes within a window. The diagnostic does not yet reset windows for those
-events or measure emulated time, audio underruns, or display frame pacing.
+events or measure audio underruns or display frame pacing. Emulated-time
+reporting was subsequently added as described below.
 
 A muted Seaman boot/intro run with `FLYCAST_HYBRID_SOFT=1`, framebuffer
 emulation enabled, single-threaded rendering, and verifier/trace/capture
@@ -621,3 +622,19 @@ The backend label is software; the environment requests hybrid acceleration
 but this low-overhead run does not record per-frame fallback. These observations
 do not distinguish variable game render cadence from emulator slowdown.
 Emulated-time progress must be measured before claiming full-speed play.
+
+The counter now also reports SH4 scheduler progress (`emulated_seconds`) and
+its ratio to wall time (`emulation_speed`). It only runs with threaded
+rendering disabled to avoid a concurrent scheduler read. A backward jump
+relative to the window start resets the window; pauses and arbitrary state
+loads still require a fresh measurement process.
+
+The same muted configuration produced a first window at 0.9923 speed, followed
+by a transition window at 0.9406, then three windows at 0.6440, 0.6441, and
+0.6439. Each latter window advanced about 4.00365 emulated seconds over about
+6.216 wall-clock seconds, at about 19.3 render calls/s. Mean render-routine
+times were 19.860, 19.715, and 19.370 ms. This establishes slowdown in that
+single-threaded full-framebuffer run, not merely fewer game-submitted frames.
+It does not yet attribute the entire slowdown to the renderer or establish
+the behavior of the threaded/async configurations. Log:
+`/tmp/pvr-emulated-cadence-seaman.log`; the owned process was stopped afterward.
