@@ -2644,3 +2644,28 @@ Neither run simultaneously establishes lossless cadence and clean audio.
 Missing IDs with no skipped drawable callbacks point to a loss before native
 presentation, but producer/selection tracing is still needed to locate it.
 This simple probe does not establish Seaman performance or audio quality.
+
+### Native producer/selection trace
+
+`--stages` adds the existing publication/selection trace to the native runner.
+It validates those records with `analyzeStages`, reports publication-to-selection
+latency, and joins each missing frame ID to its publications, selections, and
+native callbacks. It deliberately does not subtract native `presentedTime`
+from the producer's steady-clock timestamps: they are different clock domains.
+The existing three strict stage-parser tests pass.
+
+Two serial `--timing --stages` runs of the unchanged application are recorded
+in `/tmp/pvr-native-stages1-20261012` and `/tmp/pvr-native-stages2-20261012`.
+Both completed normally with zero SDL audio underruns and one zero-time native
+callback. The first missed IDs 309 and 593; each had one publication, zero
+selections, and zero native callbacks. The second delivered all IDs. Both
+had one approximately 33.332 ms measured first-presentation gap.
+
+For ID 309, sequence 324 was published at steady time 417013859220 us;
+sequence 325 (ID 310) replaced it 7.585 ms later. The next selection accepted
+325, after the previous selection had accepted 323 (ID 308). ID 593 shows the
+same replacement-before-selection pattern. This directly locates these losses
+in the latest-only producer/UI handoff, before Metal submission. It does not
+prove all future losses have this cause or that an arbitrary queue will solve
+pacing; the previously rejected shallow FIFO remains contrary evidence.
+Publication-to-selection p95 was 7.004 ms and 4.455 ms in these two traced runs.

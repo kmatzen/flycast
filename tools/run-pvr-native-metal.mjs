@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { analyzeStages } from './read-pvr-stages.mjs';
 
 // Integration smoke test with a finite cadence ELF, not a performance gate.
-const [appArg, elfArg, outputArg, mode, ...extra] = process.argv.slice(2);
-if (!appArg || !elfArg || !outputArg || extra.length || (mode && mode !== '--timing'))
-  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing]');
-const timing = mode === '--timing';
+const [appArg, elfArg, outputArg, ...options] = process.argv.slice(2);
+if (!appArg || !elfArg || !outputArg || new Set(options).size !== options.length
+    || options.some(x => !['--timing', '--stages'].includes(x)))
+  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing] [--stages]');
+const timing = options.includes('--timing'), stages = options.includes('--stages');
 const app = resolve(appArg), elf = resolve(elfArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -24,6 +26,7 @@ if (timing) {
   delete env.FLYCAST_HYBRID_VERIFY_VRAM;
   env.FLYCAST_AUDIO_TRACE_DELIVERY = '1';
 }
+if (stages) env.FLYCAST_PVR_TRACE_STAGES = '1';
 let stdout = '', stderr = '', timedOut = false, forced = false, stopping = false;
 const result = await new Promise((accept, reject) => {
   const child = spawn(app, ['-config', `audio:backend=${timing ? 'sdl2' : 'null'}`, '-config', 'config:pvr.rend=7',
@@ -71,7 +74,20 @@ for (const record of callbacks)
 const records = [...first.values()].sort((a, b) => a.time - b.time);
 const gaps = records.slice(1).map((x, i) => ({ from: records[i].id, to: x.id, ms: (x.time - records[i].time) * 1000 }));
 const sorted = gaps.map(x => x.ms).sort((a, b) => a - b);
-const report = { appHash, elfHash, timing, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
+let stageReport;
+if (stages) {
+  // Validate producer/UI records using their common steady clock. Native
+  // presentedTime has a different time domain: do not subtract across them.
+  const validated = analyzeStages(stderr);
+  const records = [...stderr.matchAll(/^PVR_STAGE stage=(publish|select) sequence=(\d+) id=(-?\d+) time_us=(\d+)$/gm)]
+    .map(m => ({ stage: m[1], sequence: +m[2], id: +m[3], time: +m[4] }));
+  stageReport = { publishToSelect: validated.publishToSelect,
+    missing: missingIds.map(id => ({ id,
+      publications: records.filter(x => x.stage === 'publish' && x.id === id),
+      selections: records.filter(x => x.stage === 'select' && x.id === id),
+      callbacks: callbacks.filter(x => x.id === id) })) };
+}
+const report = { appHash, elfHash, timing, stages, stageReport, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
   skippedCallbacks: callbacks.filter(x => x.time === 0).length, integrationPassed,
   missingIds, measuredMissingIds: missingIds.filter(id => id >= 60),
   measuredFirstPresentationGapMs: { p50: sorted[Math.floor(sorted.length * .5)], p95: sorted[Math.floor(sorted.length * .95)], max: sorted.at(-1) },
