@@ -2056,3 +2056,32 @@ not smooth-presentation benchmarks.
 This does not simulate GUI menu interaction or window resizing. Those paths,
 termination/error injection, longer play, and independent hardware validation
 remain unverified.
+
+### Controlled renderer-failure recovery
+
+The lifecycle runner's `--error` mode enables the explicit
+`FLYCAST_PVR_TEST_RENDER_ERROR` hook. In the decoupled software renderer only,
+the 64th Process call throws a `RendererException` before parsing that frame.
+The regression requires successful color/full-VRAM comparisons before the
+fault, normal UI error recovery, a recreated renderer with execution stopped,
+no further verified renders during a 500-ms observation interval, zero
+published/swapped frames from the replacement, and normal process shutdown.
+Timeouts and forced kills remain failures. This does not alter the default
+renderer or inject failures without the explicit environment switch.
+
+This exercises propagation from the emulation-thread render call through its
+future into the UI's renderer-error handler, including old-renderer teardown
+and new-renderer initialization. It does not inject an error during a GPU
+command, a partially completed VRAM write, network rollback, or a concurrent
+external settings change. Passing it cannot establish those other error paths.
+
+The final ARM64 build passes the fault test in
+`/tmp/pvr-failure-final-20261012/report.json`: 63 matching full-VRAM
+comparisons precede the injected failure, zero follow recovery, and the
+replacement renderer's final publication/swap counters are all zero. Both
+paused-recreation regressions also pass on the same executable in
+`/tmp/pvr-failure-paused-regression-20261012/report.json`, with 81/197 verified
+VRAM snapshots before recreation and 40 after each. The first paused case
+still records one skipped image state during the verifier-heavy transition;
+these results do not remove that presentation limitation. The app build,
+runner syntax check, and diff whitespace check pass.

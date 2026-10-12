@@ -72,6 +72,9 @@ bool mainui_rend_frame()
 			if (!rend_init_renderer())
 				ERROR_LOG(RENDERER, "Renderer re-initialization failed");
 			gui_open_settings();
+			if (std::getenv("FLYCAST_PVR_TEST_RENDER_ERROR") != nullptr)
+				std::fprintf(stderr, "PVR_LIFECYCLE renderer_error_recovered running=%u decoupled=%u\n",
+						emu.running(), renderer != nullptr && renderer->RendersOnEmulationThread());
 			return false;
 		} catch (const FlycastException& e) {
 			gui_stop_game(e.what());

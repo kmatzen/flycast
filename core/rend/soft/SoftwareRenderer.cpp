@@ -215,6 +215,12 @@ public:
 	void Process(TA_context *ctx) override
 	{
 		checkPresentationMode();
+		if (emulationThreadRendering && std::getenv("FLYCAST_PVR_TEST_RENDER_ERROR") != nullptr
+				&& ++testProcessedFrames == 64)
+		{
+			std::fprintf(stderr, "PVR_LIFECYCLE injected_render_error processed=64\n");
+			throw RendererException("Injected PVR lifecycle regression failure");
+		}
 		rendContext = &ctx->rend;
 		// Texture pointers are attached to polygon parameters during parsing.
 		// Resetting the cache afterwards would leave those pointers dangling.
@@ -2540,6 +2546,7 @@ private:
 	u64 presentationContentSequence = 0;
 	unsigned presentationReports = 0; // UI-thread only.
 	bool emulationThreadRendering = false;
+	unsigned testProcessedFrames = 0;
 	std::unique_ptr<SoftwareRasterizer> rttRasterizer;
 	SoftwareRasterizer *rasterizer = nullptr;
 	SoftwareRasterizer *displayRasterizer = nullptr;
