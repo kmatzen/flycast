@@ -570,6 +570,12 @@ public:
 		rawFrameStore.clear();
 		presentationBuffer.clear();
 		presentationWidth = presentationHeight = 0;
+		// The display is being reconstructed from Dreamcast framebuffer memory.
+		// A raw hybrid accumulation surface predates framebuffer packing,
+		// dithering, scaling, field selection, and read-format conversion and
+		// must never override this result merely because its dimensions match.
+		hybridPresentation = {};
+		hybridQueuedPresentation = {};
 		int width = 0;
 		int height = 0;
 		if (info.fb_r_ctrl.fb_enable == 0 || info.vo_control.blank_video == 1)
@@ -1410,7 +1416,12 @@ private:
 						0, pass.tr_count, false, autosort, 2, commands, textureAtlas, textureOffsets))
 				|| commands.empty())
 			return reject("unsupported-polygon-state");
+		// Direct IOSurface presentation is valid only when the Metal result is
+		// already the final display image. Framebuffer emulation must pass through
+		// VRAM write/read conversion, and CPU-completed translucency changes the
+		// readback after Metal produced its surface.
 		const bool usePresentationSurface = !rendContext->isRTT
+				&& !config::EmulateFramebuffer && !cpuTranslucent
 				&& std::getenv("FLYCAST_HYBRID_DISABLE_IOSURFACE") == nullptr;
 		const bool asyncEligible = std::getenv("FLYCAST_HYBRID_ASYNC") != nullptr
 				&& std::getenv("FLYCAST_HYBRID_VERIFY") == nullptr
