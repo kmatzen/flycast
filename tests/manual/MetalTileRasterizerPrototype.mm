@@ -145,6 +145,7 @@ Triangle testTriangle(u32 color, float z, u32 state) {
   if ((state & rend::soft::hybrid::Textured) != 0)
     triangle.mipLevelCount = 1;
   triangle.area1Index = std::numeric_limits<u32>::max();
+  triangle.fpuSampleOffset = triangle.tspSampleOffset = 8;
   return triangle;
 }
 
@@ -232,6 +233,7 @@ int main() {
          static_cast<s32>(Height) - 1 - inset});
     triangles.back().mipLevelCount = 1;
     triangles.back().area1Index = std::numeric_limits<u32>::max();
+    triangles.back().fpuSampleOffset = triangles.back().tspSampleOffset = 8;
   }
   std::vector<u32> expectedColors(Width * Height), actualColors;
   std::vector<float> expectedDepths(Width * Height), actualDepths;
@@ -309,6 +311,22 @@ int main() {
                                    &initialDepths};
     if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
         actualColors[0] != destination || actualDepths[0] != .5f)
+      return 1;
+  }
+
+  {
+    Triangle command = testTriangle(
+        0xff0000ffu, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    command.color[0] = 0xff0000ffu;
+    command.color[1] = 0xff00ff00u;
+    command.color[2] = 0xffff0000u;
+    command.fpuSampleOffset = 8;
+    command.tspSampleOffset = 0;
+    std::vector<Triangle> commands{command};
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff0000ffu)
       return 1;
   }
 

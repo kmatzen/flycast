@@ -610,7 +610,7 @@ private:
 			std::swap(y[1], y[2]);
 			std::swap(vertices[1], vertices[2]);
 		}
-		constexpr s32 sampleOffset = 8;
+		const s32 sampleOffset = state.fpuPixelCenter ? 8 : 0;
 		s32 minX = std::max(0, static_cast<s32>(std::ceil(
 				(std::min({ x[0], x[1], x[2] }) - sampleOffset) / 16.f)));
 		s32 minY = std::max(0, static_cast<s32>(std::ceil(
@@ -717,6 +717,8 @@ private:
 		command.clampMax = packedColor(state.clampMax);
 		command.ditherDivisors = packedColor({ state.ditherDivisorR,
 			state.ditherDivisorG, state.ditherDivisorB, state.ditherDivisorA });
+		command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
+		command.tspSampleOffset = state.tspPixelCenter ? 8 : 0;
 		if (command.mipLevelCount > 1)
 		{
 			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
@@ -750,8 +752,8 @@ private:
 			float referenceVQ = vertexV(0) * vertices[0].z;
 			if (!state.dCalcCtrl)
 			{
-				const s32 sampleXFixed = minX * 16 + 8;
-				const s32 sampleYFixed = minY * 16 + 8;
+				const s32 sampleXFixed = minX * 16 + command.tspSampleOffset;
+				const s32 sampleYFixed = minY * 16 + command.tspSampleOffset;
 				auto edgeAt = [&](u32 a, u32 b) {
 					return (static_cast<s64>(x[b]) - x[a]) * (sampleYFixed - y[a])
 							- (static_cast<s64>(y[b]) - y[a]) * (sampleXFixed - x[a]);
@@ -803,8 +805,7 @@ private:
 			configureState(poly, state, punchThrough, sorting);
 			state.deferBlend = sorting;
 			auto unsupported = [](const PipelineState& candidate) {
-				return !candidate.fpuPixelCenter || !candidate.tspPixelCenter
-						|| candidate.excludeClip
+				return candidate.excludeClip
 						|| (candidate.fogMode != 0 && candidate.fogMode != 1
 								&& candidate.fogMode != 2)
 						;

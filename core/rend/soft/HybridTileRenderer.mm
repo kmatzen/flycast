@@ -61,6 +61,8 @@ struct Triangle {
     uint clampMin;
     uint clampMax;
     uint ditherDivisors;
+    int fpuSampleOffset;
+    int tspSampleOffset;
 };
 
 struct Constants {
@@ -316,8 +318,6 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             ? secondaryColors[offset] : 0u;
     float depth = depthClearMask[offset] != 0 ? 0.0f
             : (constants.useInitialDepth != 0 ? depths[offset] : 0.0f);
-    const int sx = int(pixel.x) * 16 + 8;
-    const int sy = int(pixel.y) * 16 + 8;
     constexpr uint MaxSortedFragments = 64;
     uint sortedColors[MaxSortedFragments];
     float sortedDepths[MaxSortedFragments];
@@ -339,6 +339,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
                 || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
             continue;
+        const int sx = int(pixel.x) * 16 + t.fpuSampleOffset;
+        const int sy = int(pixel.y) * 16 + t.fpuSampleOffset;
         const long w0 = edge(t.x[1], t.y[1], t.x[2], t.y[2], sx, sy);
         const long w1 = edge(t.x[2], t.y[2], t.x[0], t.y[0], sx, sy);
         const long w2 = edge(t.x[0], t.y[0], t.x[1], t.y[1], sx, sy);
@@ -350,26 +352,35 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const float s0 = float(w0) / float(area);
         const float s1 = float(w1) / float(area);
         const float s2 = float(w2) / float(area);
-        const float z = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
-        if (!depthTest(t.state, z, depth))
+        const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
+        if (!depthTest(t.state, depthZ, depth))
             continue;
-        const float inverseZ = z == 0.0f ? 0.0f : 1.0f / z;
+        const int shadeX = int(pixel.x) * 16 + t.tspSampleOffset;
+        const int shadeY = int(pixel.y) * 16 + t.tspSampleOffset;
+        const float shadeS0 = float(edge(t.x[1], t.y[1], t.x[2], t.y[2],
+                shadeX, shadeY)) / float(area);
+        const float shadeS1 = float(edge(t.x[2], t.y[2], t.x[0], t.y[0],
+                shadeX, shadeY)) / float(area);
+        const float shadeS2 = float(edge(t.x[0], t.y[0], t.x[1], t.y[1],
+                shadeX, shadeY)) / float(area);
+        const float shadeZ = t.z[0] * shadeS0 + t.z[1] * shadeS1 + t.z[2] * shadeS2;
+        const float inverseZ = shadeZ == 0.0f ? 0.0f : 1.0f / shadeZ;
         float4 interpolated;
         for (uint component = 0; component < 4; ++component) {
             const uint shift = component * 8;
             interpolated[component] =
-                    (float(channel(t.color[0], shift)) * t.z[0] * s0
-                    + float(channel(t.color[1], shift)) * t.z[1] * s1
-                    + float(channel(t.color[2], shift)) * t.z[2] * s2) * inverseZ;
+                    (float(channel(t.color[0], shift)) * t.z[0] * shadeS0
+                    + float(channel(t.color[1], shift)) * t.z[1] * shadeS1
+                    + float(channel(t.color[2], shift)) * t.z[2] * shadeS2) * inverseZ;
         }
         uint source = packColor(interpolated);
         float4 offsetInterpolated;
         for (uint component = 0; component < 4; ++component) {
             const uint shift = component * 8;
             offsetInterpolated[component] =
-                    (float(channel(t.offsetColor[0], shift)) * t.z[0] * s0
-                    + float(channel(t.offsetColor[1], shift)) * t.z[1] * s1
-                    + float(channel(t.offsetColor[2], shift)) * t.z[2] * s2) * inverseZ;
+                    (float(channel(t.offsetColor[0], shift)) * t.z[0] * shadeS0
+                    + float(channel(t.offsetColor[1], shift)) * t.z[1] * shadeS1
+                    + float(channel(t.offsetColor[2], shift)) * t.z[2] * shadeS2) * inverseZ;
         }
         uint offsetColor = packColor(offsetInterpolated);
         if ((t.state & (1u << 11)) == 0)
@@ -388,18 +399,19 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         }
         float pvrD = 1.0f;
         if ((t.state & (1u << 4)) != 0) {
-            const float u = (t.u[0] * t.z[0] * s0 + t.u[1] * t.z[1] * s1
-                    + t.u[2] * t.z[2] * s2) * inverseZ;
-            const float v = (t.v[0] * t.z[0] * s0 + t.v[1] * t.z[1] * s1
-                    + t.v[2] * t.z[2] * s2) * inverseZ;
+            const float u = (t.u[0] * t.z[0] * shadeS0 + t.u[1] * t.z[1] * shadeS1
+                    + t.u[2] * t.z[2] * shadeS2) * inverseZ;
+            const float v = (t.v[0] * t.z[0] * shadeS0 + t.v[1] * t.z[1] * shadeS1
+                    + t.v[2] * t.z[2] * shadeS2) * inverseZ;
             pvrD = t.mipLevelCount > 1
-                    ? max(0.0f, z == 0.0f ? 0.0f : t.mipNumerator / (z * z)) : 1.0f;
+                    ? max(0.0f, shadeZ == 0.0f ? 0.0f
+                            : t.mipNumerator / (shadeZ * shadeZ)) : 1.0f;
             uint texel = sampleTexture(texture, t, float2(u, v), pvrD);
             if ((t.state & (1u << 30)) != 0) {
-                const float2 uv10 = projectedUV(t, sx + t.superSampleOffsetX, sy);
-                const float2 uv01 = projectedUV(t, sx, sy + t.superSampleOffsetY);
-                const float2 uv11 = projectedUV(t, sx + t.superSampleOffsetX,
-                        sy + t.superSampleOffsetY);
+                const float2 uv10 = projectedUV(t, shadeX + t.superSampleOffsetX, shadeY);
+                const float2 uv01 = projectedUV(t, shadeX, shadeY + t.superSampleOffsetY);
+                const float2 uv11 = projectedUV(t, shadeX + t.superSampleOffsetX,
+                        shadeY + t.superSampleOffsetY);
                 const uint samples[3] = {
                     sampleTexture(texture, t, uv10, pvrD),
                     sampleTexture(texture, t, uv01, pvrD),
@@ -459,7 +471,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             source = clamped;
         }
         if ((t.state & (1u << 23)) != 0) {
-            const float fog = fogCoefficient(z, constants.fogDensity, fogTable);
+            const float fog = fogCoefficient(shadeZ, constants.fogDensity, fogTable);
             float4 fogged;
             for (uint component = 0; component < 3; ++component) {
                 const uint shift = component * 8;
@@ -514,8 +526,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 continue;
             }
             uint position = sortedCount++;
-            while (position != 0 && (z < sortedDepths[position - 1]
-                    || (z == sortedDepths[position - 1]
+            while (position != 0 && (depthZ < sortedDepths[position - 1]
+                    || (depthZ == sortedDepths[position - 1]
                             && triangleIndex < sortedSequences[position - 1]))) {
                 sortedColors[position] = sortedColors[position - 1];
                 sortedDepths[position] = sortedDepths[position - 1];
@@ -525,14 +537,14 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 --position;
             }
             sortedColors[position] = source;
-            sortedDepths[position] = z;
+            sortedDepths[position] = depthZ;
             sortedStates[position] = t.state;
             sortedEffects[position] = t.effects;
             sortedSequences[position] = triangleIndex;
             continue;
         }
         if ((t.state & (1u << 3)) != 0)
-            depth = z;
+            depth = depthZ;
         const uint sourceFactor = (t.state >> 16) & 7;
         const uint destinationFactor = (t.state >> 19) & 7;
         const uint blendSource = (t.effects & 8u) != 0 ? secondary : source;

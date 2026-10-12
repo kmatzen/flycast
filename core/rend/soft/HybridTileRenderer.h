@@ -83,9 +83,11 @@ struct Triangle {
   u32 clampMin;
   u32 clampMax;
   u32 ditherDivisors;
+  s32 fpuSampleOffset;
+  s32 tspSampleOffset;
 };
 
-static_assert(sizeof(Triangle) == 204, "Metal command layout changed");
+static_assert(sizeof(Triangle) == 212, "Metal command layout changed");
 
 struct Frame {
   u32 width = 0;
