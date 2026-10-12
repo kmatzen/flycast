@@ -996,3 +996,11 @@ and rejection of truncated, reordered, duplicate, malformed, or spuriously
 hardware-labeled records. These are parser tests only. The existing toolchain
 process was checked live and had reached Binutils compilation; no probe
 execution or compiler completion is claimed.
+
+The probe reader additionally reports changed row-padding bytes and all 256
+pixels in a 16 × 16 interior window, away from quad edges. Its expected
+interior word `0xae7d` comes from the requested undithered RGB565 color, not
+from hardware data. A no-render sentinel dump therefore reports 256 differing
+interior pixels even if registers look correct. Three parser tests pass,
+including independent detection of prefix/suffix guard and padding changes.
+Matching interior pixels still never changes the unclassified provenance.

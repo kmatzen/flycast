@@ -22,6 +22,15 @@ export function readProbe(log) {
   const changes = range => [...range].filter(value => value !== 0xa5).length;
   const registerValues = Object.fromEntries(['pack', 'base', 'stride', 'clipx', 'clipy']
     .map((key, i) => [key, parseInt(registers[i + 1], 16)]));
+  let paddingChangedBytes = 0;
+  for (let y = 0; y < 32; ++y)
+    paddingChangedBytes += changes(bytes.subarray(32 + y * 72 + 64, 32 + (y + 1) * 72));
+  // Stay well inside the quad, away from edge-coverage rules. This expected
+  // word follows the requested undithered RGB565 packing, not a hardware dump.
+  let interiorPixelsDifferentFromRequestedColor = 0;
+  for (let y = 8; y < 24; ++y)
+    for (let x = 8; x < 24; ++x)
+      interiorPixelsDifferentFromRequestedColor += bytes.readUInt16LE(32 + (y * 36 + x) * 2) !== 0xae7d;
   return {
     execution: 'unclassified', hardwareValidated: false,
     sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -31,6 +40,10 @@ export function readProbe(log) {
       && (registerValues.base & 0x01000000) !== 0,
     prefixGuardChangedBytes: changes(bytes.subarray(0, 32)),
     suffixGuardChangedBytes: changes(bytes.subarray(2336)),
+    paddingChangedBytes,
+    interiorPixelsChecked: 256,
+    expectedInteriorWord: 0xae7d,
+    interiorPixelsDifferentFromRequestedColor,
     centerWord: bytes.readUInt16LE(32 + (16 * 36 + 16) * 2),
     limitation: 'Raw observations only; execution provenance and hardware correctness are not inferred.',
   };

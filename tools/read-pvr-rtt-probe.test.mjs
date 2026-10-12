@@ -19,6 +19,26 @@ test('complete data remains unclassified, even with expected registers', () => {
   assert.equal(result.centerWord, 0xa5a5); // No rendered output was fabricated.
   assert.equal(result.prefixGuardChangedBytes, 0);
   assert.equal(result.suffixGuardChangedBytes, 0);
+  assert.equal(result.paddingChangedBytes, 0);
+  assert.equal(result.interiorPixelsDifferentFromRequestedColor, 256);
+});
+test('report changed padding and interior independently of provenance', () => {
+  const lines = fixture();
+  const bytes = Buffer.alloc(2368, 0xa5);
+  for (let y = 8; y < 24; ++y)
+    for (let x = 8; x < 24; ++x)
+      bytes.writeUInt16LE(0xae7d, 32 + (y * 36 + x) * 2);
+  bytes[32 + 64] = 0;
+  bytes[0] = 0;
+  bytes[2367] = 0;
+  for (let offset = 0; offset < bytes.length; offset += 32)
+    lines[2 + offset / 32] = `PVR_RTT_BYTES offset=${offset.toString(16).padStart(4, '0')} data=${bytes.subarray(offset, offset + 32).toString('hex')}`;
+  const result = readProbe(lines.join('\n'));
+  assert.equal(result.interiorPixelsDifferentFromRequestedColor, 0);
+  assert.equal(result.paddingChangedBytes, 1);
+  assert.equal(result.prefixGuardChangedBytes, 1);
+  assert.equal(result.suffixGuardChangedBytes, 1);
+  assert.equal(result.hardwareValidated, false);
 });
 test('reject incomplete, reordered, duplicate, and malformed evidence', () => {
   const lines = fixture();
