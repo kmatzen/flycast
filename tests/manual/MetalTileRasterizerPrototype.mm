@@ -302,6 +302,31 @@ int main() {
       return 1;
   }
 
+  {
+    std::array<u32, 128> fogTable{};
+    reinterpret_cast<u8 *>(fogTable.data())[0] = 10;
+    reinterpret_cast<u8 *>(fogTable.data())[1] = 20;
+    const u32 input = 0xff204060u;
+    const u32 fogColor = 0xffe0c0a0u;
+    std::vector<Triangle> commands{testTriangle(
+        input, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0) |
+            rend::soft::hybrid::LookupFog)};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    test.fogTable = fogTable.data();
+    test.fogColor = fogColor;
+    test.fogDensity = 1.f;
+    const float fog = 20.f / 255.f;
+    const u32 expected = packColor(
+        channel(input, 0) + (channel(fogColor, 0) - channel(input, 0)) * fog,
+        channel(input, 8) + (channel(fogColor, 8) - channel(input, 8)) * fog,
+        channel(input, 16) + (channel(fogColor, 16) - channel(input, 16)) * fog,
+        channel(input, 24));
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != expected)
+      return 1;
+  }
+
   const std::vector<u32> atlas{0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
                                0xff0000ffu, 0xff00ff00u, 0xff00ff00u,
                                0xff00ff00u, 0xff00ff00u};

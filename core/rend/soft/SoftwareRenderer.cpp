@@ -648,6 +648,7 @@ private:
 		if (state.ignoreTextureAlpha) encodedState |= hybrid::IgnoreTextureAlpha;
 		if (state.alphaTest) encodedState |= hybrid::AlphaTest;
 		if (state.deferBlend) encodedState |= hybrid::Autosort;
+		if (state.fogMode == 0) encodedState |= hybrid::LookupFog;
 		hybrid::Triangle command {};
 		for (u32 i = 0; i < 3; ++i)
 		{
@@ -753,7 +754,7 @@ private:
 			state.deferBlend = sorting;
 			if (!state.fpuPixelCenter || !state.tspPixelCenter || state.excludeClip || state.useOffsetColor
 					|| state.textureSuperSample
-					|| state.trilinearFilter || state.fogMode != 2 || state.colorClamp
+					|| state.trilinearFilter || (state.fogMode != 0 && state.fogMode != 2) || state.colorClamp
 					|| state.shadow || state.srcSelect || state.dstSelect || state.bumpMap
 					|| state.dither || poly.tsp1.full != static_cast<u32>(-1))
 			{
@@ -848,7 +849,13 @@ private:
 		std::memcpy(initial.data(), frameStore.data(), frameStore.size() * sizeof(Color));
 		std::vector<u32> output;
 		std::vector<float> depth;
-		const hybrid::Frame frame { width, height, &commands, &textureAtlas, &initial };
+		hybrid::Frame frame { width, height, &commands, &textureAtlas, &initial };
+		frame.fogTable = rendContext->fog_table;
+		frame.fogColor = packedColor({
+			static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
+			static_cast<u8>(rendContext->fog_col_ram.green() * 255.f),
+			static_cast<u8>(rendContext->fog_col_ram.blue() * 255.f), 255 });
+		frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 		hybrid::Timing timing;
 		if (!hybrid::render(frame, output, depth, &timing) || output.size() != frameStore.size())
 			return reject("backend-failure");

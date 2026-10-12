@@ -19,9 +19,12 @@ struct Constants {
   u32 height;
   u32 tilesX;
   u32 useInitialColor;
+  u32 fogColor;
+  float fogDensity;
+  u32 reserved;
 };
 
-static_assert(sizeof(Constants) == 16);
+static_assert(sizeof(Constants) == 28);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -53,6 +56,9 @@ struct Constants {
     uint height;
     uint tilesX;
     uint useInitialColor;
+    uint fogColor;
+    float fogDensity;
+    uint reserved;
 };
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -235,6 +241,21 @@ inline uint applyTexture(uint base, uint texel, uint instruction)
     return packColor(result);
 }
 
+inline float fogCoefficient(float inverseDepth, float density,
+        const device uint *table)
+{
+    const float fogZ = clamp(density * inverseDepth, 1.0f, 255.9999f);
+    const uint bits = as_type<uint>(fogZ);
+    const uint exponent = ((bits >> 23) & 0xff) - 127;
+    const uint mantissa = bits & 0x7fffff;
+    const uint index = min(127u, (exponent << 4) | (mantissa >> 19));
+    const float fraction = float(mantissa & 0x7ffff) / 524288.0f;
+    const uint entry = table[index];
+    const float first = float(entry & 0xff);
+    const float second = float((entry >> 8) & 0xff);
+    return (second + (first - second) * fraction) / 255.0f;
+}
+
 kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uint *tileOffsets [[buffer(1)]],
         const device uint *tileReferences [[buffer(2)]],
@@ -242,6 +263,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uint *texture [[buffer(5)]],
         constant Constants& constants [[buffer(6)]],
         device atomic_uint *overflow [[buffer(7)]],
+        const device uint *fogTable [[buffer(8)]],
         uint2 pixel [[thread_position_in_grid]])
 {
     if (pixel.x >= constants.width || pixel.y >= constants.height)
@@ -300,6 +322,18 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             if ((t.state & (1u << 12)) != 0)
                 texel |= 0xff000000u;
             source = applyTexture(source, texel, (t.state >> 14) & 3);
+        }
+        if ((t.state & (1u << 23)) != 0) {
+            const float fog = fogCoefficient(z, constants.fogDensity, fogTable);
+            float4 fogged;
+            for (uint component = 0; component < 3; ++component) {
+                const uint shift = component * 8;
+                const float value = float(channel(source, shift));
+                fogged[component] = value
+                        + (float(channel(constants.fogColor, shift)) - value) * fog;
+            }
+            fogged.w = float(channel(source, 24));
+            source = packColor(fogged);
         }
         if ((t.state & (1u << 13)) != 0 && channel(source, 24) < t.alphaReference)
             continue;
@@ -418,7 +452,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 23) != 0)
+        triangle.alphaReference > 255 || (triangle.state >> 24) != 0)
       return false;
     const s64 area = (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
                          (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -
@@ -468,6 +502,11 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   id<MTLBuffer> offsetBuffer = makeBuffer(metal.device, tileOffsets);
   id<MTLBuffer> referenceBuffer = makeBuffer(metal.device, tileReferences);
   id<MTLBuffer> textureBuffer = makeBuffer(metal.device, *frame.texture);
+  const std::array<u32, 128> emptyFog {};
+  id<MTLBuffer> fogBuffer = [metal.device
+      newBufferWithBytes:frame.fogTable != nullptr ? frame.fogTable : emptyFog.data()
+                length:emptyFog.size() * sizeof(u32)
+               options:MTLResourceStorageModeShared];
   id<MTLBuffer> colorBuffer =
       [metal.device newBufferWithLength:pixelCount * sizeof(u32)
                                 options:MTLResourceStorageModeShared];
@@ -479,14 +518,15 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                                 options:MTLResourceStorageModeShared];
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
-      overflowBuffer == nil)
+      overflowBuffer == nil || fogBuffer == nil)
     return false;
   *static_cast<u32 *>(overflowBuffer.contents) = 0;
   if (frame.initialColors != nullptr)
     std::memcpy(colorBuffer.contents, frame.initialColors->data(),
                 pixelCount * sizeof(u32));
   const Constants constants{frame.width, frame.height, tilesX,
-                            frame.initialColors != nullptr ? 1u : 0u};
+                            frame.initialColors != nullptr ? 1u : 0u,
+                            frame.fogColor, frame.fogDensity, 0};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
@@ -500,6 +540,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:textureBuffer offset:0 atIndex:5];
   [encoder setBytes:&constants length:sizeof(constants) atIndex:6];
   [encoder setBuffer:overflowBuffer offset:0 atIndex:7];
+  [encoder setBuffer:fogBuffer offset:0 atIndex:8];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
   [encoder endEncoding];

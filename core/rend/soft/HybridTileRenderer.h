@@ -23,6 +23,7 @@ enum StateBits : u32 {
   SourceBlendShift = 16,
   DestinationBlendShift = 19,
   Autosort = 1 << 22,
+  LookupFog = 1 << 23,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -69,6 +70,9 @@ struct Frame {
   const std::vector<u32> *texture = nullptr;
   // Optional starting accumulation buffer. Null starts at opaque black.
   const std::vector<u32> *initialColors = nullptr;
+  const u32 *fogTable = nullptr;
+  u32 fogColor = 0;
+  float fogDensity = 0.f;
 };
 
 struct Timing {
