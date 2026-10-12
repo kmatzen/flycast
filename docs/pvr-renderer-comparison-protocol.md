@@ -986,3 +986,13 @@ the pinned SDK environment, build with `make -C tests/manual/pvr-rtt-probe`.
 The toolchain build has advanced through GCC download/unpacking/patching;
 free disk space at this point was about 9.5 GiB. Compiler and probe execution
 remain pending, so source inspection is not counted as a test pass.
+
+`node tools/read-pvr-rtt-probe.mjs capture.log` validates the current fixed
+probe record format, requires all sequential byte records and the end marker,
+and reports a content hash, actual registers, guard changes, and center word.
+It keeps every capture unclassified and does not infer rendering success from
+expected configuration. Two Node fixture tests pass, covering complete data
+and rejection of truncated, reordered, duplicate, malformed, or spuriously
+hardware-labeled records. These are parser tests only. The existing toolchain
+process was checked live and had reached Binutils compilation; no probe
+execution or compiler completion is claimed.
