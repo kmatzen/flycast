@@ -201,9 +201,20 @@ public:
 		}
 		const bool verifyHybrid = std::getenv("FLYCAST_HYBRID_VERIFY") != nullptr;
 		std::vector<Color> hybridInitial;
+		std::vector<u8> hybridVramInitial;
 		if (verifyHybrid)
+		{
 			hybridInitial = frameStore;
+			if (rendContext->isRTT && rendContext->render_passes.size() > 1)
+				hybridVramInitial.assign(&vram[0], &vram[0] + VRAM_SIZE);
+		}
 		const bool hybridRendered = tryRenderHybrid(width, height, passRegions, frameStore);
+		if (!hybridVramInitial.empty())
+		{
+			for (u32 offset = 0; offset < VRAM_SIZE; offset += PAGE_SIZE)
+				VramLockedWriteOffset(offset);
+			std::memcpy(&vram[0], hybridVramInitial.data(), VRAM_SIZE);
+		}
 		if (hybridRendered && !verifyHybrid)
 		{
 			if (rendContext->isRTT)
@@ -1069,8 +1080,6 @@ private:
 			return reject("framebuffer-emulation");
 		if (rendContext->render_passes.size() > 1)
 		{
-			if (rendContext->isRTT && std::getenv("FLYCAST_HYBRID_VERIFY") != nullptr)
-				return reject("multipass-rtt-verification-mutates-vram");
 			return tryRenderHybridPasses(width, height, passRegions, frameStore, trace)
 					|| reject("unsupported-multiple-passes");
 		}
