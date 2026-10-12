@@ -683,6 +683,9 @@ private:
 			command.color[i] = packedColor(state.gouraud
 					? (area1Data ? vertices[i].color1 : vertices[i].color)
 					: (area1Data ? flatVertex.color1 : flatVertex.color));
+			command.offsetColor[i] = packedColor(state.gouraud
+					? (area1Data ? vertices[i].offsetColor1 : vertices[i].offsetColor)
+					: (area1Data ? flatVertex.offsetColor1 : flatVertex.offsetColor));
 		}
 		command.textureOffset = mipOffsets[0];
 		command.textureWidth = textureWidth;
@@ -699,6 +702,10 @@ private:
 		command.area1Index = std::numeric_limits<u32>::max();
 		command.superSampleOffsetX = static_cast<s32>(std::lround(8.f * state.nativeToHostScaleX));
 		command.superSampleOffsetY = static_cast<s32>(std::lround(8.f * state.nativeToHostScaleY));
+		if (state.useOffsetColor) command.effects |= hybrid::UseOffsetColor;
+		if (state.bumpMap) command.effects |= hybrid::BumpMap;
+		if (state.fogMode == 1 && state.useOffsetColor && !state.bumpMap)
+			command.effects |= hybrid::VertexFog;
 		if (command.mipLevelCount > 1)
 		{
 			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
@@ -786,10 +793,11 @@ private:
 			state.deferBlend = sorting;
 			auto unsupported = [](const PipelineState& candidate) {
 				return !candidate.fpuPixelCenter || !candidate.tspPixelCenter
-						|| candidate.excludeClip || candidate.useOffsetColor
-						|| (candidate.fogMode != 0 && candidate.fogMode != 2)
+						|| candidate.excludeClip
+						|| (candidate.fogMode != 0 && candidate.fogMode != 1
+								&& candidate.fogMode != 2)
 						|| candidate.colorClamp || candidate.srcSelect || candidate.dstSelect
-						|| candidate.bumpMap || candidate.dither;
+						|| candidate.dither;
 			};
 			const bool hasArea1 = state.shadow && !state.intensityShadow
 					&& poly.tsp1.full != static_cast<u32>(-1);
@@ -918,6 +926,10 @@ private:
 				static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
 				static_cast<u8>(rendContext->fog_col_ram.green() * 255.f),
 				static_cast<u8>(rendContext->fog_col_ram.blue() * 255.f), 255 });
+			frame.fogVertexColor = packedColor({
+				static_cast<u8>(rendContext->fog_col_vert.red() * 255.f),
+				static_cast<u8>(rendContext->fog_col_vert.green() * 255.f),
+				static_cast<u8>(rendContext->fog_col_vert.blue() * 255.f), 255 });
 			frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 			std::vector<u32> output;
 			hybrid::Timing timing;
@@ -1046,6 +1058,10 @@ private:
 			static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
 			static_cast<u8>(rendContext->fog_col_ram.green() * 255.f),
 			static_cast<u8>(rendContext->fog_col_ram.blue() * 255.f), 255 });
+		frame.fogVertexColor = packedColor({
+			static_cast<u8>(rendContext->fog_col_vert.red() * 255.f),
+			static_cast<u8>(rendContext->fog_col_vert.green() * 255.f),
+			static_cast<u8>(rendContext->fog_col_vert.blue() * 255.f), 255 });
 		frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 		hybrid::Timing timing;
 		if (!hybrid::render(frame, output, depth, &timing) || output.size() != frameStore.size())

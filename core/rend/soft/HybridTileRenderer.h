@@ -32,6 +32,12 @@ enum StateBits : u32 {
   TextureSuperSample = 1u << 30,
 };
 
+enum EffectBits : u32 {
+  UseOffsetColor = 1 << 0,
+  BumpMap = 1 << 1,
+  VertexFog = 1 << 2,
+};
+
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
                         bool bilinear, bool useAlpha, u32 shadingInstruction,
                         u32 sourceBlend, u32 destinationBlend) {
@@ -68,9 +74,11 @@ struct Triangle {
   u32 area1Index;
   s32 superSampleOffsetX;
   s32 superSampleOffsetY;
+  u32 offsetColor[3];
+  u32 effects;
 };
 
-static_assert(sizeof(Triangle) == 176, "Metal command layout changed");
+static_assert(sizeof(Triangle) == 192, "Metal command layout changed");
 
 struct Frame {
   u32 width = 0;
@@ -83,6 +91,7 @@ struct Frame {
   const std::vector<float> *initialDepths = nullptr;
   const u32 *fogTable = nullptr;
   u32 fogColor = 0;
+  u32 fogVertexColor = 0;
   float fogDensity = 0.f;
   const std::vector<u8> *modifierMask = nullptr;
   const std::vector<u8> *depthClearMask = nullptr;

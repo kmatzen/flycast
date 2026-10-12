@@ -20,12 +20,13 @@ struct Constants {
   u32 tilesX;
   u32 useInitialColor;
   u32 fogColor;
+  u32 fogVertexColor;
   float fogDensity;
   u32 useModifierMask;
   u32 useInitialDepth;
 };
 
-static_assert(sizeof(Constants) == 32);
+static_assert(sizeof(Constants) == 36);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -54,6 +55,8 @@ struct Triangle {
     uint area1Index;
     int superSampleOffsetX;
     int superSampleOffsetY;
+    uint offsetColor[3];
+    uint effects;
 };
 
 struct Constants {
@@ -62,6 +65,7 @@ struct Constants {
     uint tilesX;
     uint useInitialColor;
     uint fogColor;
+    uint fogVertexColor;
     float fogDensity;
     uint useModifierMask;
     uint useInitialDepth;
@@ -350,10 +354,20 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                     + float(channel(t.color[2], shift)) * t.z[2] * s2) * inverseZ;
         }
         uint source = packColor(interpolated);
+        float4 offsetInterpolated;
+        for (uint component = 0; component < 4; ++component) {
+            const uint shift = component * 8;
+            offsetInterpolated[component] =
+                    (float(channel(t.offsetColor[0], shift)) * t.z[0] * s0
+                    + float(channel(t.offsetColor[1], shift)) * t.z[1] * s1
+                    + float(channel(t.offsetColor[2], shift)) * t.z[2] * s2) * inverseZ;
+        }
+        uint offsetColor = packColor(offsetInterpolated);
         if ((t.state & (1u << 11)) == 0)
             source |= 0xff000000u;
-        if ((t.state & (1u << 26)) != 0 && constants.useModifierMask != 0
-                && modifierMask[offset] != 0) {
+        const bool intensityShadow = (t.state & (1u << 26)) != 0
+                && constants.useModifierMask != 0 && modifierMask[offset] != 0;
+        if (intensityShadow) {
             uint scaled = source & 0xff000000u;
             for (uint component = 0; component < 3; ++component) {
                 const uint shift = component * 8;
@@ -392,9 +406,38 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 }
                 texel = averaged;
             }
-            if ((t.state & (1u << 12)) != 0)
+            if ((t.effects & 2u) != 0) {
+                constexpr float pi = 3.14159265358979323846f;
+                auto angleFraction = [](float parameter) {
+                    return parameter >= 255.0f ? 1.0f : parameter / 256.0f;
+                };
+                const float sParameter = (float(channel(texel, 24)) * 240.0f
+                        + float(channel(texel, 0)) * 15.0f) / 255.0f;
+                const float rParameter = (float(channel(texel, 8)) * 240.0f
+                        + float(channel(texel, 16)) * 15.0f) / 255.0f;
+                const float s = pi * 0.5f * angleFraction(sParameter);
+                const float r = 2.0f * pi * angleFraction(rParameter);
+                const float q = 2.0f * pi * angleFraction(float(channel(offsetColor, 16)));
+                const float alpha = clamp(float(channel(offsetColor, 24)) / 255.0f
+                        + float(channel(offsetColor, 0)) / 255.0f * sin(s)
+                        + float(channel(offsetColor, 8)) / 255.0f * cos(s) * cos(r - q),
+                        0.0f, 1.0f) * 255.0f;
+                texel = packColor(float4(255.0f, 255.0f, 255.0f, alpha));
+            } else if ((t.state & (1u << 12)) != 0)
                 texel |= 0xff000000u;
             source = applyTexture(source, texel, (t.state >> 14) & 3);
+            if ((t.effects & 1u) != 0 && (t.effects & 2u) == 0) {
+                uint added = source & 0xff000000u;
+                for (uint component = 0; component < 3; ++component) {
+                    const uint shift = component * 8;
+                    uint offsetValue = channel(offsetColor, shift);
+                    if (intensityShadow)
+                        offsetValue = min(255u,
+                                (offsetValue * t.shadeScale + 128) / 256);
+                    added |= min(255u, channel(source, shift) + offsetValue) << shift;
+                }
+                source = added;
+            }
         }
         if ((t.state & (1u << 23)) != 0) {
             const float fog = fogCoefficient(z, constants.fogDensity, fogTable);
@@ -404,6 +447,17 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 const float value = float(channel(source, shift));
                 fogged[component] = value
                         + (float(channel(constants.fogColor, shift)) - value) * fog;
+            }
+            fogged.w = float(channel(source, 24));
+            source = packColor(fogged);
+        } else if ((t.effects & 4u) != 0) {
+            const float fog = float(channel(offsetColor, 24)) / 255.0f;
+            float4 fogged;
+            for (uint component = 0; component < 3; ++component) {
+                const uint shift = component * 8;
+                const float value = float(channel(source, shift));
+                fogged[component] = value
+                        + (float(channel(constants.fogVertexColor, shift)) - value) * fog;
             }
             fogged.w = float(channel(source, 24));
             source = packColor(fogged);
@@ -642,7 +696,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                 pixelCount * sizeof(float));
   const Constants constants{frame.width, frame.height, tilesX,
                             frame.initialColors != nullptr ? 1u : 0u,
-                            frame.fogColor, frame.fogDensity,
+                            frame.fogColor, frame.fogVertexColor, frame.fogDensity,
                             frame.modifierMask != nullptr ? 1u : 0u,
                             frame.initialDepths != nullptr ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();

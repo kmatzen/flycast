@@ -417,6 +417,41 @@ int main() {
       return 1;
   }
 
+  {
+    const std::vector<u32> whiteTexture{0xffffffffu};
+    Triangle command = testTriangle(
+        0xff000010u, 1.f,
+        rend::soft::hybrid::makeState(7, false, true, false, true, 3, 1, 0));
+    command.textureWidth = command.textureHeight = 1;
+    command.offsetColor[0] = command.offsetColor[1] = command.offsetColor[2] =
+        0x80000020u;
+    command.effects = rend::soft::hybrid::UseOffsetColor |
+                      rend::soft::hybrid::VertexFog;
+    std::vector<Triangle> commands{command};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &whiteTexture};
+    test.fogVertexColor = 0xff00ff00u;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff008018u)
+      return 1;
+  }
+
+  {
+    const std::vector<u32> bumpTexture{0x88000000u};
+    Triangle command = testTriangle(
+        0xffffffffu, 1.f,
+        rend::soft::hybrid::makeState(7, false, true, false, true, 0, 1, 0));
+    command.textureWidth = command.textureHeight = 1;
+    command.offsetColor[0] = command.offsetColor[1] = command.offsetColor[2] =
+        0x000000ffu;
+    command.effects = rend::soft::hybrid::UseOffsetColor |
+                      rend::soft::hybrid::BumpMap;
+    std::vector<Triangle> commands{command};
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &bumpTexture};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xb4ffffffu)
+      return 1;
+  }
+
   const std::vector<u32> atlas{0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
                                0xff0000ffu, 0xff00ff00u, 0xff00ff00u,
                                0xff00ff00u, 0xff00ff00u};
