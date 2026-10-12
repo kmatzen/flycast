@@ -713,12 +713,18 @@ private:
 		if (state.dstSelect) command.effects |= hybrid::DestinationSelect;
 		if (state.colorClamp) command.effects |= hybrid::ColorClamp;
 		if (state.dither) command.effects |= hybrid::Dither;
+		if (state.fogMode == 3) command.effects |= hybrid::LookupFogAlpha;
+		if (state.excludeClip) command.effects |= hybrid::ExcludeClip;
 		command.clampMin = packedColor(state.clampMin);
 		command.clampMax = packedColor(state.clampMax);
 		command.ditherDivisors = packedColor({ state.ditherDivisorR,
 			state.ditherDivisorG, state.ditherDivisorB, state.ditherDivisorA });
 		command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
 		command.tspSampleOffset = state.tspPixelCenter ? 8 : 0;
+		command.excludeX0 = state.excludeX0;
+		command.excludeY0 = state.excludeY0;
+		command.excludeX1 = state.excludeX1;
+		command.excludeY1 = state.excludeY1;
 		if (command.mipLevelCount > 1)
 		{
 			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
@@ -804,12 +810,6 @@ private:
 			PipelineState state;
 			configureState(poly, state, punchThrough, sorting);
 			state.deferBlend = sorting;
-			auto unsupported = [](const PipelineState& candidate) {
-				return candidate.excludeClip
-						|| (candidate.fogMode != 0 && candidate.fogMode != 1
-								&& candidate.fogMode != 2)
-						;
-			};
 			const bool hasArea1 = state.shadow && !state.intensityShadow
 					&& poly.tsp1.full != static_cast<u32>(-1);
 			PipelineState area1State;
@@ -821,8 +821,7 @@ private:
 				configureArea1(poly, area1State);
 				area1State.deferBlend = sorting;
 			}
-			if (unsupported(state) || (hasArea1 && unsupported(area1State))
-					|| (state.shadow && !state.intensityShadow && !hasArea1))
+			if (state.shadow && !state.intensityShadow && !hasArea1)
 			{
 				static u32 reports = 0;
 				if (std::getenv("FLYCAST_HYBRID_TRACE") != nullptr && reports++ < 40)

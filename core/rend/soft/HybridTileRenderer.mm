@@ -63,6 +63,10 @@ struct Triangle {
     uint ditherDivisors;
     int fpuSampleOffset;
     int tspSampleOffset;
+    int excludeX0;
+    int excludeY0;
+    int excludeX1;
+    int excludeY1;
 };
 
 struct Constants {
@@ -321,16 +325,15 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     constexpr uint MaxSortedFragments = 64;
     uint sortedColors[MaxSortedFragments];
     float sortedDepths[MaxSortedFragments];
-    uint sortedStates[MaxSortedFragments];
-    uint sortedEffects[MaxSortedFragments];
-    uint sortedSequences[MaxSortedFragments];
+    uint sortedIndices[MaxSortedFragments];
     uint sortedCount = 0;
     for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
         const uint triangleIndex = tileReferences[i];
-        const Triangle base = triangles[triangleIndex];
+        const device Triangle& base = triangles[triangleIndex];
         const bool selectArea1 = constants.useModifierMask != 0
                 && modifierMask[offset] != 0 && base.area1Index != 0xffffffffu;
-        const Triangle t = selectArea1 ? triangles[base.area1Index] : base;
+        const uint selectedIndex = selectArea1 ? base.area1Index : triangleIndex;
+        const device Triangle& t = triangles[selectedIndex];
         const uint listType = (base.state >> 28) & 3;
         if ((listType == 0 && opaqueMask[offset] == 0)
                 || (listType == 1 && punchThroughMask[offset] == 0)
@@ -338,6 +341,10 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             continue;
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
                 || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
+            continue;
+        if ((t.effects & 256u) != 0 && int(pixel.x) >= t.excludeX0
+                && int(pixel.x) < t.excludeX1 && int(pixel.y) >= t.excludeY0
+                && int(pixel.y) < t.excludeY1)
             continue;
         const int sx = int(pixel.x) * 16 + t.fpuSampleOffset;
         const int sy = int(pixel.y) * 16 + t.fpuSampleOffset;
@@ -396,6 +403,12 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 scaled |= value << shift;
             }
             source = scaled;
+        }
+        if ((t.effects & 128u) != 0) {
+            const float fog = fogCoefficient(shadeZ, constants.fogDensity, fogTable);
+            source = packColor(float4(float(channel(constants.fogColor, 0)),
+                    float(channel(constants.fogColor, 8)),
+                    float(channel(constants.fogColor, 16)), fog * 255.0f));
         }
         float pvrD = 1.0f;
         if ((t.state & (1u << 4)) != 0) {
@@ -528,19 +541,15 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             uint position = sortedCount++;
             while (position != 0 && (depthZ < sortedDepths[position - 1]
                     || (depthZ == sortedDepths[position - 1]
-                            && triangleIndex < sortedSequences[position - 1]))) {
+                            && selectedIndex < sortedIndices[position - 1]))) {
                 sortedColors[position] = sortedColors[position - 1];
                 sortedDepths[position] = sortedDepths[position - 1];
-                sortedStates[position] = sortedStates[position - 1];
-                sortedEffects[position] = sortedEffects[position - 1];
-                sortedSequences[position] = sortedSequences[position - 1];
+                sortedIndices[position] = sortedIndices[position - 1];
                 --position;
             }
             sortedColors[position] = source;
             sortedDepths[position] = depthZ;
-            sortedStates[position] = t.state;
-            sortedEffects[position] = t.effects;
-            sortedSequences[position] = triangleIndex;
+            sortedIndices[position] = selectedIndex;
             continue;
         }
         if ((t.state & (1u << 3)) != 0)
@@ -562,11 +571,12 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             color = result;
     }
     for (uint i = 0; i < sortedCount; ++i) {
-        const uint sourceFactor = (sortedStates[i] >> 16) & 7;
-        const uint destinationFactor = (sortedStates[i] >> 19) & 7;
-        const uint blendSource = (sortedEffects[i] & 8u) != 0
+        const device Triangle& sortedTriangle = triangles[sortedIndices[i]];
+        const uint sourceFactor = (sortedTriangle.state >> 16) & 7;
+        const uint destinationFactor = (sortedTriangle.state >> 19) & 7;
+        const uint blendSource = (sortedTriangle.effects & 8u) != 0
                 ? secondary : sortedColors[i];
-        const uint blendDestination = (sortedEffects[i] & 16u) != 0
+        const uint blendDestination = (sortedTriangle.effects & 16u) != 0
                 ? secondary : color;
         uint result;
         if (sourceFactor == 1 && destinationFactor == 0)
@@ -575,7 +585,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             result = sourceAlphaBlend(blendSource, blendDestination);
         else
             result = blend(blendSource, blendDestination, sourceFactor, destinationFactor);
-        if ((sortedEffects[i] & 16u) != 0)
+        if ((sortedTriangle.effects & 16u) != 0)
             secondary = result;
         else
             color = result;
@@ -796,7 +806,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:translucentMaskBuffer offset:0 atIndex:13];
   [encoder setBuffer:secondaryBuffer offset:0 atIndex:14];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
-      threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
   const auto gpuStart = std::chrono::steady_clock::now();
   [command commit];

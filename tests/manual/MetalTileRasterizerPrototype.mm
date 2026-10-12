@@ -395,6 +395,39 @@ int main() {
   }
 
   {
+    std::array<u32, 128> fogTable{};
+    reinterpret_cast<u8 *>(fogTable.data())[0] = 10;
+    reinterpret_cast<u8 *>(fogTable.data())[1] = 20;
+    Triangle command = testTriangle(
+        0xffffffffu, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    command.effects = rend::soft::hybrid::LookupFogAlpha;
+    std::vector<Triangle> commands{command};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    test.fogTable = fogTable.data();
+    test.fogColor = 0xff604020u;
+    test.fogDensity = 1.f;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0x14604020u)
+      return 1;
+  }
+
+  {
+    Triangle command = testTriangle(
+        source, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    command.effects = rend::soft::hybrid::ExcludeClip;
+    command.excludeX1 = command.excludeY1 = 1;
+    std::vector<Triangle> commands{command};
+    const std::vector<u32> initialColors{destination};
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &texture,
+                                         &initialColors};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != destination)
+      return 1;
+  }
+
+  {
     Triangle command = testTriangle(
         0xff3264c8u, 1.f,
         rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0) |

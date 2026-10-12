@@ -40,6 +40,8 @@ enum EffectBits : u32 {
   DestinationSelect = 1 << 4,
   ColorClamp = 1 << 5,
   Dither = 1 << 6,
+  LookupFogAlpha = 1 << 7,
+  ExcludeClip = 1 << 8,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -85,9 +87,13 @@ struct Triangle {
   u32 ditherDivisors;
   s32 fpuSampleOffset;
   s32 tspSampleOffset;
+  s32 excludeX0;
+  s32 excludeY0;
+  s32 excludeX1;
+  s32 excludeY1;
 };
 
-static_assert(sizeof(Triangle) == 212, "Metal command layout changed");
+static_assert(sizeof(Triangle) == 228, "Metal command layout changed");
 
 struct Frame {
   u32 width = 0;
