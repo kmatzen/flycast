@@ -756,4 +756,83 @@ TEST(HybridTileRenderer, MatchesOracleForLookupFogAlpha)
 	ASSERT_TRUE(hybrid::render(frame, colors, depths));
 	expectEqual(cpu, colors, depths);
 }
+
+TEST(HybridTileRenderer, MatchesOracleForRegionDepthClearAndCommit)
+{
+	const Color initial { 20, 50, 180, 255 };
+	const Color source { 230, 70, 25, 255 };
+	const std::vector<u32> initialColors(4, pack(initial));
+	const std::vector<float> initialDepths(4, 3.f);
+	const std::vector<u8> depthClearMask { 1, 1, 0, 0 };
+	const std::vector<u8> opaqueMask { 1, 1, 1, 1 };
+	const std::vector<u8> commitMask { 1, 0, 1, 1 };
+	SoftwareRasterizer cpu(2, 2);
+	cpu.clear(initial, 3.f);
+	std::vector<float> clearedDepths = initialDepths;
+	for (size_t i = 0; i < clearedDepths.size(); ++i)
+		if (depthClearMask[i] != 0)
+			clearedDepths[i] = 0.f;
+	cpu.restoreDepth(clearedDepths);
+	PipelineState state;
+	state.depthMode = DepthMode::GreaterOrEqual;
+	state.coverageMask = opaqueMask.data();
+	drawQuad(cpu, 2.f, source, state);
+	std::vector<Color> committed = cpu.colorBuffer();
+	for (size_t i = 0; i < committed.size(); ++i)
+		if (commitMask[i] == 0)
+			committed[i] = initial;
+	cpu.restoreColor(committed);
+
+	std::vector<hybrid::Triangle> commands;
+	appendQuad(commands, 2.f, source,
+			hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+	const std::vector<u32> texture { 0xffffffffu };
+	hybrid::Frame frame { 2, 2, &commands, &texture, &initialColors, &initialDepths };
+	frame.depthClearMask = &depthClearMask;
+	frame.opaqueMask = &opaqueMask;
+	frame.commitMask = &commitMask;
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
+
+TEST(HybridTileRenderer, MatchesOracleForPerListRegionCoverage)
+{
+	const Color opaqueColor { 210, 30, 20, 255 };
+	const Color punchColor { 20, 210, 50, 255 };
+	const Color translucentColor { 30, 50, 220, 255 };
+	const std::vector<u8> opaqueMask { 1, 0, 0, 0 };
+	const std::vector<u8> punchMask { 0, 1, 0, 0 };
+	const std::vector<u8> translucentMask { 0, 0, 1, 0 };
+	SoftwareRasterizer cpu(2, 2);
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.coverageMask = opaqueMask.data();
+	drawQuad(cpu, 1.f, opaqueColor, state);
+	state.coverageMask = punchMask.data();
+	drawQuad(cpu, 2.f, punchColor, state);
+	state.coverageMask = translucentMask.data();
+	drawQuad(cpu, 3.f, translucentColor, state);
+
+	std::vector<hybrid::Triangle> commands;
+	appendQuad(commands, 1.f, opaqueColor,
+			hybrid::makeState(7, true, false, false, true, 0, 1, 0));
+	u32 punchState = hybrid::makeState(7, true, false, false, true, 0, 1, 0)
+			| (1u << hybrid::ListTypeShift);
+	appendQuad(commands, 2.f, punchColor, punchState);
+	u32 translucentState = hybrid::makeState(7, true, false, false, true, 0, 1, 0)
+			| (2u << hybrid::ListTypeShift);
+	appendQuad(commands, 3.f, translucentColor, translucentState);
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u32> initialColors(4, 0);
+	hybrid::Frame frame { 2, 2, &commands, &texture, &initialColors };
+	frame.opaqueMask = &opaqueMask;
+	frame.punchThroughMask = &punchMask;
+	frame.translucentMask = &translucentMask;
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
 #endif
