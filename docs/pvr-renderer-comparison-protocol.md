@@ -552,3 +552,25 @@ in `core/rend/vulkan/shaders.cpp` dithers `color` before returning it for host
 blending. Software also dithers the completed framebuffer. This comparison
 does not isolate stage ordering from other OIT/conventional differences, and
 the remaining 77 pixels have not yet been attributed to a specific operation.
+
+### OIT filtering isolation with dithering retained
+
+Both software and Vulkan OIT were rerun from the same Vulkan-enabled executable
+with `rend.TextureFiltering=1` (force nearest), leaving framebuffer dithering
+enabled. Instantiated backend records confirmed software and vulkan-oit. The
+captured-input gate passes. Prefixes are `sw-nearest` and `vkoit-nearest` in
+`/tmp/pvr-context-capture.c8w16g/`; both owned muted sessions were stopped.
+
+Differences fell from 77 pixels to 28. All 28 differ only in green by one native
+RGB565 step, with software higher; signed sums are `[0,28,0]`. The differences
+occur only at even x / odd y, distributed over 4x4 phase indices 4, 6, 12, and
+14 with counts 12, 7, 3, and 6 respectively. Those phases have dither-table
+values 9, 11, 10, and 8. This phase correlation is consistent with a rounding
+boundary interacting with dithering, but does not identify which operation
+first differs or which output matches hardware.
+
+The reports are `nearest-input-comparison.json` and
+`nearest-oit-comparison.json`. This configuration intervention changes requested
+texture sampling and is diagnostic only; it is not an accuracy fix. The input
+gate does not encode emulator configuration, so the matched override is
+recorded explicitly here and in the run commands.
