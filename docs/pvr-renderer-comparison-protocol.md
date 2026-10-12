@@ -2518,3 +2518,27 @@ zero publications/swaps. Application SHA-256:
 `d543542b5293c1b823b41c6402de306eb570a9cc41a9c6b05481885e3b31b24b`.
 This checks the existing path for regression; live emulator Metal metrics and
 high-DPI behavior remain to be validated after native-context integration.
+
+### Selected-packet frontend handoff
+
+`selectedPresentation(Renderer*)` now exposes the immutable packet accepted
+by the software renderer's `Present()` on the UI thread. Unlike the retention
+API, it does not acquire the latest producer publication. The existing GL draw
+path uses the same accessor. Retaining the packet does not keep the renderer
+alive; future native completion wiring must not capture a raw renderer across
+teardown. That completion wiring is not implemented by this change.
+
+The ARM64 app builds. Seaman paused-recreation checks at UI frames 480 and 720
+pass, including retained-image equality and UI composition, with respectively
+82/197 full-VRAM comparisons before recreation and 40 afterward, all matching.
+Evidence: `/tmp/pvr-selected-frame-seaman-20261012/report.json`.
+Application SHA-256:
+`3ea7f4ef9594641fa5325281cbfbe6a47e85ec3c71157704a8f63ec7cc133735`.
+These null-audio checks are not cadence or audio-quality measurements.
+
+An earlier run with the finite cadence ELF passed frame 480 but timed out at
+720 (`/tmp/pvr-selected-frame-regression-20261012/frame-720.log`). The latter
+recorded successful retained-image drawing and recreation, then no new content
+publications; it could not satisfy the required post-recreation comparisons.
+That run is not a pass. Use continuously rendering content for this lifecycle
+gate rather than assuming the 660-submission probe lasts through both points.

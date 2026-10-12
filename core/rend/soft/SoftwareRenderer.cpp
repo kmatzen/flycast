@@ -680,6 +680,12 @@ public:
 
 	bool RendersOnEmulationThread() const override { return emulationThreadRendering; }
 
+	std::shared_ptr<const PresentationFrame> selectedPresentation() const
+	{
+		return emulationThreadRendering && !clearLastFrame
+				? lastPresentedFramebuffer : nullptr;
+	}
+
 	std::shared_ptr<const PresentationFrame> retainPresentation() const
 	{
 		return emulationThreadRendering && !clearLastFrame
@@ -771,7 +777,7 @@ public:
 		const auto presentWallStart = std::chrono::steady_clock::now();
 		// In decoupled mode draw exactly the snapshot accepted by Present(),
 		// even if the producer publishes another image before the GL upload.
-		const auto frame = emulationThreadRendering ? lastPresentedFramebuffer
+		const auto frame = emulationThreadRendering ? selectedPresentation()
 				: framebufferPresentation.acquire();
 		if (!frame && (emulationThreadRendering || !displayRasterizer))
 			return false;
@@ -2613,6 +2619,12 @@ private:
 };
 
 } // namespace
+
+std::shared_ptr<const PresentationFrame> selectedPresentation(Renderer *renderer)
+{
+	auto software = dynamic_cast<SoftwareRenderer *>(renderer);
+	return software ? software->selectedPresentation() : nullptr;
+}
 
 std::shared_ptr<const PresentationFrame> retainPresentation(Renderer *renderer)
 {
