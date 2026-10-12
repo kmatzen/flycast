@@ -2501,3 +2501,20 @@ sample. Repeated resize runs lost queued sequences near the size transition;
 this supports treating resize delivery separately from steady-size delivery,
 not claiming that all pacing failures are solved. Neither mode is a lossless
 end-to-end emulator result, and the long gaps remain part of the evidence.
+
+### Frontend Metal display metrics prerequisite
+
+The Apple SDL display-metrics path now queries `SDL_Metal_GetDrawableSize`
+for Metal windows, before the existing Vulkan/OpenGL branches. Logical window
+dimensions still determine point scaling. This avoids treating logical points
+as framebuffer pixels on high-DPI Metal windows; it does not select the native
+driver or create a Metal window in the emulator yet.
+
+The ARM64 app builds with this change. The existing OpenGL injected-error
+lifecycle regression passes in
+`/tmp/pvr-metal-metrics-gl-regression-20261012/report.json`: 63 full-VRAM
+comparisons before the fault, zero afterward, and a replacement renderer with
+zero publications/swaps. Application SHA-256:
+`d543542b5293c1b823b41c6402de306eb570a9cc41a9c6b05481885e3b31b24b`.
+This checks the existing path for regression; live emulator Metal metrics and
+high-DPI behavior remain to be validated after native-context integration.

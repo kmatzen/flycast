@@ -38,6 +38,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#ifdef __APPLE__
+#include <SDL_metal.h>
+#endif
 
 static SDL_Window* window = NULL;
 static u32 windowFlags;
@@ -673,6 +676,11 @@ bool sdl_update_display_metrics(SDL_Window *window, u32 windowFlags)
 	int windowHeight = 0;
 	SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
+#ifdef __APPLE__
+	if (windowFlags & SDL_WINDOW_METAL)
+		SDL_Metal_GetDrawableSize(window, &settings.display.width, &settings.display.height);
+	else
+#endif
 #ifdef USE_VULKAN
 	if (windowFlags & SDL_WINDOW_VULKAN)
 		SDL_Vulkan_GetDrawableSize(window, &settings.display.width, &settings.display.height);
