@@ -708,3 +708,24 @@ until `Renderer::Render` finishes. The queue also contains an existing FIXME
 about asynchronous framebuffer reads and blinking. These constraints require
 preserving ordering and VRAM visibility while investigating presentation
 scheduling; simply removing synchronization is not an accuracy-preserving fix.
+
+### Experimental Cocoa late-swap pacing
+
+On macOS SDL/OpenGL, `FLYCAST_PVR_LATE_SWAP=1` changes a requested swap
+interval of 1 to -1. It does not change interval 0 (VSync off/fast-forward)
+or intervals greater than 1, and has no effect on other platforms. This is
+strictly opt-in: normal VSync behavior remains unchanged. The bundled SDL
+Cocoa negative-interval path waits only when no display callback has occurred
+since the preceding swap; its positive path always waits for another callback.
+Late swaps can tear. This experiment is not a tear-free presentation guarantee
+or a recommended default.
+
+A single-threaded hybrid Seaman run with full framebuffer emulation, VSync
+requested, null audio, and this opt-in reported SDL interval -1. Three later
+240-VBlank windows measured speeds 1.0006, 1.0012, and 0.9974, compared with
+roughly 0.64 under positive interval 1. Nearby mean swap times were
+5.042–5.393 ms. Log: `/tmp/pvr-late-swap.log`; the owned process was stopped
+after measurement. The app build and whitespace check passed. No pixel
+operations, framebuffer ordering, or render-completion waits were removed.
+The measurement does not prove live pixel equivalence, stable audio, good
+display pacing, or sustained performance across other scenes and games.

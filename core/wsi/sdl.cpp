@@ -98,6 +98,11 @@ bool SDLGLGraphicsContext::init()
 		else
 			swapInterval = 1;
 	}
+	// Experimental late-swap pacing; never enabled by the VSync setting alone.
+#ifdef TARGET_MAC
+	if (swapInterval == 1 && std::getenv("FLYCAST_PVR_LATE_SWAP") != nullptr)
+		swapInterval = -1;
+#endif
 	SDL_GL_SetSwapInterval(swapInterval);
 
 #ifdef GLES
@@ -175,6 +180,11 @@ void SDLGLGraphicsContext::changeGLSwapInterval()
 			swapInterval = gameSwapInterval;
 		INFO_LOG(RENDERER, "Swap interval changed to %d", swapInterval);
 	}
+	// Keep the experiment restricted to the one-refresh Cocoa path.
+#ifdef TARGET_MAC
+	if (swapInterval == 1 && std::getenv("FLYCAST_PVR_LATE_SWAP") != nullptr)
+		swapInterval = -1;
+#endif
 	SDL_GL_SetSwapInterval(swapInterval);
 }
 
