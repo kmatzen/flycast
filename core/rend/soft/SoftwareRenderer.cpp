@@ -205,7 +205,8 @@ public:
 		if (verifyHybrid)
 		{
 			hybridInitial = frameStore;
-			if (rendContext->isRTT && rendContext->render_passes.size() > 1)
+			if ((rendContext->isRTT && rendContext->render_passes.size() > 1)
+					|| config::EmulateFramebuffer)
 				hybridVramInitial.assign(&vram[0], &vram[0] + VRAM_SIZE);
 		}
 		const bool hybridRendered = tryRenderHybrid(width, height, passRegions, frameStore);
@@ -217,7 +218,7 @@ public:
 		}
 		if (hybridRendered && !verifyHybrid)
 		{
-			if (rendContext->isRTT)
+			if (rendContext->isRTT || config::EmulateFramebuffer)
 			{
 				if (rendContext->render_passes.size() == 1)
 				{
@@ -229,11 +230,17 @@ public:
 						committedRegions.push_back({ 0, 0, static_cast<s32>(width),
 								static_cast<s32>(height), false, true, false, false,
 								true, true, true, true, true });
-					writeFramebufferToVram(frameStore, committedRegions);
+					if (rendContext->isRTT)
+						writeFramebufferToVram(frameStore, committedRegions);
+					else
+						writeDisplayFramebufferToVram(frameStore, committedRegions);
 				}
-				rasterizer = screenRasterizer.get();
-				activeCoverageMask = nullptr;
-				return false;
+				if (rendContext->isRTT)
+				{
+					rasterizer = screenRasterizer.get();
+					activeCoverageMask = nullptr;
+					return false;
+				}
 			}
 			rawFrameStore = frameStore;
 			presentationBuffer = frameStore;
@@ -1042,9 +1049,14 @@ private:
 						std::memcpy(committed.data() + first, accumulation.data() + first,
 								static_cast<size_t>(x1 - x0) * sizeof(u32));
 					}
-			if (rendContext->isRTT && !committedRegions.empty())
-				writeFramebufferToVram(committed, committedRegions);
 				}
+			if (!committedRegions.empty())
+			{
+				if (rendContext->isRTT)
+					writeFramebufferToVram(committed, committedRegions);
+				else if (config::EmulateFramebuffer)
+					writeDisplayFramebufferToVram(committed, committedRegions);
+			}
 			totalTriangles += commands.size();
 			totalTextures += textureOffsets.size();
 			totalTiming.encodeMilliseconds += timing.encodeMilliseconds;
@@ -1077,8 +1089,6 @@ private:
 		if (rendContext->render_passes.size() != passRegions.size()
 				|| rendContext->render_passes.empty())
 			return reject("invalid-passes");
-		if (!rendContext->isRTT && config::EmulateFramebuffer)
-			return reject("framebuffer-emulation");
 		if (rendContext->render_passes.size() > 1)
 		{
 			return tryRenderHybridPasses(width, height, passRegions, frameStore, trace)
