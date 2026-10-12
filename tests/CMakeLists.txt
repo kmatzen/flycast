@@ -71,9 +71,9 @@ if(APPLE AND NOT IOS)
     target_link_libraries(flycast-metal-window-probe PRIVATE SDL2::SDL2 nowide::nowide
             "-framework Metal" "-framework Foundation" "-framework QuartzCore")
    endif()
-    add_executable(flycast-metal-ui-tests EXCLUDE_FROM_ALL
-            src/rend/MetalUiTest.mm
+    add_library(flycast-metal-ui-support STATIC EXCLUDE_FROM_ALL
             ../core/rend/soft/MetalPresentationFrame.mm
+            ../core/rend/soft/MetalUiDriver.mm
             ../core/deps/imgui/backends/imgui_impl_metal.mm
             ../core/deps/imgui/imgui.cpp
             ../core/deps/imgui/imgui_draw.cpp
@@ -81,10 +81,18 @@ if(APPLE AND NOT IOS)
             ../core/deps/imgui/misc/freetype/imgui_freetype.cpp
             ../core/deps/imgui/imgui_tables.cpp
             ../core/deps/imgui/imgui_widgets.cpp)
-    target_include_directories(flycast-metal-ui-tests PRIVATE ../core/deps/imgui ../core ../core/deps ../core/deps/glm)
-    target_compile_options(flycast-metal-ui-tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-    target_link_libraries(flycast-metal-ui-tests PRIVATE GTest::gtest_main freetype nowide::nowide
+    target_include_directories(flycast-metal-ui-support PUBLIC ../core/deps/imgui ../core ../core/deps ../core/deps/glm)
+    target_compile_options(flycast-metal-ui-support PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(flycast-metal-ui-support PUBLIC freetype nowide::nowide
             "-framework Metal" "-framework Foundation" "-framework QuartzCore")
+    add_executable(flycast-metal-ui-tests EXCLUDE_FROM_ALL src/rend/MetalUiTest.mm)
+    target_compile_options(flycast-metal-ui-tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(flycast-metal-ui-tests PRIVATE flycast-metal-ui-support GTest::gtest_main)
+    if(TARGET SDL2::SDL2)
+        add_executable(flycast-metal-driver-probe EXCLUDE_FROM_ALL src/rend/MetalDriverProbe.mm)
+        target_compile_options(flycast-metal-driver-probe PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+        target_link_libraries(flycast-metal-driver-probe PRIVATE flycast-metal-ui-support SDL2::SDL2)
+    endif()
   endif()
     target_sources(flycast-renderer-tests PRIVATE
             ../core/rend/soft/HybridTileRenderer.mm)

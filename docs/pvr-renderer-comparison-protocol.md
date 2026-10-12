@@ -2452,3 +2452,52 @@ checks. Application SHA-256:
 `a33a97831fad46497dd23bb30a78bd855f0f9471a3e0cd4532de193f9d1b5b70`.
 The computer remained muted. This verifies compilation/linking and the tested
 existing path only; it supplies no native-driver lifecycle or performance claim.
+
+### Standalone native driver lifecycle probe
+
+`flycast-metal-driver-probe` now constructs the actual Metal UI driver in an
+SDL Metal window, submits 120 immutable framebuffer packets behind ImGui,
+resizes from 640 x 480 to 800 x 600 after submission 60, and creates, looks up,
+and deletes a UI texture. It checks that all 120 observer callbacks arrive in
+sequence on the UI thread and destroys the driver before the ImGui context
+and SDL view. It is separate from the emulator frontend and uses default UI
+styling; it does not test game execution, input, audio, or pixel readback.
+
+Both ARM64 and Rosetta runs with Metal validation completed with 120 callbacks
+and no lifecycle failure. Both also recorded five skipped presentations:
+ARM64 sequences 1, 2, 58, 59, 60; Rosetta sequences 2, 57, 58, 59, 60.
+The cluster near the resize checkpoint warrants explicit resize-delivery
+testing; these observations alone do not establish its cause. Exit success
+means lifecycle success, not lossless delivery or sustained 60 Hz.
+The five supporting offscreen Metal tests also passed on both architectures.
+
+Evidence: `/tmp/pvr-metal-driver-probe-native.log`,
+`/tmp/pvr-metal-driver-probe-rosetta.log`,
+`/tmp/pvr-metal-driver-support-tests.log`, and
+`/tmp/pvr-metal-driver-support-rosetta.log`.
+Universal probe SHA-256:
+`d60233af0133fa2656d0335aaf6f1496e57011721feb833f61d7d39978a56620`.
+The initial compile failure was a missing explicit Metal framework header in
+the probe, now fixed. Frontend integration and reliable delivery remain open.
+
+The probe was then extended to 660 submissions and given a `--no-resize`
+control. Four serial ARM64 runs with Metal validation alternated fixed-size
+and resize modes using one unchanged universal binary (SHA-256
+`6974983f746189df4e279680a1b721b622213eee546ba50f04ed4d52b2d586bf`).
+All had 660 ordered callbacks and no lifecycle failure:
+
+| Run | Skipped sequences | Maximum positive callback gap |
+| --- | --- | --- |
+| Fixed 1 | 1–5 | 49.997 ms (6 to 7) |
+| Resize 1 | 1, 2, 57–60 | 83.329 ms (56 to 61) |
+| Fixed 2 | 1, 2 | 16.670 ms |
+| Resize 2 | 1, 2, 58–60 | 66.664 ms (57 to 61) |
+
+Logs are `/tmp/pvr-driver-{fixed1,resize1,fixed2,resize2}.log`.
+Median and p95 positive callback intervals were approximately 16.666 ms in
+all four runs. Resize 1 also had a 33.332 ms gap from 32 to 33; resize 2 had
+one from 374 to 375. Fixed-size runs lost no sequences after startup in this
+sample. Repeated resize runs lost queued sequences near the size transition;
+this supports treating resize delivery separately from steady-size delivery,
+not claiming that all pacing failures are solved. Neither mode is a lossless
+end-to-end emulator result, and the long gaps remain part of the evidence.
