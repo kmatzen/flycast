@@ -381,3 +381,23 @@ Artifacts are in `/tmp/pvr-ta-capture.WgaMqf/`; the owned emulator session was
 stopped afterward. This live check exercised a single-context frame, not a
 multi-context capture. Raw TA is upstream input, not a substitute for the
 latched context state or the hardware's post-TA parameter representation.
+
+### Latched-state diagnostics
+
+Selected-frame capture also writes `<prefix>.<stage>.context.json`, schema 1,
+kind `latched-pvr-state`. Named integer fields preserve latched framebuffer,
+scanout, fog, clipping, shadow, alpha-test, and region configuration. The
+culling threshold is represented by its IEEE-754 bits; booleans are numeric
+0/1. The fog table and six-word region entries are explicit arrays, not C++
+object dumps. Register values and framebuffer stride retain their native
+units (the stride field is in eight-byte units).
+
+This is a diagnostic subset, not a complete serialized `rend_context`.
+Decoded vertices, polygon parameters, background geometry, renderer settings,
+and retained buffers are not included. It must not be advertised as replayable
+until those dependencies are handled and replayed results are verified.
+
+The muted Seaman frame-4 check in `/tmp/pvr-context-capture.c8w16g/` produced
+two 18249-byte JSON files. Both parsed successfully and matched field-for-field:
+41 top-level fields, 128 fog words, 300 six-word region entries, and 640x480
+dimensions. Both write-success records were checked and the emulator stopped.

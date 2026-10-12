@@ -15,6 +15,9 @@
 #include <xxhash.h>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
+#include <cstring>
+#include <locale>
 
 #include <mutex>
 #include <deque>
@@ -233,6 +236,69 @@ private:
 						// Raw byte-addressed live register bank, including fog and palette.
 						// This is not the render context's latched register snapshot.
 						const bool registersSaved = save(".registers", pvr_regs, sizeof(pvr_regs));
+						// Serialize named values, never C++ object storage or pointers.
+						const auto& r = taContext->rend;
+						std::ostringstream context;
+						context.imbue(std::locale::classic());
+						context << "{\"schema\":1,\"kind\":\"latched-pvr-state\"";
+						auto field = [&](const char *name, auto value) {
+							context << ",\"" << name << "\":" << value;
+						};
+						field("frame", FrameCount);
+						field("isRTT", r.isRTT);
+						field("clearFramebuffer", r.clearFramebuffer);
+						field("globClipX", r.globClip.x);
+						field("globClipY", r.globClip.y);
+						field("fbClipX", r.fbClip.origin.x);
+						field("fbClipY", r.fbClip.origin.y);
+						field("fbClipWidth", r.fbClip.size.x);
+						field("fbClipHeight", r.fbClip.size.y);
+						field("framebufferWidth", r.framebufferWidth);
+						field("framebufferHeight", r.framebufferHeight);
+						u32 cullBits;
+						std::memcpy(&cullBits, &r.fpu_cull_val, sizeof(cullBits));
+						field("fpu_cull_val_bits", cullBits);
+						field("fb_W_SOF1", r.fb_W_SOF1);
+						field("fb_W_CTRL", r.fb_W_CTRL.full);
+						field("fb_W_LINESTRIDE", r.fb_W_LINESTRIDE);
+						field("fb_R_CTRL", r.fb_R_CTRL.full);
+						field("fb_R_SIZE", r.fb_R_SIZE.full);
+						field("fb_R_SOF1", r.fb_R_SOF1);
+						field("fb_R_SOF2", r.fb_R_SOF2);
+						field("spg_control", r.spg_control.full);
+						field("spg_status", r.spg_status.full);
+						field("vo_control", r.vo_control.full);
+						field("scaler_ctl", r.scaler_ctl.full);
+						field("y_coeff", r.y_coeff);
+						field("fog_clamp_min", r.fog_clamp_min.full);
+						field("fog_clamp_max", r.fog_clamp_max.full);
+						field("fog_col_ram", r.fog_col_ram.full);
+						field("fog_col_vert", r.fog_col_vert.full);
+						field("fog_density", r.fog_density.full);
+						field("pt_alpha_ref", r.pt_alpha_ref);
+						field("half_offset", r.half_offset);
+						field("fpu_shad_scale", r.fpu_shad_scale.full);
+						field("region_base", r.region_base);
+						field("fpu_param_cfg", r.fpu_param_cfg);
+						field("isp_feed_cfg", r.isp_feed_cfg);
+						field("vo_border_col", r.vo_border_col.full);
+						field("region_tile_size", r.region_tile_size);
+						context << ",\"fog_table\":[";
+						for (size_t i = 0; i < std::size(r.fog_table); ++i)
+							context << (i ? "," : "") << r.fog_table[i];
+						context << "],\"region_array\":[";
+						for (size_t i = 0; i < r.region_array.size(); ++i)
+						{
+							context << (i ? ",[" : "[");
+							for (size_t j = 0; j < r.region_array[i].words.size(); ++j)
+								context << (j ? "," : "") << r.region_array[i].words[j];
+							context << "]";
+						}
+						context << "]}\n";
+						const std::string contextData = context.str();
+						const bool contextSaved = save(".context.json", contextData.data(), contextData.size());
+						std::fprintf(stderr, "PVR_CONTEXT_SNAPSHOT stage=%s saved=%u bytes=%zu\n",
+								stage, contextSaved ? 1u : 0u, contextData.size());
 						std::fprintf(stderr, "PVR_SNAPSHOT stage=%s saved=%u registers_saved=%u registers_bytes=%zu registers_hash=%016llx pack=%u dither=%u scaler=%08x stride=%u\n",
 								stage, saved ? 1u : 0u, registersSaved ? 1u : 0u,
 								sizeof(pvr_regs), static_cast<unsigned long long>(XXH64(pvr_regs, sizeof(pvr_regs), 0)),
