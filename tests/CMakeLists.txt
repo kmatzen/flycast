@@ -35,6 +35,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         src/oslib/I18nTest.cpp
         src/rend/SoftwareRasterizerTest.cpp
         src/rend/HybridTileRendererTest.cpp
+        src/rend/TextureDecodeTest.cpp
         src/util/PeriodicThreadTest.cpp
         src/util/TsQueueTest.cpp
         src/util/WorkerThreadTest.cpp)
@@ -44,6 +45,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 add_executable(flycast-renderer-tests EXCLUDE_FROM_ALL
         src/rend/SoftwareRasterizerTest.cpp
         src/rend/HybridTileRendererTest.cpp
+        src/rend/TextureDecodeTest.cpp
         ../core/rend/soft/SoftwareRasterizer.cpp
         ../core/rend/soft/HybridTileRenderer.cpp)
 target_include_directories(flycast-renderer-tests PRIVATE ../core)
