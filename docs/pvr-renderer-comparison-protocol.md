@@ -2411,3 +2411,44 @@ after target resizing and backend recreation. All five tests pass on ARM64
 with Metal validation and under Rosetta: `/tmp/pvr-metal-composed-native.log`
 and `/tmp/pvr-metal-composed-rosetta.log`. This checks pipeline-state handoff
 and composition offscreen; it does not extend the native-window delivery claims.
+
+### Experimental Metal UI driver implementation
+
+`core/rend/soft/MetalUiDriver.mm` implements the ImGui driver interface around
+the tested framebuffer upload/drawing and upstream Metal ImGui components.
+It accepts a frontend-owned CAMetalLayer, a selected-frame provider, and a
+presentation observer. It draws the packet's border and aspect-fitted image
+before ImGui, owns UI textures, and marshals drawable callbacks through a
+shared queue to the UI thread. Completion blocks retain only that queue and
+the immutable packet, not the driver or emulator renderer. Zero presentation
+times remain visible to the observer as skips.
+
+The default-off `FLYCAST_BUILD_METAL_UI_DRIVER` CMake option compiles this
+prototype; it does not select a runtime renderer or replace the OpenGL window.
+The frontend must create/configure the layer, update its drawable size, shut
+down the previous ImGui backend, and connect the selected-frame provider and
+completion accounting before invoking the factory. Current SDL display metrics
+have no Metal drawable-size branch, so that integration remains required.
+
+This driver is not ready for runtime adoption: rotation and display filtering
+options are not connected, nearest-sampled UI texture requests explicitly
+throw a renderer error because the upstream backend uses a fixed linear
+sampler, and startup/skip recovery is not implemented. GPU command completion
+is used to bound in-flight texture ownership but is not reported as actual
+presentation. Live construction, resize, menus, teardown, audio, and cadence
+must still be exercised through the real frontend.
+
+The ARM64 application builds and links with the compile option enabled.
+The initial driver compile exposed Cocoa/PVR header name collisions (`RGBColor`
+and `Rect`); removing the unnecessary PVR header and using the common
+`FlycastException` avoids those collisions while keeping frontend error handling.
+The driver itself has not yet been constructed by a live frontend.
+
+The unchanged active OpenGL path passes the injected-error regression in
+`/tmp/pvr-metal-driver-gl-regression-20261012/report.json`: 63 full-VRAM
+CPU/Metal comparisons before the injected error, zero afterward, a paused
+replacement renderer with zero publications, and successful UI-composition
+checks. Application SHA-256:
+`a33a97831fad46497dd23bb30a78bd855f0f9471a3e0cd4532de193f9d1b5b70`.
+The computer remained muted. This verifies compilation/linking and the tested
+existing path only; it supplies no native-driver lifecycle or performance claim.

@@ -20,6 +20,14 @@ target_sources(${PROJECT_NAME} PRIVATE
         norend/norend.cpp)
 
 if(APPLE AND NOT IOS)
+    option(FLYCAST_BUILD_METAL_UI_DRIVER "Compile experimental native Metal UI driver (not selected at runtime)" OFF)
+    if(FLYCAST_BUILD_METAL_UI_DRIVER AND NOT LIBRETRO)
+        target_sources(${PROJECT_NAME} PRIVATE soft/MetalUiDriver.mm soft/MetalPresentationFrame.mm
+                "${IMGUI_BACKENDS_DIR}/imgui_impl_metal.mm")
+        set_source_files_properties(soft/MetalUiDriver.mm soft/MetalPresentationFrame.mm
+                "${IMGUI_BACKENDS_DIR}/imgui_impl_metal.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(${PROJECT_NAME} PRIVATE "-framework QuartzCore")
+    endif()
     target_sources(${PROJECT_NAME} PRIVATE soft/HybridTileRenderer.mm)
     find_library(HYBRID_METAL_LIBRARY Metal REQUIRED)
     find_library(HYBRID_IOSURFACE_LIBRARY IOSurface REQUIRED)
