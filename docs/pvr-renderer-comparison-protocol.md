@@ -154,6 +154,24 @@ two additive layers: at (0,0), RGB (2,2,2) + (2,2,2), then RGB565 dither
 `0821`. This tests the software model's intended stage ordering; it does not
 yet prove that this difference explains all 1,732 Seaman words.
 
+### Dithering isolation experiment
+
+A temporary diagnostic build from `0adf9fd14` bypassed two conditions: the
+OpenGL shader dithering enable in `gles.cpp` and the display-framebuffer dither
+call in `SoftwareRenderer.cpp`. No PVR register value was changed, so snapshot
+metadata still reports the game's `dither=1`; the experimental code bypassed
+its implementation. Both temporary changes were reverted after capture.
+
+Muted single-threaded Seaman frame-4 captures in
+`/tmp/pvr-nodither.aT0Hwe/` again have byte-identical processed VRAM. With
+dithering bypassed, only 50 rendered 16-bit words differ, versus 1,732 in the
+normal build. Maximum native RGB565 channel error remains one code value.
+This intervention substantially reduces the mismatch and establishes that
+dithering behavior contributes to this comparison. It does not distinguish
+stage ordering from fractional precision or spatial phase within dithering,
+nor explain the residual 50 words. Hardware correctness remains a separate
+question from agreement between backends.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
