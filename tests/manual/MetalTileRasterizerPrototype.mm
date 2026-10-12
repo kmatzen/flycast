@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -361,6 +362,34 @@ int main() {
   }
   ordinaryBufferGpu /= 5.;
   sharedSurfaceGpu /= 5.;
+  std::array<rend::soft::hybrid::PresentationSurface, 3> asyncSurfaces;
+  const auto asyncSubmitStart = std::chrono::steady_clock::now();
+  for (auto &surface : asyncSurfaces)
+    if (!rend::soft::hybrid::renderAsync(simpleTranslucentFrame, surface))
+      return 2;
+  const double asyncSubmissionMs =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - asyncSubmitStart).count() /
+      asyncSurfaces.size();
+  rend::soft::hybrid::PresentationSurface asyncCompleted;
+  const auto asyncDeadline = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(5);
+  while (asyncCompleted.handle != asyncSurfaces.back().handle &&
+         std::chrono::steady_clock::now() < asyncDeadline) {
+    rend::soft::hybrid::PresentationSurface completed;
+    if (rend::soft::hybrid::takeLatestPresentation(completed))
+      asyncCompleted = completed;
+    else
+      std::this_thread::yield();
+  }
+  size_t asyncMismatches = simpleTranslucentColors.size();
+  if (asyncCompleted.handle == asyncSurfaces.back().handle) {
+    const auto *surfaceColors = static_cast<const u32 *>(
+        IOSurfaceGetBaseAddress((IOSurfaceRef)asyncCompleted.handle));
+    asyncMismatches = 0;
+    for (size_t i = 0; i < simpleTranslucentColors.size(); ++i)
+      asyncMismatches += surfaceColors[i] != simpleTranslucentColors[i];
+  }
   size_t simpleTranslucentMismatches = 0;
   for (size_t pixel = 0; pixel < simpleTranslucentColors.size(); ++pixel)
     simpleTranslucentMismatches +=
@@ -803,6 +832,7 @@ int main() {
       "ordered_opaque_gpu_ms=%.3f ordered_mismatches=%zu readback_ms=%.3f "
       "generic_translucent_gpu_ms=%.3f simple_translucent_gpu_ms=%.3f "
       "ordinary_buffer_gpu_ms=%.3f shared_surface_gpu_ms=%.3f "
+      "async_submission_ms=%.3f async_mismatches=%zu "
       "simple_translucent_mismatches=%zu "
       "presentation_mismatches=%zu color_mismatches=%zu "
       "depth_bit_mismatches=%zu\n",
@@ -813,9 +843,9 @@ int main() {
       orderedOpaqueTiming.gpuMilliseconds, orderedMismatches,
       timing.readbackMilliseconds, genericTranslucentGpu,
       simpleTranslucentGpu, ordinaryBufferGpu, sharedSurfaceGpu,
-      simpleTranslucentMismatches,
+      asyncSubmissionMs, asyncMismatches, simpleTranslucentMismatches,
       presentationMismatches, colorMismatches, depthMismatches);
   return colorMismatches == 0 && depthMismatches == 0 &&
       orderedMismatches == 0 && simpleTranslucentMismatches == 0 &&
-      presentationMismatches == 0 ? 0 : 1;
+      presentationMismatches == 0 && asyncMismatches == 0 ? 0 : 1;
 }

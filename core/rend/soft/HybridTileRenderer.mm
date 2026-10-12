@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -803,6 +804,30 @@ public:
     BufferSlotCount,
   };
 
+private:
+  struct ReusableBuffer {
+    id<MTLBuffer> value = nil;
+    size_t capacity = 0;
+  };
+  struct FrameResources {
+    std::array<ReusableBuffer, BufferSlotCount> buffers;
+    id<MTLTexture> visibility = nil;
+    u32 visibilityWidth = 0;
+    u32 visibilityHeight = 0;
+    std::atomic<bool> available { true };
+    std::atomic<bool> successful { false };
+    u64 serial = 0;
+    PresentationSurface presentation;
+  };
+  struct PresentationAllocation {
+    IOSurfaceRef surface = nullptr;
+    id<MTLBuffer> buffer = nil;
+    u32 width = 0;
+    u32 height = 0;
+  };
+
+public:
+
   MetalState() {
     device = MTLCreateSystemDefaultDevice();
     if (device == nil)
@@ -859,6 +884,50 @@ public:
 
   bool valid() const { return queue != nil && pipeline != nil; }
 
+  bool beginFrame() {
+    for (size_t attempt = 0; attempt < frameResources.size(); ++attempt) {
+      const size_t candidate = (activeFrame + 1 + attempt) %
+                               frameResources.size();
+      if (frameResources[candidate].available.load(std::memory_order_acquire)) {
+        activeFrame = candidate;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void markSubmitted(id<MTLCommandBuffer> command, id<MTLBuffer> overflow,
+                     const PresentationSurface &presentation) {
+    FrameResources *resources = &frameResources[activeFrame];
+    resources->available.store(false, std::memory_order_release);
+    resources->successful.store(false, std::memory_order_relaxed);
+    resources->serial = ++submissionSerial;
+    resources->presentation = presentation;
+    [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+      const bool success = completed.status == MTLCommandBufferStatusCompleted &&
+          *static_cast<const u32 *>(overflow.contents) == 0;
+      resources->successful.store(success, std::memory_order_relaxed);
+      resources->available.store(true, std::memory_order_release);
+    }];
+  }
+
+  bool latestPresentation(PresentationSurface &output) const {
+    u64 latestSerial = 0;
+    const PresentationSurface *latest = nullptr;
+    for (const FrameResources &resources : frameResources)
+      if (resources.available.load(std::memory_order_acquire) &&
+          resources.successful.load(std::memory_order_relaxed) &&
+          resources.serial > latestSerial) {
+        latestSerial = resources.serial;
+        latest = &resources.presentation;
+      }
+    if (latest == nullptr || latestSerial <= consumedSerial)
+      return false;
+    output = *latest;
+    consumedSerial = latestSerial;
+    return output.handle != nullptr;
+  }
+
   ~MetalState() {
     for (auto &allocation : presentationAllocations)
       if (allocation.surface != nullptr)
@@ -869,7 +938,7 @@ public:
                        const void *contents = nullptr) {
     if (length == 0)
       return nil;
-    ReusableBuffer &allocation = buffers[slot];
+    ReusableBuffer &allocation = frameResources[activeFrame].buffers[slot];
     if (allocation.capacity < length) {
       size_t capacity = std::max<size_t>(4096, allocation.capacity);
       while (capacity < length)
@@ -894,8 +963,9 @@ public:
   id<MTLTexture> visibilityTexture(u32 width, u32 height) {
     width = std::max(1u, width);
     height = std::max(1u, height);
-    if (visibility == nil || visibilityWidth != width ||
-        visibilityHeight != height) {
+    FrameResources &resources = frameResources[activeFrame];
+    if (resources.visibility == nil || resources.visibilityWidth != width ||
+        resources.visibilityHeight != height) {
       MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
           texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
                                         width:width
@@ -904,11 +974,11 @@ public:
       descriptor.usage =
           MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       descriptor.storageMode = MTLStorageModePrivate;
-      visibility = [device newTextureWithDescriptor:descriptor];
-      visibilityWidth = visibility != nil ? width : 0;
-      visibilityHeight = visibility != nil ? height : 0;
+      resources.visibility = [device newTextureWithDescriptor:descriptor];
+      resources.visibilityWidth = resources.visibility != nil ? width : 0;
+      resources.visibilityHeight = resources.visibility != nil ? height : 0;
     }
-    return visibility;
+    return resources.visibility;
   }
 
   id<MTLBuffer> presentationBuffer(u32 width, u32 height,
@@ -923,9 +993,7 @@ public:
           break;
         }
     if (allocation == nullptr) {
-      presentationIndex = (presentationIndex + 1) %
-                          presentationAllocations.size();
-      allocation = &presentationAllocations[presentationIndex];
+      allocation = &presentationAllocations[activeFrame];
     }
     if (allocation->surface == nullptr || allocation->width != width ||
         allocation->height != height) {
@@ -977,35 +1045,33 @@ public:
   id<MTLRenderPipelineState> visibilityPipeline = nil;
 
 private:
-  struct ReusableBuffer {
-    id<MTLBuffer> value = nil;
-    size_t capacity = 0;
-  };
-  std::array<ReusableBuffer, BufferSlotCount> buffers;
-  id<MTLTexture> visibility = nil;
-  u32 visibilityWidth = 0;
-  u32 visibilityHeight = 0;
-  struct PresentationAllocation {
-    IOSurfaceRef surface = nullptr;
-    id<MTLBuffer> buffer = nil;
-    u32 width = 0;
-    u32 height = 0;
-  };
+  std::array<FrameResources, 3> frameResources;
+  size_t activeFrame = frameResources.size() - 1;
   std::array<PresentationAllocation, 3> presentationAllocations;
-  size_t presentationIndex = presentationAllocations.size() - 1;
+  u64 submissionSerial = 0;
+  mutable u64 consumedSerial = 0;
 };
+
+MetalState &sharedMetalState() {
+  static MetalState metal;
+  return metal;
+}
 
 } // namespace
 
-bool render(const Frame &frame, std::vector<u32> &colors,
-            std::vector<float> &depths, Timing *timing,
-            std::vector<u32> *secondaryOutput,
-            PresentationSurface *presentation) {
-  static MetalState metal;
+static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
+                           std::vector<float> &depths, Timing *timing,
+                           std::vector<u32> *secondaryOutput,
+                           PresentationSurface *presentation,
+                           bool asynchronous) {
+  MetalState &metal = sharedMetalState();
   if (!metal.valid() || frame.width == 0 || frame.height == 0 ||
       frame.triangles == nullptr || frame.triangles->empty() ||
       frame.texture == nullptr || frame.texture->empty() ||
       frame.texture->size() > std::numeric_limits<u32>::max())
+    return false;
+
+  if (!metal.beginFrame())
     return false;
 
   const auto encodeStart = std::chrono::steady_clock::now();
@@ -1516,6 +1582,17 @@ bool render(const Frame &frame, std::vector<u32> &colors,
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
   const auto gpuStart = std::chrono::steady_clock::now();
+  if (asynchronous) {
+    if (presentation == nullptr || presentation->handle == nullptr)
+      return false;
+    metal.markSubmitted(command, overflowBuffer, *presentation);
+    [command commit];
+    if (timing != nullptr)
+      timing->encodeMilliseconds =
+          std::chrono::duration<double, std::milli>(encodeEnd - encodeStart)
+              .count();
+    return true;
+  }
   [command commit];
   [command waitUntilCompleted];
   const auto gpuEnd = std::chrono::steady_clock::now();
@@ -1562,6 +1639,26 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     }
   }
   return true;
+}
+
+bool render(const Frame &frame, std::vector<u32> &colors,
+            std::vector<float> &depths, Timing *timing,
+            std::vector<u32> *secondaryOutput,
+            PresentationSurface *presentation) {
+  return renderInternal(frame, colors, depths, timing, secondaryOutput,
+                        presentation, false);
+}
+
+bool renderAsync(const Frame &frame, PresentationSurface &presentation) {
+  std::vector<u32> unusedColors;
+  std::vector<float> unusedDepths;
+  presentation = {};
+  return renderInternal(frame, unusedColors, unusedDepths, nullptr, nullptr,
+                        &presentation, true);
+}
+
+bool takeLatestPresentation(PresentationSurface &presentation) {
+  return sharedMetalState().latestPresentation(presentation);
 }
 
 } // namespace rend::soft::hybrid

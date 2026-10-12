@@ -9,6 +9,9 @@ bool render(const Frame &, std::vector<u32> &, std::vector<float> &, Timing *,
   return false;
 }
 
+bool renderAsync(const Frame &, PresentationSurface &) { return false; }
+bool takeLatestPresentation(PresentationSurface &) { return false; }
+
 } // namespace rend::soft::hybrid
 
 #endif

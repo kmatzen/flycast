@@ -154,4 +154,11 @@ bool render(const Frame &frame, std::vector<u32> &colors,
             std::vector<u32> *secondaryOutput = nullptr,
             PresentationSurface *presentation = nullptr);
 
+// Queues an exact frame without waiting for GPU completion. This succeeds
+// only while a protected frame-resource slot is available. Completion can be
+// consumed with takeLatestPresentation; callers retain their previous frame
+// until then.
+bool renderAsync(const Frame &frame, PresentationSurface &presentation);
+bool takeLatestPresentation(PresentationSurface &presentation);
+
 } // namespace rend::soft::hybrid
