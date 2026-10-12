@@ -44,7 +44,8 @@ public:
                         std::fprintf(stderr, "PVR_METAL_PRESENT sequence=%llu id=%d time=%.9f\n",
                             (unsigned long long)frame->sequence, id, time);
                     }
-                }, [] { return bool(config::LinearInterpolation); });
+                }, [] { return bool(config::LinearInterpolation); },
+                [] { return !settings.input.fastForwardMode && config::VSync; });
             active = true;
             std::fprintf(stderr, "PVR_METAL_CONTEXT active=1\n");
         } catch (...) {

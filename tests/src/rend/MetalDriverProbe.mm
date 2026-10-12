@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <array>
 
 // Standalone frontend: use ImGui's default style instead of emulator settings.
 void gui_updateStyle() {}
@@ -34,25 +35,40 @@ int main(int argc, char **argv)
         layer.maximumDrawableCount = 3;
         bool failed = false;
         unsigned callbacks = 0, skipped = 0;
+        unsigned reordered = 0;
+        u64 previousSequence = 0;
+        std::array<bool, frameCount> seen {};
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
         const auto uiThread = std::this_thread::get_id();
         std::shared_ptr<const rend::soft::PresentationFrame> selected;
+        bool sync = true;
         try {
             auto driver = rend::soft::createMetalUiDriver((__bridge void*)layer, [&] { return selected; },
                 [&](std::shared_ptr<const rend::soft::PresentationFrame> frame, double time) {
-                    if (std::this_thread::get_id() != uiThread || !frame || frame->sequence != callbacks + 1)
+                    if (std::this_thread::get_id() != uiThread || !frame
+                            || frame->sequence == 0 || frame->sequence > frameCount
+                            || seen[frame->sequence - 1])
                         failed = true;
+                    else {
+                        seen[frame->sequence - 1] = true;
+                        if (frame->sequence < previousSequence) ++reordered;
+                        previousSequence = frame->sequence;
+                        if (frame->width != 640 || frame->height != 480
+                                || !(frame->pixels.front() == rend::soft::Color{u8(frame->sequence - 1), 32, 128, 0}))
+                            failed = true;
+                    }
                     ++callbacks;
                     if (time <= 0) ++skipped;
                     std::fprintf(stderr, "METAL_DRIVER_CALLBACK sequence=%llu time=%.9f\n",
                         frame ? (unsigned long long)frame->sequence : 0, time);
-                });
+                }, {}, [&] { return sync; });
             const u8 icon[] = {0, 255, 0, 255};
             auto iconId = driver->updateTexture("probe", icon, 1, 1, true);
             if (!iconId || driver->getTexture("probe") != iconId) failed = true;
             for (unsigned frameId = 0; frameId < frameCount && !failed; ++frameId) {
+                sync = frameId < 220 || frameId >= 440;
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) if (event.type == SDL_QUIT) failed = true;
                 if (resize && frameId == 60) SDL_SetWindowSize(window, 800, 600);
@@ -67,6 +83,7 @@ int main(int argc, char **argv)
                 selected = rend::soft::PresentationFrame::create(640, 480, 4.f / 3.f, {16, 16, 16, 255},
                     std::vector<rend::soft::Color>(640 * 480, {u8(frameId), 32, 128, 0}), frameId + 1);
                 driver->newFrame();
+                if (bool(layer.displaySyncEnabled) != sync) failed = true;
                 ImGui::NewFrame();
                 ImGui::Begin("Native Metal UI");
                 ImGui::Text("Frame %u / %u", frameId + 1, frameCount);
@@ -93,7 +110,7 @@ int main(int argc, char **argv)
         SDL_Metal_DestroyView(view);
         SDL_DestroyWindow(window);
         SDL_Quit();
-        std::fprintf(stderr, "METAL_DRIVER_END callbacks=%u skipped=%u failed=%u\n", callbacks, skipped, failed);
+        std::fprintf(stderr, "METAL_DRIVER_END callbacks=%u skipped=%u failed=%u reordered=%u\n", callbacks, skipped, failed, reordered);
         // Lifecycle success is deliberately distinct from lossless delivery.
         return !failed && callbacks == frameCount ? 0 : 4;
     }

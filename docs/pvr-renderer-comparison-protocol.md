@@ -2855,3 +2855,33 @@ all probe IDs, and zero skipped callbacks at
 `2c901cc0495fd5c6daa145ac8f8d1b0f1dd89f08b59bf6f4567c9b0c75b006b7`.
 That validation-enabled run still has long gaps (maximum 49.998 ms); it is
 not a timing comparison against the unverified experimental runs.
+
+### Native VSync and fast-forward settings
+
+The native driver now queries the frontend's `!fastForwardMode && VSync`
+state. With synchronization disabled it disables `displaySyncEnabled` and
+uses immediate presentation rather than requesting a minimum 1/60-second
+duration. With synchronization enabled it retains the previous 60 Hz request.
+This fixes an ignored setting; it does not implement game-specific swap
+intervals or prove PAL/variable-refresh pacing.
+
+The standalone driver probe toggles synchronization on/off/on and checks the
+layer property each frame. The first test failed its old callback-order
+assumption: callbacks for skipped frames 231–243 arrived before positive-time
+callbacks for some earlier frames. That failed capture remains at
+`/tmp/pvr-native-vsync-probe.log`. The corrected probe checks UI-thread delivery,
+unique/in-range sequence IDs, packet dimensions and pixel identity, and reports
+reordered callbacks rather than requiring arrival order to equal submission
+order. The repeat passed with 660 callbacks, 96 skips, and zero reordered
+callbacks (`/tmp/pvr-native-vsync-probe2.log`). This is not a lossless-delivery
+result, and callbacks must not be treated as ordered scanout events.
+
+The app builds. Validation-enabled integration runs with `--no-vsync` and
+default VSync both complete with 660 matching full-VRAM comparisons:
+`/tmp/pvr-native-vsync-{off,on}-20261012/report.json`. VSync off recorded 38
+skipped callbacks and 20 missing IDs (19 measured); VSync on recorded zero
+skips and all IDs. These null-audio, verifier-enabled samples are not a
+performance comparison or an argument to disable VSync. Application SHA-256:
+`6fa0a9bc391a556a6126121e7e2ae82a198ccfc889239f4f81d09e43ca6d1fba`.
+Fast-forward uses the same settings callback but was not independently driven
+through the interactive frontend in these checks.

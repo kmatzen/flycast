@@ -16,8 +16,8 @@ struct CompletionQueue {
 class API_AVAILABLE(macos(10.15.4)) MetalUiDriver final : public ImGuiDriver {
 public:
     MetalUiDriver(CAMetalLayer *layer, MetalFrameProvider provider, MetalPresentationObserver observer,
-            std::function<bool()> linearFiltering)
-        : layer(layer), provider(std::move(provider)), observer(std::move(observer)), linearFiltering(std::move(linearFiltering))
+            std::function<bool()> linearFiltering, std::function<bool()> vsync)
+        : layer(layer), provider(std::move(provider)), observer(std::move(observer)), linearFiltering(std::move(linearFiltering)), vsync(std::move(vsync))
     {
         if (!layer || !layer.device || !this->provider || ImGui::GetIO().BackendRendererUserData)
             throw FlycastException("Metal UI requires a configured layer and an unowned ImGui backend");
@@ -79,7 +79,8 @@ public:
             std::lock_guard<std::mutex> lock(completions->mutex);
             completions->frames.emplace_back(frame, shown.presentedTime);
         }];
-        [command presentDrawable:drawable afterMinimumDuration:1.0 / 60.0];
+        if (syncEnabled) [command presentDrawable:drawable afterMinimumDuration:1.0 / 60.0];
+        else [command presentDrawable:drawable];
         [command commit];
         lastCommand = command;
         // Bound command/texture ownership; do not equate this with display.
@@ -120,6 +121,8 @@ public:
 private:
     void prepare()
     {
+        syncEnabled = !vsync || vsync();
+        layer.displaySyncEnabled = syncEnabled;
         if (drawable) return;
         drawable = [layer nextDrawable];
         if (!drawable) throw FlycastException("Metal drawable unavailable");
@@ -143,6 +146,8 @@ private:
     MetalFrameProvider provider;
     MetalPresentationObserver observer;
     std::function<bool()> linearFiltering;
+    std::function<bool()> vsync;
+    bool syncEnabled = true;
     std::shared_ptr<CompletionQueue> completed = std::make_shared<CompletionQueue>();
     std::unordered_map<std::string, id<MTLTexture>> textures;
     ImDrawData *ui = nullptr;
@@ -150,10 +155,10 @@ private:
 };
 }
 std::unique_ptr<ImGuiDriver> createMetalUiDriver(void *layer, MetalFrameProvider provider, MetalPresentationObserver observer,
-        std::function<bool()> linearFiltering)
+        std::function<bool()> linearFiltering, std::function<bool()> vsync)
 {
     if (@available(macOS 10.15.4, *))
-        return std::make_unique<MetalUiDriver>((__bridge CAMetalLayer*)layer, std::move(provider), std::move(observer), std::move(linearFiltering));
+        return std::make_unique<MetalUiDriver>((__bridge CAMetalLayer*)layer, std::move(provider), std::move(observer), std::move(linearFiltering), std::move(vsync));
     throw FlycastException("Metal UI requires macOS 10.15.4");
 }
 }
