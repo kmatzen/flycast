@@ -25,9 +25,10 @@ struct Constants {
   u32 useModifierMask;
   u32 useInitialDepth;
   u32 useInitialSecondary;
+  u32 deferOpaqueShading;
 };
 
-static_assert(sizeof(Constants) == 40);
+static_assert(sizeof(Constants) == 44);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -80,6 +81,7 @@ struct Constants {
     uint useModifierMask;
     uint useInitialDepth;
     uint useInitialSecondary;
+    uint deferOpaqueShading;
 };
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -322,6 +324,55 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             ? secondaryColors[offset] : 0u;
     float depth = depthClearMask[offset] != 0 ? 0.0f
             : (constants.useInitialDepth != 0 ? depths[offset] : 0.0f);
+    // Opaque PVR rendering has a separate ISP visibility phase: expensive TSP
+    // texturing and fog are evaluated only for the final visible parameter.
+    // Resolve that winner with the same fixed edge/depth arithmetic first, then
+    // let the main loop shade it once. Punch-through and translucent parameters
+    // retain their ordered paths because acceptance/blending depends on shading.
+    uint opaqueWinnerReference = 0xffffffffu;
+    float opaqueFinalDepth = depth;
+    if (constants.deferOpaqueShading != 0 && opaqueMask[offset] != 0) {
+        for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
+            const uint triangleIndex = tileReferences[i];
+            const device Triangle& base = triangles[triangleIndex];
+            if (((base.state >> 28) & 3) != 0)
+                continue;
+            if ((base.effects & 512u) != 0
+                    && (constants.useModifierMask == 0 || modifierMask[offset] == 0))
+                continue;
+            const bool selectArea1 = constants.useModifierMask != 0
+                    && modifierMask[offset] != 0 && base.area1Index != 0xffffffffu;
+            const device Triangle& t = triangles[selectArea1
+                    ? base.area1Index : triangleIndex];
+            if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
+                    || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
+                continue;
+            if ((t.effects & 256u) != 0 && int(pixel.x) >= t.excludeX0
+                    && int(pixel.x) < t.excludeX1 && int(pixel.y) >= t.excludeY0
+                    && int(pixel.y) < t.excludeY1)
+                continue;
+            const int sx = int(pixel.x) * 16 + t.fpuSampleOffset;
+            const int sy = int(pixel.y) * 16 + t.fpuSampleOffset;
+            const long w0 = edge(t.x[1], t.y[1], t.x[2], t.y[2], sx, sy);
+            const long w1 = edge(t.x[2], t.y[2], t.x[0], t.y[0], sx, sy);
+            const long w2 = edge(t.x[0], t.y[0], t.x[1], t.y[1], sx, sy);
+            if (w0 < 0 || (w0 == 0 && !topLeft(t.x[1], t.y[1], t.x[2], t.y[2]))
+                    || w1 < 0 || (w1 == 0 && !topLeft(t.x[2], t.y[2], t.x[0], t.y[0]))
+                    || w2 < 0 || (w2 == 0 && !topLeft(t.x[0], t.y[0], t.x[1], t.y[1])))
+                continue;
+            const long area = edge(t.x[0], t.y[0], t.x[1], t.y[1],
+                    t.x[2], t.y[2]);
+            const float s0 = float(w0) / float(area);
+            const float s1 = float(w1) / float(area);
+            const float s2 = float(w2) / float(area);
+            const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
+            if (!depthTest(t.state, depthZ, opaqueFinalDepth))
+                continue;
+            opaqueWinnerReference = i;
+            if ((t.state & (1u << 3)) != 0)
+                opaqueFinalDepth = depthZ;
+        }
+    }
     constexpr uint MaxSortedFragments = 64;
     uint sortedColors[MaxSortedFragments];
     float sortedDepths[MaxSortedFragments];
@@ -341,6 +392,10 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         if ((listType == 0 && opaqueMask[offset] == 0)
                 || (listType == 1 && punchThroughMask[offset] == 0)
                 || (listType == 2 && translucentMask[offset] == 0))
+            continue;
+        const bool deferredOpaque = constants.deferOpaqueShading != 0
+                && listType == 0;
+        if (deferredOpaque && i != opaqueWinnerReference)
             continue;
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
                 || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
@@ -363,7 +418,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const float s1 = float(w1) / float(area);
         const float s2 = float(w2) / float(area);
         const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
-        if (!depthTest(t.state, depthZ, depth))
+        if (!deferredOpaque && !depthTest(t.state, depthZ, depth))
             continue;
         const int shadeX = int(pixel.x) * 16 + t.tspSampleOffset;
         const int shadeY = int(pixel.y) * 16 + t.tspSampleOffset;
@@ -555,7 +610,9 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             sortedIndices[position] = selectedIndex;
             continue;
         }
-        if ((t.state & (1u << 3)) != 0)
+        if (deferredOpaque)
+            depth = opaqueFinalDepth;
+        else if ((t.state & (1u << 3)) != 0)
             depth = depthZ;
         const uint sourceFactor = (t.state >> 16) & 7;
         const uint destinationFactor = (t.state >> 19) & 7;
@@ -659,6 +716,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   const auto encodeStart = std::chrono::steady_clock::now();
   const u32 tilesX = (frame.width + TileSize - 1) / TileSize;
   const u32 tilesY = (frame.height + TileSize - 1) / TileSize;
+  bool hasOpaque = false;
+  bool deferOpaqueShading = true;
   std::vector<std::vector<u32>> bins(static_cast<size_t>(tilesX) * tilesY);
   for (u32 index = 0; index < frame.triangles->size(); ++index) {
     const Triangle &triangle = (*frame.triangles)[index];
@@ -703,6 +762,16 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     if ((triangle.state & Area1Only) != 0 &&
         (triangle.effects & ModifierArea1Only) == 0)
       continue;
+    if (((triangle.state >> ListTypeShift) & 3) == 0) {
+      hasOpaque = true;
+      const u32 sourceBlend = (triangle.state >> SourceBlendShift) & 7;
+      const u32 destinationBlend =
+          (triangle.state >> DestinationBlendShift) & 7;
+      if (sourceBlend != 1 || destinationBlend != 0 ||
+          (triangle.state & (AlphaTest | Autosort)) != 0 ||
+          (triangle.effects & (SourceSelect | DestinationSelect)) != 0)
+        deferOpaqueShading = false;
+    }
     for (s32 y = triangle.minY / static_cast<s32>(TileSize);
          y <= triangle.maxY / static_cast<s32>(TileSize); ++y)
       for (s32 x = triangle.minX / static_cast<s32>(TileSize);
@@ -788,7 +857,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                             frame.fogColor, frame.fogVertexColor, frame.fogDensity,
                             frame.modifierMask != nullptr ? 1u : 0u,
                             frame.initialDepths != nullptr ? 1u : 0u,
-                            frame.initialSecondary != nullptr ? 1u : 0u};
+                            frame.initialSecondary != nullptr ? 1u : 0u,
+                            hasOpaque && deferOpaqueShading ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];

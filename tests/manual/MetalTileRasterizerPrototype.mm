@@ -247,6 +247,28 @@ int main() {
   rend::soft::hybrid::Timing timing;
   if (!rend::soft::hybrid::render(frame, actualColors, actualDepths, &timing))
     return 2;
+  const std::vector<Triangle> opaqueTriangles(triangles.begin(),
+                                               triangles.begin() + 26);
+  const rend::soft::hybrid::Frame opaqueFrame{Width, Height, &opaqueTriangles,
+                                               &texture};
+  rend::soft::hybrid::Timing opaqueTiming;
+  std::vector<u32> opaqueColors;
+  std::vector<float> opaqueDepths;
+  if (!rend::soft::hybrid::render(opaqueFrame, opaqueColors, opaqueDepths,
+                                  &opaqueTiming))
+    return 2;
+  std::vector<Triangle> serialOpaqueTriangles = opaqueTriangles;
+  Triangle serialBlocker = serialOpaqueTriangles.front();
+  serialBlocker.minX = serialBlocker.maxX = 0;
+  serialBlocker.minY = serialBlocker.maxY = 0;
+  serialBlocker.effects |= rend::soft::hybrid::SourceSelect;
+  serialOpaqueTriangles.push_back(serialBlocker);
+  const rend::soft::hybrid::Frame serialOpaqueFrame{
+      Width, Height, &serialOpaqueTriangles, &texture};
+  rend::soft::hybrid::Timing serialOpaqueTiming;
+  if (!rend::soft::hybrid::render(serialOpaqueFrame, opaqueColors, opaqueDepths,
+                                  &serialOpaqueTiming))
+    return 2;
   size_t colorMismatches = 0, depthMismatches = 0;
   for (size_t i = 0; i < expectedColors.size(); ++i) {
     colorMismatches += actualColors[i] != expectedColors[i];
@@ -627,10 +649,14 @@ int main() {
       std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count() /
       20.;
   std::printf(
-      "triangles=%zu cpu_ms=%.3f encode_ms=%.3f gpu_ms=%.3f readback_ms=%.3f "
+      "triangles=%zu cpu_ms=%.3f encode_ms=%.3f gpu_ms=%.3f "
+      "opaque_triangles=%zu opaque_gpu_ms=%.3f serial_opaque_gpu_ms=%.3f "
+      "readback_ms=%.3f "
       "color_mismatches=%zu depth_bit_mismatches=%zu\n",
       triangles.size(), cpuMs, timing.encodeMilliseconds,
-      timing.gpuMilliseconds, timing.readbackMilliseconds, colorMismatches,
-      depthMismatches);
+      timing.gpuMilliseconds, opaqueTriangles.size(),
+      opaqueTiming.gpuMilliseconds, serialOpaqueTiming.gpuMilliseconds,
+      timing.readbackMilliseconds,
+      colorMismatches, depthMismatches);
   return colorMismatches == 0 && depthMismatches == 0 ? 0 : 1;
 }
