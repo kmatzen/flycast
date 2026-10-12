@@ -2,6 +2,41 @@
 
 #include <gtest/gtest.h>
 #include <array>
+#include <vector>
+
+namespace {
+
+// Reference Morton address for a 2x2 block. PVR interleaves Y then X while
+// both dimensions have bits, then appends the remaining rectangular axis.
+u32 referenceTwiddledBlock(u32 blockX, u32 blockY, u32 blocksX, u32 blocksY)
+{
+	u32 address = 0;
+	u32 shift = 0;
+	while (blocksX > 1 || blocksY > 1)
+	{
+		if (blocksY > 1)
+		{
+			address |= (blockY & 1) << shift++;
+			blockY >>= 1;
+			blocksY >>= 1;
+		}
+		if (blocksX > 1)
+		{
+			address |= (blockX & 1) << shift++;
+			blockX >>= 1;
+			blocksX >>= 1;
+		}
+	}
+	return address;
+}
+
+u16 coordinate565(u32 x, u32 y)
+{
+	return static_cast<u16>(((x * 3 + y) & 31) << 11
+			| ((x + y * 5) & 63) << 5 | ((x * 7 + y * 11) & 31));
+}
+
+} // namespace
 
 TEST(TextureDecode, ExpandsNative16BitChannelsExactly)
 {
@@ -136,4 +171,64 @@ TEST(TextureDecode, ConvertsPlanarYuv422WithSharedChroma)
 	EXPECT_EQ(*decoded.data(1, 0), 0xff141414u);
 	EXPECT_EQ(*decoded.data(2, 0), 0xff1e1e1eu);
 	EXPECT_EQ(*decoded.data(3, 0), 0xff282828u);
+}
+
+TEST(TextureDecode, DetwiddlesSquareAndRectangularTexturesAgainstReference)
+{
+	constexpr std::array<std::array<u32, 2>, 6> dimensions {{
+		{ 2, 2 }, { 4, 8 }, { 8, 4 }, { 8, 8 }, { 16, 8 }, { 8, 16 },
+	}};
+	for (const auto& size : dimensions)
+	{
+		const u32 width = size[0];
+		const u32 height = size[1];
+		std::vector<u16> native(static_cast<size_t>(width) * height);
+		for (u32 y = 0; y < height; ++y)
+			for (u32 x = 0; x < width; ++x)
+			{
+				const u32 block = referenceTwiddledBlock(x / 2, y / 2,
+						width / 2, height / 2);
+				const u32 within = (x & 1) * 2 + (y & 1);
+				native[block * 4 + within] = coordinate565(x, y);
+			}
+
+		PixelBuffer<u32> decoded;
+		decoded.init(width, height);
+		opengl::pvrTexInfo[1].TW32(&decoded,
+				reinterpret_cast<const u8 *>(native.data()), width, height);
+		for (u32 y = 0; y < height; ++y)
+			for (u32 x = 0; x < width; ++x)
+				EXPECT_EQ(*decoded.data(x, y),
+						(Unpacker565_32<RGBAPacker>::unpack(coordinate565(x, y))))
+						<< width << 'x' << height << " at " << x << ',' << y;
+	}
+}
+
+TEST(TextureDecode, DetwiddlesRectangularVqIndicesAgainstReference)
+{
+	constexpr u32 width = 16;
+	constexpr u32 height = 8;
+	constexpr u32 blocksX = width / 2;
+	constexpr u32 blocksY = height / 2;
+	std::array<u16, VQ_CODEBOOK_SIZE / sizeof(u16)> codebook {};
+	std::array<u8, blocksX * blocksY> indices {};
+	for (u32 by = 0; by < blocksY; ++by)
+		for (u32 bx = 0; bx < blocksX; ++bx)
+		{
+			const u8 entry = static_cast<u8>(1 + by * blocksX + bx);
+			indices[referenceTwiddledBlock(bx, by, blocksX, blocksY)] = entry;
+			for (u32 within = 0; within < 4; ++within)
+				codebook[entry * 4 + within] = coordinate565(
+						bx * 2 + within / 2, by * 2 + within % 2);
+		}
+	vq_codebook = reinterpret_cast<const u8 *>(codebook.data());
+
+	PixelBuffer<u32> decoded;
+	decoded.init(width, height);
+	opengl::pvrTexInfo[1].VQ32(&decoded, indices.data(), width, height);
+	for (u32 y = 0; y < height; ++y)
+		for (u32 x = 0; x < width; ++x)
+			EXPECT_EQ(*decoded.data(x, y),
+					(Unpacker565_32<RGBAPacker>::unpack(coordinate565(x, y))))
+					<< "at " << x << ',' << y;
 }

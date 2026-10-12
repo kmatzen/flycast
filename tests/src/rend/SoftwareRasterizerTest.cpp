@@ -528,6 +528,14 @@ TEST(SoftwareRasterizer, HonorsBothPvrDCalculationModes)
 	EXPECT_EQ(firstVertexMode.pixel(10, 10), level0[0]);
 }
 
+TEST(SoftwareRasterizer, DecodesLegalMipDAdjustAsUnsignedTwoPointTwo)
+{
+	EXPECT_FLOAT_EQ(SoftwareRasterizer::decodeMipDAdjust(0), 1.f);
+	for (u32 encoded = 1; encoded <= 15; ++encoded)
+		EXPECT_FLOAT_EQ(SoftwareRasterizer::decodeMipDAdjust(encoded), encoded * .25f);
+	EXPECT_FLOAT_EQ(SoftwareRasterizer::decodeMipDAdjust(0x1f), 3.75f);
+}
+
 TEST(SoftwareRasterizer, KeepsMipSelectionInNativePvrPixelUnitsWhenUpscaled)
 {
 	std::array<Color, 16> level0;

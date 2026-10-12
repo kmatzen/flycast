@@ -2074,7 +2074,7 @@ private:
 			state.srcSelect = state.dstSelect = false;
 		state.bumpMap = poly.tcw.PixelFmt == PixelBumpMap;
 		// Zero is illegal on hardware; keep it neutral for malformed streams.
-		state.mipDAdjust = poly.tsp.MipMapD == 0 ? 1.f : poly.tsp.MipMapD / 4.f;
+		state.mipDAdjust = SoftwareRasterizer::decodeMipDAdjust(poly.tsp.MipMapD);
 		state.trilinearFilter = poly.pcw.Texture && validTrilinear;
 		state.trilinearPassB = poly.tsp.FilterMode == 3;
 		if (forceNearest)
@@ -2120,7 +2120,7 @@ private:
 			state.srcSelect = state.dstSelect = false;
 		}
 		state.bumpMap = poly.tcw1.PixelFmt == PixelBumpMap;
-		state.mipDAdjust = poly.tsp1.MipMapD == 0 ? 1.f : poly.tsp1.MipMapD / 4.f;
+		state.mipDAdjust = SoftwareRasterizer::decodeMipDAdjust(poly.tsp1.MipMapD);
 		state.trilinearFilter = poly.pcw.Texture && validTrilinear;
 		state.trilinearPassB = poly.tsp1.FilterMode == 3;
 		if (forceNearest)

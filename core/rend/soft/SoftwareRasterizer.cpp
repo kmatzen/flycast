@@ -541,6 +541,14 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 #endif
 }
 
+float SoftwareRasterizer::decodeMipDAdjust(u32 encoded)
+{
+	encoded &= 0xf;
+	// Sega documents zero as illegal. Keep the established neutral fallback
+	// for malformed streams; every legal value is unsigned 2.2 fixed point.
+	return encoded == 0 ? 1.f : encoded * .25f;
+}
+
 void SoftwareRasterizer::forceNearestFiltering(PipelineState& state)
 {
 	state.bilinearFilter = false;
