@@ -1979,3 +1979,43 @@ present in periodic reports, so these are not all shutdown events. The
 process stopped normally. This remains boot/idle evidence from one game:
 consistent glitch-free audio, 60-Hz changing content, pause/resume, resize,
 longer play, and original-hardware validation remain open.
+
+### Decoupled renderer teardown and recreation
+
+The opt-in producer runs outside the UI message queue. Cancelling that queue
+therefore does not join an in-flight software/Metal render. Renderer teardown
+now calls `Emulator::stopAndWait()` for this mode before touching resources:
+it stops execution and waits on an existing emulation future even if the
+threading setting or running state has changed. Ordinary renderer recreation
+remembers whether execution was running and resumes after initialization;
+already-paused games are not automatically resumed. The default non-decoupled
+teardown path is unchanged.
+
+`FLYCAST_PVR_TEST_REINIT_FRAME=<positive UI frame>` is an explicit one-shot
+integration-test hook, active only for the decoupled renderer while running.
+It forces the normal graphics/renderer recreation path and emits begin/end
+markers. `tools/run-pvr-lifecycle.mjs` drives it at UI frames 480 and 720 with
+null audio, full framebuffer emulation, ordinary VSync, color comparison,
+and full-VRAM comparison. It requires verified output before recreation and
+at least 40 verified full-VRAM outputs afterward, two final renderer delivery
+reports (old and new instances), normal shutdown, and an unchanged executable
+hash. Timeouts, forced kills, mismatches, or missing resumption fail the run.
+This is not a pacing benchmark, a UI-menu interaction test, or proof that
+all lifecycle transitions are safe.
+
+The ARM64 app build passes. Both cases pass in
+`/tmp/pvr-lifecycle-rendering-20261012/report.json`: 76/197 full-VRAM
+comparisons before recreation and 40 after each, with no color or VRAM
+mismatches, successful resumed rendering, and no forced shutdown. The
+frame-480 case records one skipped image state in its second renderer
+instance; frame 720 ends with one content state pending. These verifier-heavy
+runs are not evidence of uninterrupted or lossless display delivery across
+recreation.
+
+The initial frame-180 attempt is retained in `/tmp/pvr-lifecycle-20261012`.
+It resumed and produced 40 matching post-recreation comparisons, but failed
+the required precondition because startup was still framebuffer-only and
+there were zero PVR comparisons before recreation. Moving the checkpoints
+later tests active rendering rather than weakening that precondition. GUI
+pause/resume interaction, window resize, stopped-state recreation, and error
+injection remain separate validation work.

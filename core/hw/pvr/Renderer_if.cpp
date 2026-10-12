@@ -739,6 +739,11 @@ bool rend_init_renderer()
 
 void rend_term_renderer()
 {
+	// Decoupled rendering executes outside this queue. Queue cancellation
+	// alone cannot protect the renderer from its in-flight producer.
+	if (renderer != nullptr && renderer->RendersOnEmulationThread())
+		emu.stopAndWait();
+
 	// Drain and stop the queue first so that any in-flight Render/Present
 	// messages cannot be dispatched against a renderer that is about to be
 	// destroyed. This is called from many libretro entry points (context

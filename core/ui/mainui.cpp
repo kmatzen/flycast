@@ -30,6 +30,8 @@
 
 #include <chrono>
 #include <thread>
+#include <cstdio>
+#include <cstdlib>
 
 static bool mainui_enabled;
 u32 MainFrameCount;
@@ -100,6 +102,16 @@ void mainui_loop(bool forceStart)
 		mainui_enabled = true;
 	mainui_init();
 	RenderType currentRenderer = config::RendererType;
+	// Explicit lifecycle regression hook, restricted below to the experimental
+	// decoupled renderer. Never schedules a reinit without a valid opt-in value.
+	u32 testReinitFrame = 0;
+	if (const char *value = std::getenv("FLYCAST_PVR_TEST_REINIT_FRAME"))
+	{
+		char *end = nullptr;
+		const unsigned long parsed = std::strtoul(value, &end, 10);
+		if (end != value && *end == '\0' && parsed > 0 && parsed <= 0xffffffffUL)
+			testReinitFrame = static_cast<u32>(parsed);
+	}
 
 	while (mainui_enabled)
 	{
@@ -115,9 +127,19 @@ void mainui_loop(bool forceStart)
 		}
 		if (imguiDriver == nullptr)
 			forceReinit = true;
+		bool testingReinit = testReinitFrame != 0 && MainFrameCount >= testReinitFrame
+				&& renderer != nullptr && renderer->RendersOnEmulationThread() && emu.running();
+		if (testingReinit)
+		{
+			std::fprintf(stderr, "PVR_LIFECYCLE reinit_begin frame=%u running=1\n", MainFrameCount);
+			testReinitFrame = 0;
+			forceReinit = true;
+		}
 
 		if (config::RendererType != currentRenderer || forceReinit)
 		{
+			const bool resumeAfterReinit = renderer != nullptr
+					&& renderer->RendersOnEmulationThread() && emu.running();
 			mainui_term();
 			int prevApi = isOpenGL(currentRenderer) || isSoftware(currentRenderer) ? 0 : isVulkan(currentRenderer) ? 1 : currentRenderer == RenderType::DirectX9 ? 2 : 3;
 			int newApi = isOpenGL(config::RendererType) || isSoftware(config::RendererType) ? 0 : isVulkan(config::RendererType) ? 1 : config::RendererType == RenderType::DirectX9 ? 2 : 3;
@@ -142,8 +164,13 @@ void mainui_loop(bool forceStart)
 				}
 			}
 			mainui_init();
+			if (resumeAfterReinit)
+				emu.start();
 			forceReinit = false;
 			currentRenderer = config::RendererType;
+			if (testingReinit)
+				std::fprintf(stderr, "PVR_LIFECYCLE reinit_complete running=%u decoupled=%u\n",
+						emu.running(), renderer != nullptr && renderer->RendersOnEmulationThread());
 		}
 
 		fc_profiler::endThread(config::ProfilerFrameWarningTime);

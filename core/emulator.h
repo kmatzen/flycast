@@ -138,6 +138,9 @@ public:
 	 * Does nothing if the game isn't running.
 	 */
 	void stop();
+	// Renderer teardown must join an existing producer even if the threading
+	// setting changed or execution already entered a non-running state.
+	void stopAndWait();
 	/**
 	 * Execute a single instruction.
 	 */

@@ -841,6 +841,20 @@ void Emulator::stop()
 	}
 }
 
+void Emulator::stopAndWait()
+{
+	stop();
+	std::shared_future<void> completion;
+	{
+		const std::lock_guard<std::mutex> lock(mutex);
+		completion = threadResult;
+	}
+	// An error may already have been consumed by render()/checkStatus().
+	// Teardown needs lifetime synchronization, not another delivery of it.
+	if (completion.valid())
+		completion.wait();
+}
+
 // Called on the emulator thread for soft reset
 void Emulator::requestReset()
 {
