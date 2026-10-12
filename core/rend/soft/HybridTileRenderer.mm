@@ -58,6 +58,9 @@ struct Triangle {
     int superSampleOffsetY;
     uint offsetColor[3];
     uint effects;
+    uint clampMin;
+    uint clampMax;
+    uint ditherDivisors;
 };
 
 struct Constants {
@@ -445,6 +448,16 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 source = added;
             }
         }
+        if ((t.effects & 32u) != 0) {
+            uint clamped = 0;
+            for (uint component = 0; component < 4; ++component) {
+                const uint shift = component * 8;
+                const uint value = clamp(channel(source, shift),
+                        channel(t.clampMin, shift), channel(t.clampMax, shift));
+                clamped |= value << shift;
+            }
+            source = clamped;
+        }
         if ((t.state & (1u << 23)) != 0) {
             const float fog = fogCoefficient(z, constants.fogDensity, fogTable);
             float4 fogged;
@@ -481,6 +494,20 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             continue;
         if ((t.state & (1u << 13)) != 0)
             source |= 0xff000000u;
+        if ((t.effects & 64u) != 0) {
+            constexpr uchar ditherTable[16] = {
+                5, 13, 7, 15, 9, 1, 11, 3, 6, 14, 4, 12, 10, 2, 8, 0
+            };
+            const uint dither = ditherTable[(pixel.y & 3) * 4 + (pixel.x & 3)];
+            uint dithered = 0;
+            for (uint component = 0; component < 4; ++component) {
+                const uint shift = component * 8;
+                const uint divisor = max(1u, channel(t.ditherDivisors, shift));
+                const uint addition = component == 3 ? 1u / divisor : dither / divisor;
+                dithered |= min(255u, channel(source, shift) + addition) << shift;
+            }
+            source = dithered;
+        }
         if ((t.state & (1u << 22)) != 0) {
             if (sortedCount == MaxSortedFragments) {
                 atomic_store_explicit(overflow, 1u, memory_order_relaxed);

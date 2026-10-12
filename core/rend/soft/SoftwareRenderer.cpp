@@ -708,6 +708,12 @@ private:
 			command.effects |= hybrid::VertexFog;
 		if (state.srcSelect) command.effects |= hybrid::SourceSelect;
 		if (state.dstSelect) command.effects |= hybrid::DestinationSelect;
+		if (state.colorClamp) command.effects |= hybrid::ColorClamp;
+		if (state.dither) command.effects |= hybrid::Dither;
+		command.clampMin = packedColor(state.clampMin);
+		command.clampMax = packedColor(state.clampMax);
+		command.ditherDivisors = packedColor({ state.ditherDivisorR,
+			state.ditherDivisorG, state.ditherDivisorB, state.ditherDivisorA });
 		if (command.mipLevelCount > 1)
 		{
 			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
@@ -798,8 +804,7 @@ private:
 						|| candidate.excludeClip
 						|| (candidate.fogMode != 0 && candidate.fogMode != 1
 								&& candidate.fogMode != 2)
-						|| candidate.colorClamp
-						|| candidate.dither;
+						;
 			};
 			const bool hasArea1 = state.shadow && !state.intensityShadow
 					&& poly.tsp1.full != static_cast<u32>(-1);

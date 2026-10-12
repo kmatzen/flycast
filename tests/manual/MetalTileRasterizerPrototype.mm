@@ -469,6 +469,21 @@ int main() {
       return 1;
   }
 
+  {
+    Triangle command = testTriangle(
+        0x283264c8u, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    command.effects = rend::soft::hybrid::ColorClamp |
+                      rend::soft::hybrid::Dither;
+    command.clampMax = 0x64646464u;
+    command.ditherDivisors = 0x02020202u;
+    std::vector<Triangle> commands{command};
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0x28346666u)
+      return 1;
+  }
+
   const std::vector<u32> atlas{0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
                                0xff0000ffu, 0xff00ff00u, 0xff00ff00u,
                                0xff00ff00u, 0xff00ff00u};
