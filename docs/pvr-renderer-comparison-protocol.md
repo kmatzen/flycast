@@ -1048,3 +1048,21 @@ output transport. At the first observation it had not emitted any
 `PVR_RTT_` records, so no RTT rendering result is claimed. The run log is
 `/tmp/pvr-kos-probe.V8emEs/software-run.log`; initialization and probe
 completion still require investigation.
+
+Temporary `dbgio_write_str` markers in the isolated SDK established that
+initialization completes. Probe markers then reached readback, despite no
+standard-output records appearing. The probe now formats complete records
+with `snprintf` and sends them through `dbgio_write_str`, the already verified
+debug transport, instead of relying on stdio routing. Its stage markers use
+the separate `PVR_PROBE_STAGE` prefix and do not alter the capture schema.
+
+The first complete software RTT capture is
+`/tmp/pvr-kos-probe.V8emEs/software-dbgio-run.log`. The strict reader reports
+matching requested configuration, zero changed prefix/suffix guard bytes,
+zero changed row-padding bytes, and all 256 sampled interior pixels equal
+to `0xae7d`. Allocation SHA-256 is
+`dcfb46ac55592ed049272f1d8e73296df4518b7e40e093ed0b9876e4b9f6cf1b`.
+This is Flycast software-renderer execution with an instrumented SDK, not
+Dreamcast hardware evidence. It covers one interior, undithered RGB565 RTT
+allocation; it does not validate other formats, edge wrapping, or hardware
+equivalence. The parser's three synthetic tests still pass.
