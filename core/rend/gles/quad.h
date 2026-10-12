@@ -27,6 +27,12 @@ public:
 
 	// coords is an optional array of 20 floats (4 vertices with x,y,z,u,v each)
 	void draw(GLuint texId, bool rotate = false, bool swapY = false, const float *coords = nullptr, const float *color = nullptr);
+#ifdef TARGET_MAC
+	// Draws a BGRA IOSurface-backed rectangle texture. The shader restores the
+	// software renderer's packed RGBA byte order without an intermediate copy.
+	void drawRect(GLuint texId, u32 width, u32 height, bool rotate = false,
+			bool swapY = false);
+#endif
 
 private:
 	class VertexArray final : public GlVertexArray
@@ -50,6 +56,12 @@ private:
 	GLint tintUniform;
 	GLuint rot90shader;
 	GLint rot90TintUniform;
+#ifdef TARGET_MAC
+	GLuint rectShader = 0;
+	GLuint rectRot90Shader = 0;
+	GLint rectSizeUniform = -1;
+	GLint rectRot90SizeUniform = -1;
+#endif
 	VertexArray quadVertexArray;
 	VertexArray quadVertexArraySwapY;
 	std::unique_ptr<GlBuffer> quadBuffer;

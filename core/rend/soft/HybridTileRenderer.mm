@@ -860,8 +860,9 @@ public:
   bool valid() const { return queue != nil && pipeline != nil; }
 
   ~MetalState() {
-    if (presentationSurface != nullptr)
-      CFRelease(presentationSurface);
+    for (auto &allocation : presentationAllocations)
+      if (allocation.surface != nullptr)
+        CFRelease(allocation.surface);
   }
 
   id<MTLBuffer> buffer(BufferSlot slot, size_t length,
@@ -914,13 +915,23 @@ public:
                                    PresentationSurface *output) {
     if (output == nullptr)
       return buffer(Color, static_cast<size_t>(width) * height * sizeof(u32));
-    if (presentationSurface == nullptr || presentationWidth != width ||
-        presentationHeight != height) {
-      if (presentationSurface != nullptr)
-        CFRelease(presentationSurface);
-      presentationSurface = nullptr;
-      presentationBufferValue = nil;
-      presentationWidth = presentationHeight = 0;
+    PresentationAllocation *allocation = nullptr;
+    if (output->handle != nullptr)
+      for (PresentationAllocation &candidate : presentationAllocations)
+        if (candidate.surface == output->handle) {
+          allocation = &candidate;
+          break;
+        }
+    if (allocation == nullptr) {
+      presentationIndex = (presentationIndex + 1) %
+                          presentationAllocations.size();
+      allocation = &presentationAllocations[presentationIndex];
+    }
+    if (allocation->surface == nullptr || allocation->width != width ||
+        allocation->height != height) {
+      if (allocation->surface != nullptr)
+        CFRelease(allocation->surface);
+      *allocation = {};
       const size_t bytesPerRow = static_cast<size_t>(width) * sizeof(u32);
       const size_t byteCount = bytesPerRow * height;
       NSDictionary *properties = @{
@@ -941,10 +952,10 @@ public:
                               options:MTLResourceStorageModeShared
                           deallocator:nil];
         if (value != nil) {
-          presentationSurface = surface;
-          presentationBufferValue = value;
-          presentationWidth = width;
-          presentationHeight = height;
+          allocation->surface = surface;
+          allocation->buffer = value;
+          allocation->width = width;
+          allocation->height = height;
         } else {
           CFRelease(surface);
         }
@@ -952,10 +963,10 @@ public:
         CFRelease(surface);
       }
     }
-    output->handle = presentationSurface;
-    output->width = presentationWidth;
-    output->height = presentationHeight;
-    return presentationBufferValue;
+    output->handle = allocation->surface;
+    output->width = allocation->width;
+    output->height = allocation->height;
+    return allocation->buffer;
   }
 
   id<MTLDevice> device = nil;
@@ -974,10 +985,14 @@ private:
   id<MTLTexture> visibility = nil;
   u32 visibilityWidth = 0;
   u32 visibilityHeight = 0;
-  IOSurfaceRef presentationSurface = nullptr;
-  id<MTLBuffer> presentationBufferValue = nil;
-  u32 presentationWidth = 0;
-  u32 presentationHeight = 0;
+  struct PresentationAllocation {
+    IOSurfaceRef surface = nullptr;
+    id<MTLBuffer> buffer = nil;
+    u32 width = 0;
+    u32 height = 0;
+  };
+  std::array<PresentationAllocation, 3> presentationAllocations;
+  size_t presentationIndex = presentationAllocations.size() - 1;
 };
 
 } // namespace

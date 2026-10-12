@@ -10,6 +10,19 @@
 #include "rend/transform_matrix.h"
 #ifdef USE_OPENGL
 #include "rend/gles/quad.h"
+#ifdef TARGET_MAC
+// Including the legacy macOS framework headers here collides with the PVR's
+// own Rect type. Keep the small C ABI surface explicit instead.
+struct __IOSurface;
+using IOSurfaceRef = __IOSurface *;
+using IOSurfaceID = uint32_t;
+struct _CGLContextObject;
+using CGLContextObj = _CGLContextObject *;
+extern "C" IOSurfaceID IOSurfaceGetID(IOSurfaceRef);
+extern "C" CGLContextObj CGLGetCurrentContext();
+extern "C" int32_t CGLTexImageIOSurface2D(CGLContextObj, GLenum, GLenum,
+		GLsizei, GLsizei, GLenum, GLenum, IOSurfaceRef, GLuint);
+#endif
 #endif
 
 #include <glm/glm.hpp>
@@ -107,6 +120,17 @@ public:
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#ifdef TARGET_MAC
+		for (GLuint& texture : presentSurfaceTextures)
+		{
+			texture = glcache.GenTexture();
+			glcache.BindTexture(GL_TEXTURE_RECTANGLE, texture);
+			glcache.TexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glcache.TexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glcache.TexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glcache.TexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		}
+#endif
 		quadDrawer = std::make_unique<GlQuadDrawer>();
 #endif
 		return true;
@@ -119,6 +143,14 @@ public:
 		if (presentTexture != 0)
 			glcache.DeleteTextures(1, &presentTexture);
 		presentTexture = 0;
+#ifdef TARGET_MAC
+		for (GLuint& texture : presentSurfaceTextures)
+			if (texture != 0)
+				glcache.DeleteTextures(1, &texture);
+		presentSurfaceTextures = {};
+		presentSurfaceIds = {};
+		presentSurfaceReplacement = 0;
+#endif
 #endif
 		textureCache.Clear();
 		screenRasterizer.reset();
@@ -528,13 +560,52 @@ public:
 		const u32 pixelWidth = prepared ? presentationWidth : displayRasterizer->width();
 		const u32 pixelHeight = prepared ? presentationHeight : displayRasterizer->height();
 		glActiveTexture(GL_TEXTURE0);
-		glcache.BindTexture(GL_TEXTURE_2D, presentTexture);
-		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pixelWidth, pixelHeight, 0,
-				GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 		const GLint filter = config::LinearInterpolation ? GL_LINEAR : GL_NEAREST;
-		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
-		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+		bool surfacePrepared = false;
+		GLuint surfaceTexture = 0;
+#ifdef TARGET_MAC
+		if (hybridPresentation.handle != nullptr
+				&& hybridPresentation.width == pixelWidth
+				&& hybridPresentation.height == pixelHeight)
+		{
+			IOSurfaceRef surface = static_cast<IOSurfaceRef>(hybridPresentation.handle);
+			const IOSurfaceID surfaceId = IOSurfaceGetID(surface);
+			size_t slot = presentSurfaceIds.size();
+			for (size_t i = 0; i < presentSurfaceIds.size(); ++i)
+				if (presentSurfaceIds[i] == surfaceId)
+				{
+					slot = i;
+					break;
+				}
+			bool needsBinding = slot == presentSurfaceIds.size();
+			if (needsBinding)
+			{
+				slot = presentSurfaceReplacement++ % presentSurfaceIds.size();
+				glcache.BindTexture(GL_TEXTURE_RECTANGLE, presentSurfaceTextures[slot]);
+			}
+			if (!needsBinding
+					|| CGLTexImageIOSurface2D(CGLGetCurrentContext(), GL_TEXTURE_RECTANGLE,
+							GL_RGBA, pixelWidth, pixelHeight, GL_BGRA,
+							GL_UNSIGNED_INT_8_8_8_8_REV, surface, 0) == 0)
+			{
+				presentSurfaceIds[slot] = surfaceId;
+				surfaceTexture = presentSurfaceTextures[slot];
+				glcache.BindTexture(GL_TEXTURE_RECTANGLE, surfaceTexture);
+				glcache.TexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, filter);
+				glcache.TexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, filter);
+				surfacePrepared = true;
+			}
+		}
+#endif
+		if (!surfacePrepared)
+		{
+			glcache.BindTexture(GL_TEXTURE_2D, presentTexture);
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pixelWidth, pixelHeight, 0,
+					GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+			glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+			glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+		}
 		glViewport(0, 0, settings.display.width, settings.display.height);
 		glcache.ClearColor(VO_BORDER_COL.red(), VO_BORDER_COL.green(), VO_BORDER_COL.blue(), 1.f);
 		glClear(GL_COLOR_BUFFER_BIT);
@@ -545,7 +616,13 @@ public:
 		glViewport(dx, dy, settings.display.width - dx * 2, settings.display.height - dy * 2);
 		glcache.Disable(GL_BLEND);
 		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-		quadDrawer->draw(presentTexture, config::Rotate90, true);
+#ifdef TARGET_MAC
+		if (surfacePrepared)
+			quadDrawer->drawRect(surfaceTexture, pixelWidth, pixelHeight,
+					config::Rotate90, true);
+		else
+#endif
+			quadDrawer->draw(presentTexture, config::Rotate90, true);
 		glCheck();
 #endif
 		if (traceHybrid)
@@ -1255,8 +1332,10 @@ private:
 		frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 		hybrid::Timing timing;
 		hybrid::PresentationSurface presentation;
+		const bool usePresentationSurface = !rendContext->isRTT
+				&& std::getenv("FLYCAST_HYBRID_DISABLE_IOSURFACE") == nullptr;
 		if (!hybrid::render(frame, output, depth, &timing, &secondary,
-					rendContext->isRTT ? nullptr : &presentation)
+					usePresentationSurface ? &presentation : nullptr)
 				|| output.size() != frameStore.size())
 			return reject("backend-failure");
 		std::vector<u8> modifierMask;
@@ -1279,7 +1358,7 @@ private:
 			frame.modifierMask = &modifierMask;
 			hybrid::Timing modifierTiming;
 			if (!hybrid::render(frame, output, depth, &modifierTiming, &secondary,
-					rendContext->isRTT ? nullptr : &presentation)
+					usePresentationSurface ? &presentation : nullptr)
 					|| output.size() != frameStore.size())
 				return reject("modifier-backend-failure");
 			timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
@@ -2132,6 +2211,11 @@ private:
 	float frameAspectRatio = 4.f / 3.f;
 #ifdef USE_OPENGL
 	GLuint presentTexture = 0;
+#ifdef TARGET_MAC
+	std::array<GLuint, 3> presentSurfaceTextures {};
+	std::array<IOSurfaceID, 3> presentSurfaceIds {};
+	size_t presentSurfaceReplacement = 0;
+#endif
 	std::unique_ptr<GlQuadDrawer> quadDrawer;
 #endif
 

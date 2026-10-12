@@ -339,6 +339,28 @@ int main() {
   unsetenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT");
   genericTranslucentGpu /= 5.;
   simpleTranslucentGpu /= 5.;
+  double sharedSurfaceGpu = 0.;
+  double ordinaryBufferGpu = 0.;
+  for (u32 iteration = 0; iteration < 6; ++iteration) {
+    rend::soft::hybrid::Timing ordinaryTiming;
+    if (!rend::soft::hybrid::render(simpleTranslucentFrame,
+                                    simpleTranslucentColors,
+                                    simpleTranslucentDepths, &ordinaryTiming))
+      return 2;
+    rend::soft::hybrid::PresentationSurface sharedSurface;
+    rend::soft::hybrid::Timing sharedTiming;
+    if (!rend::soft::hybrid::render(simpleTranslucentFrame,
+                                    simpleTranslucentColors,
+                                    simpleTranslucentDepths, &sharedTiming,
+                                    nullptr, &sharedSurface))
+      return 2;
+    if (iteration != 0) {
+      ordinaryBufferGpu += ordinaryTiming.gpuExecutionMilliseconds;
+      sharedSurfaceGpu += sharedTiming.gpuExecutionMilliseconds;
+    }
+  }
+  ordinaryBufferGpu /= 5.;
+  sharedSurfaceGpu /= 5.;
   size_t simpleTranslucentMismatches = 0;
   for (size_t pixel = 0; pixel < simpleTranslucentColors.size(); ++pixel)
     simpleTranslucentMismatches +=
@@ -780,6 +802,7 @@ int main() {
       "opaque_triangles=%zu opaque_gpu_ms=%.3f serial_opaque_gpu_ms=%.3f "
       "ordered_opaque_gpu_ms=%.3f ordered_mismatches=%zu readback_ms=%.3f "
       "generic_translucent_gpu_ms=%.3f simple_translucent_gpu_ms=%.3f "
+      "ordinary_buffer_gpu_ms=%.3f shared_surface_gpu_ms=%.3f "
       "simple_translucent_mismatches=%zu "
       "presentation_mismatches=%zu color_mismatches=%zu "
       "depth_bit_mismatches=%zu\n",
@@ -789,7 +812,8 @@ int main() {
       opaqueTiming.gpuMilliseconds, serialOpaqueTiming.gpuMilliseconds,
       orderedOpaqueTiming.gpuMilliseconds, orderedMismatches,
       timing.readbackMilliseconds, genericTranslucentGpu,
-      simpleTranslucentGpu, simpleTranslucentMismatches,
+      simpleTranslucentGpu, ordinaryBufferGpu, sharedSurfaceGpu,
+      simpleTranslucentMismatches,
       presentationMismatches, colorMismatches, depthMismatches);
   return colorMismatches == 0 && depthMismatches == 0 &&
       orderedMismatches == 0 && simpleTranslucentMismatches == 0 &&

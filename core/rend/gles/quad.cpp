@@ -46,6 +46,21 @@ void main()
 }
 )";
 
+#ifdef TARGET_MAC
+static const char* RectangleFragmentShader = R"(
+in mediump vec2 vtx_uv;
+
+uniform sampler2DRect tex;
+uniform mediump vec2 tex_size;
+
+void main()
+{
+	mediump vec4 color = texture(tex, vtx_uv * tex_size);
+	gl_FragColor = vec4(color.bgr, 1.0);
+}
+)";
+#endif
+
 GlQuadDrawer::GlQuadDrawer()
 {
 	OpenGlSource fragmentShader;
@@ -67,6 +82,25 @@ GlQuadDrawer::GlQuadDrawer()
 	tex = glGetUniformLocation(rot90shader, "tex");
 	glUniform1i(tex, 0);	// texture 0
 	rot90TintUniform = glGetUniformLocation(rot90shader, "tint");
+
+#ifdef TARGET_MAC
+	OpenGlSource rectangleFragmentShader;
+	rectangleFragmentShader.addSource(PixelCompatShader)
+			.addSource(RectangleFragmentShader);
+	const std::string rectangleFragmentGlsl = rectangleFragmentShader.generate();
+	vertexShader.setConstant("ROTATE", 0);
+	rectShader = gl_CompileAndLink(vertexShader.generate().c_str(),
+			rectangleFragmentGlsl.c_str());
+	tex = glGetUniformLocation(rectShader, "tex");
+	glUniform1i(tex, 0);
+	rectSizeUniform = glGetUniformLocation(rectShader, "tex_size");
+	vertexShader.setConstant("ROTATE", 1);
+	rectRot90Shader = gl_CompileAndLink(vertexShader.generate().c_str(),
+			rectangleFragmentGlsl.c_str());
+	tex = glGetUniformLocation(rectRot90Shader, "tex");
+	glUniform1i(tex, 0);
+	rectRot90SizeUniform = glGetUniformLocation(rectRot90Shader, "tex_size");
+#endif
 
 	quadIndexBuffer = std::make_unique<GlBuffer>(GL_ELEMENT_ARRAY_BUFFER, GL_STATIC_DRAW);
 	static const GLushort indices[] = { 0, 1, 2, 1, 3 };
@@ -111,6 +145,12 @@ GlQuadDrawer::~GlQuadDrawer()
 	shader = 0;
 	glcache.DeleteProgram(rot90shader);
 	rot90shader = 0;
+#ifdef TARGET_MAC
+	glcache.DeleteProgram(rectShader);
+	rectShader = 0;
+	glcache.DeleteProgram(rectRot90Shader);
+	rectRot90Shader = 0;
+#endif
 }
 
 void GlQuadDrawer::draw(GLuint texId, bool rotate, bool swapY, const float *coords, const float *color)
@@ -148,3 +188,26 @@ void GlQuadDrawer::draw(GLuint texId, bool rotate, bool swapY, const float *coor
 	GlVertexArray::unbind();
 	glCheck();
 }
+
+#ifdef TARGET_MAC
+void GlQuadDrawer::drawRect(GLuint texId, u32 width, u32 height, bool rotate,
+		bool swapY)
+{
+	glcache.Disable(GL_SCISSOR_TEST);
+	glcache.Disable(GL_DEPTH_TEST);
+	glcache.Disable(GL_STENCIL_TEST);
+	glcache.Disable(GL_CULL_FACE);
+
+	glcache.UseProgram(rotate ? rectRot90Shader : rectShader);
+	glActiveTexture(GL_TEXTURE0);
+	glcache.BindTexture(GL_TEXTURE_RECTANGLE, texId);
+	glUniform2f(rotate ? rectRot90SizeUniform : rectSizeUniform, width, height);
+	if (swapY)
+		quadVertexArraySwapY.bind(quadBufferSwapY.get(), quadIndexBuffer.get());
+	else
+		quadVertexArray.bind(quadBuffer.get(), quadIndexBuffer.get());
+	glDrawElements(GL_TRIANGLE_STRIP, 5, GL_UNSIGNED_SHORT, (GLvoid *)0);
+	GlVertexArray::unbind();
+	glCheck();
+}
+#endif
