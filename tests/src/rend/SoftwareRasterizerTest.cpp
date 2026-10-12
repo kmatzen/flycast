@@ -30,6 +30,39 @@ template<typename Line> std::vector<u8> packTestPixel(FB_W_CTRL_type control)
 	EXPECT_EQ(cursor, input + 4);
 	return sink.bytes;
 }
+
+template<typename Line> void checkPackedTextureWrap(u16 expectedWord)
+{
+	std::vector<u8> storage(80, 0xa5);
+	auto expected = storage;
+	u8 *memory = storage.data() + 8;
+	TexturePixelWriter sink(reinterpret_cast<u16 *>(memory + 62), memory, 64);
+	FB_W_CTRL_type control {};
+	control.fb_kval = 0x9a;
+	control.fb_alpha_threshold = 0x42;
+	Line writer(control, sink);
+	const u8 pixels[] { 0xab, 0xcd, 0xef, 0x42, 0xab, 0xcd, 0xef, 0x42 };
+	const u8 *cursor = pixels;
+	writer.write(0, 2, cursor, 0);
+	EXPECT_EQ(cursor, pixels + sizeof(pixels));
+	sink.advance(14);
+	cursor = pixels;
+	writer.write(0, 2, cursor, 1);
+	for (u32 offset : { 62u, 0u, 16u, 18u })
+	{
+		expected[8 + offset] = static_cast<u8>(expectedWord);
+		expected[8 + offset + 1] = static_cast<u8>(expectedWord >> 8);
+	}
+	EXPECT_EQ(storage, expected); // Includes prefix/suffix guards and padding.
+}
+}
+
+TEST(SoftwareRasterizer, ProductionTexturePackersWrapStoredPixelsAndPreserveGuards)
+{
+	checkPackedTextureWrap<FBLineWriter0555<0, 1, 2, 3, TexturePixelWriter>>(0xd73d);
+	checkPackedTextureWrap<FBLineWriter565<0, 1, 2, 3, TexturePixelWriter>>(0xae7d);
+	checkPackedTextureWrap<FBLineWriter4444<0, 1, 2, 3, TexturePixelWriter>>(0x4ace);
+	checkPackedTextureWrap<FBLineWriter1555<0, 1, 2, 3, TexturePixelWriter>>(0xd73d);
 }
 
 TEST(SoftwareRasterizer, ProductionFramebufferPackersEmitExactStoredBytes)

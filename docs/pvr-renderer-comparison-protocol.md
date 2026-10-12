@@ -918,3 +918,12 @@ including alpha equal to/below threshold and K substitution. It also verifies
 source cursor advancement. All 133 tests pass on ARM64 and x86_64 Rosetta,
 and the app builds. The storage sink is test-owned, so these checks cover
 production packing but not mapped VRAM side effects or hardware output.
+
+A combined regression now connects each of the four production 16-bit RTT
+packers directly to the production wrapping texture writer. It writes across
+the end of a guarded test VRAM allocation, advances across row padding, and
+checks every resulting byte against explicit packed words while ensuring the
+surrounding guards and untouched memory remain intact. All 134 renderer tests
+pass on ARM64 and x86_64 Rosetta. This validates packer/writer composition;
+it still does not execute a complete game RTT render or establish physical
+hardware boundary behavior.
