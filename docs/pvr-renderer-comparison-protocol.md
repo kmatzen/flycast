@@ -1239,3 +1239,21 @@ alpha 128 and 129 store `0xd73d` (allocation hash
 The equality case therefore exercises the modeled inclusive comparison
 through actual RTT writes. The opaque background stays `0x8000` in all
 three. This tests one threshold boundary in emulator execution only.
+
+`tools/run-pvr-rtt-probes.mjs` now automates the seven executed cases:
+four default formats and three alpha-128 boundary cases. Invoke it with
+absolute paths to Flycast, the configured SDK `environ.sh`, and a new
+output directory. It refuses an existing output directory, force-rebuilds
+each case, archives each ELF with its hash, and retains build/run logs.
+It clears inherited `FLYCAST_HYBRID_*` and `FLYCAST_PVR_*` experiment
+switches before setting the verification switches. Each run has a 60-second
+limit and is interrupted after a complete end marker; failure to shut down
+within five seconds triggers termination and is treated as failure.
+
+Acceptance requires matching requested mode/alpha/threshold and registers,
+unchanged guards/padding, matching interior samples, complete strict parsing,
+and explicit zero-difference color and full-VRAM RTT verifier records. The
+runner never promotes emulator output to a hardware golden. Its first full
+run passed all seven cases; artifacts and the JSON report are under
+`/tmp/pvr-rtt-batch-20261012-a/`. Syntax checking also passes. This replaces
+manual per-case build/run handling, not the need for hardware validation.

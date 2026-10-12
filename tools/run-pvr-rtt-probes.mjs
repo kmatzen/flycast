@@ -1,0 +1,93 @@
+import { spawn } from 'node:child_process';
+import { mkdirSync, openSync, closeSync, writeSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { readProbe } from './read-pvr-rtt-probe.mjs';
+
+// Emulator-only regression runner. No output from this tool is a hardware golden.
+const [flycastArg, sdkEnvArg, outputArg] = process.argv.slice(2);
+if (process.argv.length !== 5)
+  throw Error('Usage: node tools/run-pvr-rtt-probes.mjs /path/to/Flycast /path/to/KOS/environ.sh /new/output/directory');
+const flycast = resolve(flycastArg), sdkEnv = resolve(sdkEnvArg), output = resolve(outputArg);
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const probeDir = resolve(root, 'tests/manual/pvr-rtt-probe');
+mkdirSync(output); // Refuse to overwrite an existing run.
+const hashFile = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+const cases = [0, 1, 2, 3].map(mode => ({ name: `mode-${mode}`, mode, alpha: 255, threshold: 0 }));
+for (const alpha of [127, 128, 129])
+  cases.push({ name: `alpha-${alpha}-threshold-128`, mode: 3, alpha, threshold: 128 });
+
+async function execute(command, args, env, logPath, stopAtEnd = false) {
+  const fd = openSync(logPath, 'wx');
+  let child;
+  try {
+    return await new Promise((accept, reject) => {
+      let text = '', complete = false, timedOut = false, escalated = false;
+      let graceTimer;
+      child = spawn(command, args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const stop = () => {
+        child.kill('SIGINT');
+        graceTimer = setTimeout(() => { escalated = true; child.kill('SIGKILL'); }, 5000);
+      };
+      const timeout = setTimeout(() => { timedOut = true; stop(); }, 60000);
+      const consume = data => {
+        writeSync(fd, data);
+        text += data.toString('utf8');
+        if (stopAtEnd && !complete && /(?:^|\n)PVR_RTT_END\r?\n/.test(text)) {
+          complete = true;
+          clearTimeout(timeout);
+          stop();
+        }
+      };
+      child.stdout.on('data', consume);
+      child.stderr.on('data', consume);
+      child.on('error', error => {
+        clearTimeout(timeout); clearTimeout(graceTimer); reject(error);
+      });
+      child.on('close', (code, signal) => {
+        clearTimeout(timeout); clearTimeout(graceTimer);
+        if (timedOut || escalated || (stopAtEnd ? !complete : code !== 0))
+          reject(Error(`Command failed: code=${code} signal=${signal} timeout=${timedOut} forcedStop=${escalated}; inspect ${logPath}`));
+        else accept(text);
+      });
+    });
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const report = { execution: 'emulator', hardwareValidated: false,
+  flycast, flycastSha256: hashFile(flycast), sdkEnv,
+  probeSourceSha256: hashFile(resolve(probeDir, 'probe.c')), cases: [] };
+for (const item of cases) {
+  const flags = `-DPVR_PROBE_PACK_MODE=${item.mode} -DPVR_PROBE_ALPHA=${item.alpha} -DPVR_PROBE_ALPHA_THRESHOLD=${item.threshold}`;
+  await execute('/bin/bash', ['-c', 'source "$1" && make -B -C "$2" "CFLAGS=$3"',
+    'pvr-probe-build', sdkEnv, probeDir, flags], process.env, resolve(output, `${item.name}.build.log`));
+  const elf = resolve(output, `${item.name}.elf`);
+  copyFileSync(resolve(probeDir, 'pvr-rtt-probe.elf'), elf);
+  const env = { ...process.env };
+  // Do not inherit unrelated renderer experiment switches.
+  for (const key of Object.keys(env))
+    if (key.startsWith('FLYCAST_HYBRID_') || key.startsWith('FLYCAST_PVR_')) delete env[key];
+  Object.assign(env, { FLYCAST_HYBRID_SOFT: '1', FLYCAST_HYBRID_VERIFY: '1', FLYCAST_HYBRID_VERIFY_VRAM: '1' });
+  const args = ['-config', 'audio:backend=null', '-config', 'config:pvr.rend=7',
+    '-config', 'config:rend.ThreadedRendering=no', '-config', 'config:rend.EmulateFramebuffer=yes',
+    '-config', 'config:rend.RenderToTextureBuffer=yes', '-config', 'config:Debug.SerialConsoleEnabled=yes',
+    '-config', 'config:Debug.SerialPTY=false', elf];
+  const log = await execute(flycast, args, env, resolve(output, `${item.name}.run.log`), true);
+  const observed = readProbe(log);
+  const vramVerified = /HYBRID verify_vram bytes=8388608 mismatches=0 rtt=1(?:\r?\n)/.test(log);
+  const colorVerified = /HYBRID verify pixels=307200 mismatches=0(?:\r?\n)/.test(log);
+  const nonzeroMismatch = /HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(log);
+  const passed = observed.packmode === item.mode && observed.alpha === item.alpha
+    && observed.threshold === item.threshold && observed.expectedConfiguration
+    && observed.prefixGuardChangedBytes === 0 && observed.suffixGuardChangedBytes === 0
+    && observed.paddingChangedBytes === 0 && observed.interiorPixelsDifferentFromRequestedColor === 0
+    && vramVerified && colorVerified && !nonzeroMismatch;
+  report.cases.push({ ...item, elfSha256: hashFile(elf), passed, vramVerified, colorVerified, observed });
+  writeFileSync(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+  console.log(`${item.name}: ${passed ? 'PASS' : 'FAIL'}`);
+  if (!passed) throw Error(`Probe regression: inspect ${output}`);
+}
+console.log(`Completed ${report.cases.length} emulator cases. Hardware validation remains false. Report: ${output}/report.json`);
