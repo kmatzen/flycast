@@ -927,3 +927,15 @@ surrounding guards and untouched memory remain intact. All 134 renderer tests
 pass on ARM64 and x86_64 Rosetta. This validates packer/writer composition;
 it still does not execute a complete game RTT render or establish physical
 hardware boundary behavior.
+
+A post-writer-change real-audio run used the app built after production packer
+extraction, with SDL2 audio, a 2822-frame buffer, single-threaded full-framebuffer
+hybrid rendering, late-swap enabled, and verification disabled. Computer output
+mute was confirmed. Six early underruns were recorded by 353280 submitted
+input frames; the count remained six through 3002880 submitted frames and
+2937 callbacks, with zero dropped frames. This is approximately 60 subsequent
+seconds of submitted audio without another reported underrun. The final three
+emulation windows measured 1.0026, 1.0006, and 0.9976 speed. Log:
+`/tmp/pvr-postwrite-audio-soak.log`; the owned emulator was stopped. This
+establishes no observed regression in this repeated scene, not broad game,
+long-session, tear-free presentation, or glitch-free startup coverage.
