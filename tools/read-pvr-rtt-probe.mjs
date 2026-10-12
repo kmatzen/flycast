@@ -28,6 +28,12 @@ export function readProbe(log) {
   // Stay well inside the quad, away from edge-coverage rules. This expected
   // word follows the requested undithered RGB565 packing, not a hardware dump.
   let interiorPixelsDifferentFromRequestedColor = 0;
+  const pixelWordHistogram = {};
+  for (let y = 0; y < 32; ++y)
+    for (let x = 0; x < 32; ++x) {
+      const word = bytes.readUInt16LE(32 + (y * 36 + x) * 2).toString(16).padStart(4, '0');
+      pixelWordHistogram[word] = (pixelWordHistogram[word] ?? 0) + 1;
+    }
   for (let y = 8; y < 24; ++y)
     for (let x = 8; x < 24; ++x)
       interiorPixelsDifferentFromRequestedColor += bytes.readUInt16LE(32 + (y * 36 + x) * 2) !== 0xae7d;
@@ -41,6 +47,7 @@ export function readProbe(log) {
     prefixGuardChangedBytes: changes(bytes.subarray(0, 32)),
     suffixGuardChangedBytes: changes(bytes.subarray(2336)),
     paddingChangedBytes,
+    pixelWordHistogram,
     interiorPixelsChecked: 256,
     expectedInteriorWord: 0xae7d,
     interiorPixelsDifferentFromRequestedColor,

@@ -1153,3 +1153,18 @@ bytes. The center-sample conversion diagnosis does not by itself explain
 every spatial difference; coverage and pixel-by-pixel analysis remain
 separate checks. These captures establish equality of the recorded input
 subset, not complete hidden-state equivalence or hardware accuracy.
+
+Spatial analysis of those allocations finds identical coverage: both fill
+x=4..27, y=4..27 (576 pixels), with 448 black background pixels. Software
+stores `0xae7d` throughout the square. OpenGL stores `0xb69e` at 288 pixels,
+`0xae9e` at 144, and `0xb67e` at 144. These pairs account for exactly
+1,008 changed bytes (576+288+144); there are no coverage differences in
+this probe. The reader now reports a 32x32 pixel-word histogram, excluding
+guards and row padding, and its three synthetic tests pass.
+
+`rtt-host-dither-run.log` reproduces the OpenGL allocation hash and reports
+`dither=0 host_dither=1` with a 5/6/5/0 attachment. The host dither state
+is therefore enabled independently of the requested PVR bit in this run.
+This is consistent with the spatial color pattern; a controlled host-dither
+toggle is still needed to isolate its causal contribution. The diagnostic
+only queries state, and the normal renderer remains unchanged.

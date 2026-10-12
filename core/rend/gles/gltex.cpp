@@ -263,9 +263,10 @@ void ReadRTTBuffer()
 				const u32 x = w > 16 ? 16 : w - 1;
 				const u32 y = h > 16 ? 16 : h - 1;
 				const u8 *sample = p + (static_cast<size_t>(y) * w + x) * 4;
-				std::fprintf(stderr, "PVR_GL_RTT_READBACK width=%u height=%u stride=%u pack=%u dither=%u x=%u y=%u rgba=%02x%02x%02x%02x\n",
+				std::fprintf(stderr, "PVR_GL_RTT_READBACK width=%u height=%u stride=%u pack=%u dither=%u host_dither=%u x=%u y=%u rgba=%02x%02x%02x%02x\n",
 						w, h, linestride, static_cast<unsigned>(fb_packmode),
 						static_cast<unsigned>(gl.rendContext->fb_W_CTRL.fb_dither),
+						static_cast<unsigned>(glIsEnabled(GL_DITHER)),
 						x, y, sample[0], sample[1], sample[2], sample[3]);
 #if !defined(GLES2)
 				if (gl.gl_major >= 3)

@@ -20,6 +20,7 @@ test('complete data remains unclassified, even with expected registers', () => {
   assert.equal(result.prefixGuardChangedBytes, 0);
   assert.equal(result.suffixGuardChangedBytes, 0);
   assert.equal(result.paddingChangedBytes, 0);
+  assert.deepEqual(result.pixelWordHistogram, { a5a5: 1024 });
   assert.equal(result.interiorPixelsDifferentFromRequestedColor, 256);
 });
 test('report changed padding and interior independently of provenance', () => {
