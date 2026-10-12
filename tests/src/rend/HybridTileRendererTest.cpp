@@ -907,10 +907,13 @@ TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
 	for (u32 i = 0; i < 128; ++i)
 		fogTable[i] = ((i * 5 + 3) & 0xff) << 8 | ((i * 11 + 7) & 0xff);
 	const Color background { 29, 71, 137, 191 };
+	const Color secondaryBackground { 151, 37, 89, 113 };
 	const std::vector<u32> initialColors(64, pack(background));
-	for (u32 sample = 0; sample < 64; ++sample)
+	const std::vector<u32> initialSecondary(64, pack(secondaryBackground));
+	for (u32 sample = 0; sample < 128; ++sample)
 	{
 		SCOPED_TRACE(testing::Message() << "sample=" << sample);
+		const u32 bits = (sample * 0x9e3779b9u) ^ (sample << 17) ^ 0xa511e9b3u;
 		auto vertexColor = [sample](u32 vertex) {
 			return Color { static_cast<u8>(43 + sample * 29 + vertex * 53),
 					static_cast<u8>(17 + sample * 47 + vertex * 31),
@@ -933,28 +936,38 @@ TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
 		PipelineState state;
 		state.depthMode = DepthMode::Always;
 		state.texture = { texels, 4, 4 };
-		state.bilinearFilter = (sample & 1) != 0;
-		state.clampU = (sample & 2) != 0;
-		state.clampV = (sample & 4) != 0;
-		state.flipU = (sample & 8) != 0;
-		state.flipV = (sample & 16) != 0;
-		state.shadingInstruction = sample & 3;
-		state.useAlpha = (sample & 4) == 0;
-		state.ignoreTextureAlpha = (sample & 8) != 0;
-		state.useOffsetColor = (sample & 16) != 0;
-		state.fogMode = (sample >> 4) & 3;
+		state.bilinearFilter = (bits & (1u << 0)) != 0;
+		state.clampU = (bits & (1u << 1)) != 0;
+		state.clampV = (bits & (1u << 2)) != 0;
+		state.flipU = (bits & (1u << 3)) != 0;
+		state.flipV = (bits & (1u << 4)) != 0;
+		state.shadingInstruction = (bits >> 5) & 3;
+		state.useAlpha = (bits & (1u << 7)) == 0;
+		state.ignoreTextureAlpha = (bits & (1u << 8)) != 0;
+		state.fogMode = (bits >> 9) & 3;
+		state.useOffsetColor = state.fogMode == 1 || (bits & (1u << 11)) != 0;
 		state.fogTable = fogTable;
 		state.fogDensity = .81f;
 		state.fogRamColor = { 173, 41, 97, 255 };
 		state.fogVertexColor = { 37, 181, 83, 255 };
-		state.colorClamp = (sample & 32) != 0;
+		state.colorClamp = (bits & (1u << 12)) != 0;
 		state.clampMin = { 19, 31, 43, 7 };
 		state.clampMax = { 221, 207, 193, 239 };
-		state.srcBlend = static_cast<BlendFactor>((sample * 5 + 1) & 7);
-		state.dstBlend = static_cast<BlendFactor>((sample * 3 + 2) & 7);
+		state.srcBlend = static_cast<BlendFactor>((bits >> 13) & 7);
+		state.dstBlend = static_cast<BlendFactor>((bits >> 16) & 7);
+		state.gouraud = (bits & (1u << 19)) != 0;
+		state.fpuPixelCenter = (bits & (1u << 20)) != 0;
+		state.tspPixelCenter = (bits & (1u << 21)) != 0;
+		state.texelSampleCenter = (bits & (1u << 22)) != 0;
+		state.alphaTest = (bits & (1u << 23)) != 0;
+		state.alphaReference = static_cast<u8>(63 + ((bits >> 24) & 127));
+		state.srcSelect = (bits & (1u << 27)) != 0;
+		state.dstSelect = (bits & (1u << 28)) != 0;
+		state.dither = (bits & (1u << 31)) != 0;
 
 		SoftwareRasterizer cpu(8, 8);
 		cpu.clear(background);
+		cpu.clearSecondary(secondaryBackground);
 		cpu.drawTriangle(a, b, c, state);
 
 		u32 gpuState = hybrid::makeState(7, true, true, state.bilinearFilter,
@@ -965,15 +978,29 @@ TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
 		if (state.flipU) gpuState |= hybrid::FlipU;
 		if (state.flipV) gpuState |= hybrid::FlipV;
 		if (state.ignoreTextureAlpha) gpuState |= hybrid::IgnoreTextureAlpha;
+		if (!state.texelSampleCenter) gpuState &= ~hybrid::TexelSampleCenter;
+		if (state.alphaTest) gpuState |= hybrid::AlphaTest;
 		if (state.fogMode == 0) gpuState |= hybrid::LookupFog;
 		auto command = triangle(a, b, c, gpuState);
+		if (!state.gouraud)
+			for (u32 vertex = 0; vertex < 3; ++vertex)
+			{
+				command.color[vertex] = pack(c.color);
+				command.offsetColor[vertex] = pack(c.offsetColor);
+			}
 		command.textureWidth = command.textureHeight = 4;
 		command.mipOffsets[0] = 0;
 		command.mipLevelCount = 1;
+		command.alphaReference = state.alphaReference;
+		command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
+		command.tspSampleOffset = state.tspPixelCenter ? 8 : 0;
 		if (state.useOffsetColor) command.effects |= hybrid::UseOffsetColor;
 		if (state.fogMode == 1) command.effects |= hybrid::VertexFog;
 		if (state.fogMode == 3) command.effects |= hybrid::LookupFogAlpha;
 		if (state.colorClamp) command.effects |= hybrid::ColorClamp;
+		if (state.dither) command.effects |= hybrid::Dither;
+		if (state.srcSelect) command.effects |= hybrid::SourceSelect;
+		if (state.dstSelect) command.effects |= hybrid::DestinationSelect;
 		command.clampMin = pack(state.clampMin);
 		command.clampMax = pack(state.clampMax);
 		std::vector<hybrid::Triangle> commands { command };
@@ -982,10 +1009,15 @@ TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
 		frame.fogColor = pack(state.fogRamColor);
 		frame.fogVertexColor = pack(state.fogVertexColor);
 		frame.fogDensity = state.fogDensity;
+		frame.initialSecondary = &initialSecondary;
 		std::vector<u32> colors;
 		std::vector<float> depths;
-		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "sample=" << sample;
+		std::vector<u32> secondary;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, nullptr, &secondary));
 		expectEqual(cpu, colors, depths);
+		ASSERT_EQ(secondary.size(), cpu.secondaryBuffer().size());
+		for (size_t i = 0; i < secondary.size(); ++i)
+			EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i])) << "secondary pixel=" << i;
 	}
 }
 
