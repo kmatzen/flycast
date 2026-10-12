@@ -470,3 +470,20 @@ capture write-success records still require the accompanying log.
 
 The captured OpenGL/software pair above passes this gate; the retained report
 is `/tmp/pvr-context-capture.c8w16g/input-comparison.json`.
+
+### Live regression after mip overflow fixes
+
+The rebuilt ARM64 app was run with Seaman, audio disabled, software renderer
+selection (`pvr.rend=7`), single-threaded rendering, full framebuffer emulation,
+and `FLYCAST_HYBRID_SOFT=1 FLYCAST_HYBRID_VERIFY=1 FLYCAST_HYBRID_TRACE=1`.
+The run was stopped after 458 verifier records: 140697600 compared pixel
+instances, zero mismatches, and no logged hybrid rejection. Trace records
+showed up to 16 triangles per frame. Log:
+`/tmp/pvr-live-regression.hHIYrG/run.log`.
+
+This was a short boot/intro regression, not a complete playthrough. Repeated
+frames are included in the count. The live verifier compares the internal
+frame-store output; this run does not independently verify every VRAM packing
+or scanout operation. The earlier raw-VRAM comparison covers a separate frame.
+Software verification and trace logging add overhead, so timings from this run
+must not be reported as uninstrumented gameplay performance.
