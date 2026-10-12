@@ -752,3 +752,22 @@ result, but not evidence of glitch-free startup or long-session audio stability.
 Log: `/tmp/pvr-late-swap-audio.log`; the owned emulator was stopped after
 measurement, and computer output remains muted. Build and whitespace checks
 passed. No audio buffer policy or renderer pixel operations were changed.
+
+### Live agreement with late-swap enabled
+
+A separate correctness run enabled `FLYCAST_HYBRID_VERIFY=1` and
+`FLYCAST_HYBRID_TRACE=1` alongside `FLYCAST_HYBRID_SOFT=1` and
+`FLYCAST_PVR_LATE_SWAP=1`, with single-threaded rendering, full framebuffer
+emulation, requested VSync, and null audio. It verified 706 frames containing
+216883200 pixel instances with zero mismatches and zero logged hybrid
+rejections. The sequence reached the 16-triangle, six-texture scene; sampled
+trace entries used ordered autosort and no CPU translucent completion.
+Log: `/tmp/pvr-late-swap-verify.log`; the owned process was stopped afterward.
+
+This check compares packed color values in the software and hybrid frame
+stores. The verifier restores initial VRAM before running the software path,
+and verification runs ultimately use the software result. Therefore this is
+not an independent comparison of final hybrid-only VRAM writes, display
+scanout, tearing, or hardware output. Its added reference-rendering cost also
+makes this run unsuitable for performance or audio conclusions. Independent
+hybrid-only framebuffer captures remain necessary for the final write stage.
