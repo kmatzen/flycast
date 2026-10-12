@@ -1,6 +1,7 @@
 #include "rend/soft/HybridTileRenderer.h"
 #include "rend/soft/SoftwareRasterizer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -381,6 +382,97 @@ TEST(HybridTileRenderer, MatchesOracleForTableFog)
 		std::vector<u32> colors;
 		std::vector<float> depths;
 		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "depth=" << depth;
+		expectEqual(cpu, colors, depths);
+	}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForMipSelectionAndTrilinearWeights)
+{
+	std::array<Color, 21> texels;
+	std::fill(texels.begin(), texels.begin() + 16, Color { 220, 30, 20, 240 });
+	std::fill(texels.begin() + 16, texels.begin() + 20, Color { 20, 210, 50, 180 });
+	texels[20] = { 30, 60, 230, 120 };
+	std::vector<u32> texture;
+	for (Color color : texels)
+		texture.push_back(pack(color));
+	TextureView textureView { texels.data(), 4, 4 };
+	textureView.mipLevels[0] = texels.data();
+	textureView.mipLevels[1] = texels.data() + 16;
+	textureView.mipLevels[2] = texels.data() + 20;
+	textureView.mipLevelCount = 3;
+	const Color white { 255, 255, 255, 255 };
+	struct Case { float pvrD; bool trilinear; bool passB; };
+	for (const Case test : {
+			Case { 1.f, false, false }, Case { 2.f, false, false },
+			Case { 3.f, false, false }, Case { 1.5f, true, false },
+			Case { 1.5f, true, true } })
+	{
+		SoftwareRasterizer cpu(2, 2);
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.texture = textureView;
+		state.trilinearFilter = test.trilinear;
+		state.trilinearPassB = test.passB;
+		// A 4-wide texture mapped over two pixels has a footprint of twice
+		// the UV range, so this produces the requested PVR D value.
+		drawTexturedQuad(cpu, 1.f, white, state, 0.f, test.pvrD / 2.f);
+
+		u32 gpuState = hybrid::makeState(6, true, true, false, true, 0, 1, 0);
+		if (test.trilinear) gpuState |= hybrid::Trilinear;
+		if (test.passB) gpuState |= hybrid::TrilinearPassB;
+		std::vector<hybrid::Triangle> commands;
+		appendTexturedQuad(commands, 1.f, white, gpuState, 4, 4,
+				0.f, test.pvrD / 2.f);
+		for (hybrid::Triangle& command : commands)
+		{
+			command.mipOffsets[0] = 0;
+			command.mipOffsets[1] = 16;
+			command.mipOffsets[2] = 20;
+			command.mipLevelCount = 3;
+			command.mipNumerator = test.pvrD;
+		}
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths))
+				<< "pvrD=" << test.pvrD << " passB=" << test.passB;
+		expectEqual(cpu, colors, depths);
+	}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForTextureSupersampling)
+{
+	Color texels[16];
+	for (u32 i = 0; i < 16; ++i)
+		texels[i] = { static_cast<u8>(i * 15), static_cast<u8>(240 - i * 9),
+				static_cast<u8>(i * 5), static_cast<u8>(32 + i * 11) };
+	std::vector<u32> texture;
+	for (Color color : texels)
+		texture.push_back(pack(color));
+	const Color white { 255, 255, 255, 255 };
+	for (bool bilinear : { false, true })
+	{
+		SoftwareRasterizer cpu(2, 2);
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.texture = { texels, 4, 4 };
+		state.textureSuperSample = true;
+		state.bilinearFilter = bilinear;
+		drawTexturedQuad(cpu, 1.f, white, state);
+
+		u32 gpuState = hybrid::makeState(6, true, true, bilinear, true, 0, 1, 0)
+				| hybrid::TextureSuperSample;
+		std::vector<hybrid::Triangle> commands;
+		appendTexturedQuad(commands, 1.f, white, gpuState, 4, 4);
+		for (hybrid::Triangle& command : commands)
+		{
+			command.superSampleOffsetX = 8;
+			command.superSampleOffsetY = 8;
+		}
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "bilinear=" << bilinear;
 		expectEqual(cpu, colors, depths);
 	}
 }
