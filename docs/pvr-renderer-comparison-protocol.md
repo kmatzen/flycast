@@ -1136,3 +1136,20 @@ and changes no pixels. A focused production-packer test checks that all
 65,536 RGB565 words survive nearest normalized 8-bit expansion followed
 by truncation, and separately records the captured sample's rounded
 `0xb69e` result. This tests a conversion invariant, not PVR conformance.
+
+Matched-input follow-up: captures under `/tmp/pvr-rtt-inputs.jQMwSg/`
+(`sw2` and `gl`) target the probe's RTT frame 2. Both use full framebuffer
+emulation, RTT buffer writeback, single-thread rendering, and no hybrid
+verification. `compare-pvr-inputs.mjs` reports `capturedInputsMatch=true`,
+configuration captured, and no differing context fields. Shared hashes:
+
+- Processed VRAM: `a93aba42aed4f1e2f7105b5ba0ca6621a8771be3d88525ac1cedec841e0b2172`
+- Registers: `b12fb289d4b10e1b51a75933af7a5c324f5d22da7fe2f72e2c1392c33bd9c309`
+- TA context 0: `0447980850061fbf4d565fe7e4041177adced7fdb908c5fbdfcd22897c016c4c`
+
+The allocation hashes and interior results reproduce the earlier software
+and OpenGL observations. Full post-render VRAM differs in 1,008 of 8,388,608
+bytes. The center-sample conversion diagnosis does not by itself explain
+every spatial difference; coverage and pixel-by-pixel analysis remain
+separate checks. These captures establish equality of the recorded input
+subset, not complete hidden-state equivalence or hardware accuracy.
