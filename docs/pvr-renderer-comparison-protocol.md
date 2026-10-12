@@ -1056,13 +1056,36 @@ with `snprintf` and sends them through `dbgio_write_str`, the already verified
 debug transport, instead of relying on stdio routing. Its stage markers use
 the separate `PVR_PROBE_STAGE` prefix and do not alter the capture schema.
 
-The first complete software RTT capture is
+The first complete RTT capture (backend attribution corrected below) is
 `/tmp/pvr-kos-probe.V8emEs/software-dbgio-run.log`. The strict reader reports
 matching requested configuration, zero changed prefix/suffix guard bytes,
 zero changed row-padding bytes, and all 256 sampled interior pixels equal
 to `0xae7d`. Allocation SHA-256 is
 `dcfb46ac55592ed049272f1d8e73296df4518b7e40e093ed0b9876e4b9f6cf1b`.
-This is Flycast software-renderer execution with an instrumented SDK, not
+This is Flycast execution with an instrumented SDK, not
 Dreamcast hardware evidence. It covers one interior, undithered RGB565 RTT
 allocation; it does not validate other formats, edge wrapping, or hardware
 equivalence. The parser's three synthetic tests still pass.
+
+Backend attribution correction: the first command set
+`FLYCAST_HYBRID_SOFT=0`, but `tryRenderHybrid` checks for the variable's
+presence, not its numeric value. That run must not be described as
+software-only evidence. The corrected independent runs are:
+
+- `software-only-run.log`: explicitly unset `FLYCAST_HYBRID_SOFT`,
+  `FLYCAST_HYBRID_VERIFY`, and `FLYCAST_HYBRID_VERIFY_VRAM` with `env -u`.
+- `hybrid-traced-run.log`: set `FLYCAST_HYBRID_SOFT=1` and
+  `FLYCAST_HYBRID_TRACE=1`, with both verification variables unset.
+  Trace reports `rtt=1`, four triangles, zero textures, and `reject=0`.
+- `rtt-verified-run.log`: enable both verification variables as well.
+  Same-frame verification reports `bytes=8388608 mismatches=0 rtt=1`
+  and `pixels=307200 mismatches=0`.
+
+All logs are under `/tmp/pvr-kos-probe.V8emEs/`. Both independent runs
+produce the allocation hash above, matching registers, unchanged guards
+and padding, and zero interior pixel mismatches. This establishes an actual
+RTT case for software/hybrid agreement, supplementing earlier game runs
+that contained no RTT frames. Same-frame verification leaves software's
+result in VRAM and is not an independent accelerated-only capture; the
+separate traced run supplies that evidence. Shared packing code and an
+instrumented SDK remain limitations, and no original-hardware result exists.
