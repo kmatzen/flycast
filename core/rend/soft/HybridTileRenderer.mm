@@ -372,6 +372,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         device uint *secondaryColors [[buffer(14)]],
         const device uchar *hardwareVisibilityTiles [[buffer(15)]],
         const device uchar *commitMask [[buffer(16)]],
+        const device uint *opaquePrefixEnds [[buffer(17)]],
         texture2d<uint, access::read> visibility [[texture(0)]],
         uint2 pixel [[thread_position_in_grid]])
 {
@@ -465,7 +466,16 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     uint sortedIndices[MaxSortedFragments];
     uint sortedCount = 0;
     for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
-        const uint triangleIndex = tileReferences[i];
+        uint triangleIndex = tileReferences[i];
+        if (constants.deferOpaqueShading != 0 && i == tileOffsets[tile]
+                && opaquePrefixEnds[tile] > i) {
+            // Visibility already selected the only opaque primitive to shade.
+            // CPU proof guarantees all opaque references form this prefix.
+            i = opaquePrefixEnds[tile] - 1;
+            if (opaqueWinnerTriangle == 0xffffffffu)
+                continue;
+            triangleIndex = opaqueWinnerTriangle;
+        }
         const device Triangle& base = triangles[triangleIndex];
         if ((base.effects & 512u) != 0
                 && (constants.useModifierMask == 0 || modifierMask[offset] == 0))
@@ -825,6 +835,7 @@ public:
     VisibilityVertices,
     VisibilityPrimitives,
     CommitMask,
+    OpaquePrefixEnds,
     BufferSlotCount,
   };
 
@@ -1437,7 +1448,21 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
     return false;
   const bool simpleTranslucent = globalAutosort && globalActiveCount != 0;
   const auto &referenceBins = orderedAutosort ? orderedBins : bins;
+  std::vector<u32> opaquePrefixEnds;
+  opaquePrefixEnds.reserve(referenceBins.size());
+  const bool skipOpaquePrefix = std::getenv("FLYCAST_HYBRID_DISABLE_OPAQUE_PREFIX_SKIP") == nullptr;
   for (const auto &bin : referenceBins) {
+    size_t prefix = 0;
+    while (prefix < bin.size() &&
+        (((*frame.triangles)[bin[prefix]].state >> ListTypeShift) & 3) == 0)
+      ++prefix;
+    // Keep the original sequence for mixed/interleaved list types.
+    for (size_t i = prefix; i < bin.size(); ++i)
+      if ((((*frame.triangles)[bin[i]].state >> ListTypeShift) & 3) == 0) {
+        prefix = 0;
+        break;
+      }
+    opaquePrefixEnds.push_back(static_cast<u32>(tileReferences.size() + (skipOpaquePrefix ? prefix : 0)));
     tileReferences.insert(tileReferences.end(), bin.begin(), bin.end());
     tileOffsets.push_back(static_cast<u32>(tileReferences.size()));
   }
@@ -1534,6 +1559,8 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       metal.upload(MetalState::TileOffsets, tileOffsets);
   id<MTLBuffer> referenceBuffer =
       metal.upload(MetalState::TileReferences, tileReferences);
+  id<MTLBuffer> opaquePrefixBuffer =
+      metal.upload(MetalState::OpaquePrefixEnds, opaquePrefixEnds);
   id<MTLBuffer> textureBuffer =
       metal.upload(MetalState::Texture, *frame.texture);
   const std::array<u32, 128> emptyFog {};
@@ -1576,7 +1603,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       : nil;
   id<MTLTexture> visibilityTexture =
       metal.visibilityTexture(frame.width, frame.height);
-  if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
+  if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil || opaquePrefixBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
       overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
       depthClearBuffer == nil || opaqueMaskBuffer == nil ||
@@ -1689,6 +1716,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:secondaryBuffer offset:0 atIndex:14];
   [encoder setBuffer:hardwareVisibilityTileBuffer offset:0 atIndex:15];
   [encoder setBuffer:commitMaskBuffer offset:0 atIndex:16];
+  [encoder setBuffer:opaquePrefixBuffer offset:0 atIndex:17];
   [encoder setTexture:visibilityTexture atIndex:0];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];

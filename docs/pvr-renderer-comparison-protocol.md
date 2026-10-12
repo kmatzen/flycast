@@ -1586,3 +1586,45 @@ zero software/Metal color and full-VRAM differences; dither acceptance remains
 differential-only. Production `makeHybridTriangle` also clips its command
 bounds against scissor/region state, confirming this is a relevant input path
 rather than solely an artificial test construction.
+
+### Skip the second opaque-reference scan after visibility
+
+The compute shader previously selected the opaque winner, then traversed all
+opaque references again during shading solely to reject every non-winner.
+The CPU now records an opaque-prefix end per bin, but only when every opaque
+reference precedes every non-opaque reference. With deferred opaque shading
+enabled, the shader directly shades the selected winner and advances to that
+prefix end. A missing winner advances without shading. Mixed/interleaved
+lists keep their original traversal. Visibility calculations, interpolation,
+shading, clipping, depth tests, and non-opaque ordering are unchanged.
+
+`OpaqueWinnerShadingPreservesMixedListOrderAndNoWinner` covers three list
+orders with initial depths allowing or rejecting all input geometry. It passes
+both normally and with `FLYCAST_HYBRID_DISABLE_OPAQUE_PREFIX_SKIP=1`, which
+retains the original shading traversal for comparisons. All 140 tests pass on
+native ARM64 and Rosetta; the ARM64 app builds.
+
+Timing is improved but still lacks a reliable spec-frame margin. The initial
+before run (`/tmp/pvr-prefix-before.xml`) was unusually slow: small-triangle
+wall p95 28.401 ms and six-layer wall p95 41.452 ms. An initial optimized run
+(`/tmp/pvr-prefix-after.xml`) passes both gates at 14.885 ms and 8.378 ms,
+respectively. These unpaired results alone are not a defensible speedup ratio.
+Three subsequent same-binary paired runs give:
+
+| Pair | Original traversal wall p95 | Prefix skip wall p95 |
+| --- | --- | --- |
+| 0 | 30.591 ms | 19.794 ms |
+| 1 | 30.632 ms | 23.854 ms |
+| 2 | 30.000 ms | 22.133 ms |
+
+Artifacts: `/tmp/pvr-prefix-{off,on}-{0,1,2}.xml`. All timed buffers match,
+but every one of these timing samples exceeds the 16.667-ms wall target.
+A final separate gated run (`/tmp/pvr-prefix-final-gates.xml`) still fails
+small-triangle wall p95 at 19.309 ms (GPU 14.500 ms); six-layer wall/GPU p95
+14.635/11.003 ms passes. Host timing varies substantially, so these observations
+support reduced work in this workload, not guaranteed 60-Hz emulation or a
+universal speedup. Failed results are retained alongside passing runs.
+The rebuilt app completes all twenty RTT cases in
+`/tmp/pvr-rtt-prefix-20261012/report.json`, with zero color/full-VRAM
+software–Metal differences. Dither checks retain their differential-only
+scope, and original-hardware validation remains absent.

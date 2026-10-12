@@ -203,6 +203,46 @@ TEST(HybridTileRenderer, HardwareVisibilityShadesOnlyOpaqueIspWinner)
 	EXPECT_EQ(timing.hardwareVisibilityTiles, 1u);
 }
 
+TEST(HybridTileRenderer, OpaqueWinnerShadingPreservesMixedListOrderAndNoWinner)
+{
+	const std::array<std::array<u32, 3>, 3> orders {{{0, 1, 2}, {0, 2, 1}, {2, 0, 1}}};
+	for (const auto& order : orders)
+		for (float initialDepth : {0.f, 10.f}) {
+			SCOPED_TRACE(order[0]);
+			SCOPED_TRACE(order[1]);
+			SCOPED_TRACE(initialDepth);
+			SoftwareRasterizer cpu(2, 2);
+			cpu.clear({}, initialDepth);
+			std::vector<hybrid::Triangle> commands;
+			for (u32 index : order) {
+				const bool translucent = index == 2;
+				const Color color = index == 0 ? Color {255, 0, 0, 255}
+					: (index == 1 ? Color {0, 255, 0, 255} : Color {0, 0, 255, 128});
+				const float z = 1.f + index;
+				const Vertex a {0, 0, z, color}, b {4, 0, z, color}, c {0, 4, z, color};
+				PipelineState state;
+				state.depthMode = DepthMode::GreaterOrEqual;
+				state.depthWrite = !translucent;
+				state.srcBlend = translucent ? BlendFactor::SrcAlpha : BlendFactor::One;
+				state.dstBlend = translucent ? BlendFactor::OneMinusSrcAlpha : BlendFactor::Zero;
+				cpu.drawTriangle(a, b, c, state);
+				u32 gpuState = hybrid::makeState(6, !translucent, false, false, true, 0,
+					translucent ? 4 : 1, translucent ? 5 : 0);
+				if (translucent) gpuState |= 2u << hybrid::ListTypeShift;
+				auto command = triangle(a, b, c, gpuState);
+				command.maxX = command.maxY = 1;
+				commands.push_back(command);
+			}
+			const std::vector<u32> texture {0xffffffffu}, initial(4, pack(Color {}));
+			const std::vector<float> initialDepths(4, initialDepth);
+			hybrid::Frame frame {2, 2, &commands, &texture, &initial, &initialDepths};
+			std::vector<u32> colors;
+			std::vector<float> depths;
+			ASSERT_TRUE(hybrid::render(frame, colors, depths));
+			expectEqual(cpu, colors, depths);
+		}
+}
+
 TEST(HybridTileRenderer, HardwareVisibilityRespectsClippedBoundsInsideTiles)
 {
 	constexpr u32 width = 32, height = 32;
