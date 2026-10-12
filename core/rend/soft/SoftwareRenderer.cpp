@@ -198,7 +198,12 @@ public:
 			passRegions.push_back(getPassRegions(pass));
 			tileCount = std::max(tileCount, passRegions.back().size());
 		}
-		if (tryRenderHybrid(width, height, passRegions, frameStore))
+		const bool verifyHybrid = std::getenv("FLYCAST_HYBRID_VERIFY") != nullptr;
+		std::vector<Color> hybridInitial;
+		if (verifyHybrid)
+			hybridInitial = frameStore;
+		const bool hybridRendered = tryRenderHybrid(width, height, passRegions, frameStore);
+		if (hybridRendered && !verifyHybrid)
 		{
 			rawFrameStore = frameStore;
 			presentationBuffer = frameStore;
@@ -209,6 +214,12 @@ public:
 			frameAspectRatio = getOutputFramebufferAspectRatio();
 			clearLastFrame = false;
 			return true;
+		}
+		std::vector<Color> hybridVerification;
+		if (verifyHybrid && hybridRendered)
+		{
+			hybridVerification = std::move(frameStore);
+			frameStore = std::move(hybridInitial);
 		}
 		auto renderRegions = [&](size_t passIndex, const std::vector<RegionInfo>& regions)
 		{
@@ -339,6 +350,14 @@ public:
 		}
 		else
 		{
+			if (!hybridVerification.empty())
+			{
+				size_t mismatches = 0;
+				for (size_t i = 0; i < frameStore.size(); ++i)
+					mismatches += packedColor(frameStore[i]) != packedColor(hybridVerification[i]);
+				std::fprintf(stderr, "HYBRID verify pixels=%zu mismatches=%zu\n",
+						frameStore.size(), mismatches);
+			}
 			rawFrameStore = std::move(frameStore);
 			// A normal PVR render targets its internal frame store. It is not
 			// written to Dreamcast VRAM unless framebuffer emulation is enabled,
@@ -543,7 +562,7 @@ private:
 	bool appendHybridTriangle(const PolyParam& poly, u32 ia, u32 ib, u32 ic,
 			const PipelineState& state, std::vector<hybrid::Triangle>& commands,
 			std::vector<u32>& textureAtlas,
-			std::unordered_map<const Color *, u32>& textureOffsets)
+			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets)
 	{
 		if (ia >= rendContext->verts.size() || ib >= rendContext->verts.size()
 				|| ic >= rendContext->verts.size())
@@ -590,26 +609,31 @@ private:
 		if (minX > maxX || minY > maxY)
 			return true;
 
-		u32 textureOffset = 0;
+		std::array<u32, 11> mipOffsets {};
 		u32 textureWidth = 0;
 		u32 textureHeight = 0;
 		if (state.texture)
 		{
 			textureWidth = state.texture.width;
 			textureHeight = state.texture.height;
-			auto [entry, inserted] = textureOffsets.emplace(state.texture.pixels,
-					static_cast<u32>(textureAtlas.size()));
-			textureOffset = entry->second;
+			auto [entry, inserted] = textureOffsets.emplace(state.texture.pixels, mipOffsets);
 			if (inserted)
 			{
-				const size_t pixelCount = static_cast<size_t>(textureWidth) * textureHeight;
-				if (pixelCount > std::numeric_limits<u32>::max() - textureAtlas.size())
-					return false;
-				const size_t first = textureAtlas.size();
-				textureAtlas.resize(first + pixelCount);
-				std::memcpy(textureAtlas.data() + first, state.texture.pixels,
-						pixelCount * sizeof(Color));
+				for (u32 level = 0; level < state.texture.mipLevelCount; ++level)
+				{
+					const u32 levelWidth = std::max(1u, textureWidth >> level);
+					const u32 levelHeight = std::max(1u, textureHeight >> level);
+					const size_t pixelCount = static_cast<size_t>(levelWidth) * levelHeight;
+					if (pixelCount > std::numeric_limits<u32>::max() - textureAtlas.size())
+						return false;
+					entry->second[level] = static_cast<u32>(textureAtlas.size());
+					const size_t first = textureAtlas.size();
+					textureAtlas.resize(first + pixelCount);
+					std::memcpy(textureAtlas.data() + first, state.texture.mipLevels[level],
+							pixelCount * sizeof(Color));
+				}
 			}
+			mipOffsets = entry->second;
 		}
 
 		u32 encodedState = hybrid::makeState(static_cast<u32>(state.depthMode), state.depthWrite,
@@ -634,7 +658,7 @@ private:
 			command.v[i] = vertices[i].v;
 			command.color[i] = packedColor(state.gouraud ? vertices[i].color : flatVertex.color);
 		}
-		command.textureOffset = textureOffset;
+		command.textureOffset = mipOffsets[0];
 		command.textureWidth = textureWidth;
 		command.textureHeight = textureHeight;
 		command.state = encodedState;
@@ -643,6 +667,72 @@ private:
 		command.minY = minY;
 		command.maxX = maxX;
 		command.maxY = maxY;
+		std::copy(mipOffsets.begin(), mipOffsets.end(), command.mipOffsets);
+		command.mipLevelCount = state.texture ? state.texture.mipLevelCount : 0;
+		if (command.mipLevelCount > 1)
+		{
+			const double inverseArea = 1. / static_cast<double>(std::abs(area));
+			const float barycentricDx[3] {
+				static_cast<float>(-(static_cast<s64>(y[2]) - y[1]) * 16 * inverseArea),
+				static_cast<float>(-(static_cast<s64>(y[0]) - y[2]) * 16 * inverseArea),
+				static_cast<float>(-(static_cast<s64>(y[1]) - y[0]) * 16 * inverseArea),
+			};
+			const float barycentricDy[3] {
+				static_cast<float>((static_cast<s64>(x[2]) - x[1]) * 16 * inverseArea),
+				static_cast<float>((static_cast<s64>(x[0]) - x[2]) * 16 * inverseArea),
+				static_cast<float>((static_cast<s64>(x[1]) - x[0]) * 16 * inverseArea),
+			};
+			auto step = [&](bool u, const float *barycentric) {
+				return (u ? vertices[0].u : vertices[0].v) * vertices[0].z * barycentric[0]
+						+ (u ? vertices[1].u : vertices[1].v) * vertices[1].z * barycentric[1]
+						+ (u ? vertices[2].u : vertices[2].v) * vertices[2].z * barycentric[2];
+			};
+			const float qDxHost = vertices[0].z * barycentricDx[0]
+					+ vertices[1].z * barycentricDx[1] + vertices[2].z * barycentricDx[2];
+			const float qDyHost = vertices[0].z * barycentricDy[0]
+					+ vertices[1].z * barycentricDy[1] + vertices[2].z * barycentricDy[2];
+			const float uqDxHost = step(true, barycentricDx);
+			const float uqDyHost = step(true, barycentricDy);
+			const float vqDxHost = step(false, barycentricDx);
+			const float vqDyHost = step(false, barycentricDy);
+			float referenceQ = vertices[0].z;
+			float referenceUQ = vertices[0].u * vertices[0].z;
+			float referenceVQ = vertices[0].v * vertices[0].z;
+			if (!state.dCalcCtrl)
+			{
+				const s32 sampleXFixed = minX * 16 + 8;
+				const s32 sampleYFixed = minY * 16 + 8;
+				auto edgeAt = [&](u32 a, u32 b) {
+					return (static_cast<s64>(x[b]) - x[a]) * (sampleYFixed - y[a])
+							- (static_cast<s64>(y[b]) - y[a]) * (sampleXFixed - x[a]);
+				};
+				const float q0 = static_cast<float>(edgeAt(1, 2) * inverseArea);
+				const float q1 = static_cast<float>(edgeAt(2, 0) * inverseArea);
+				const float q2 = static_cast<float>(edgeAt(0, 1) * inverseArea);
+				const float q = vertices[0].z * q0 + vertices[1].z * q1 + vertices[2].z * q2;
+				const float uq = vertices[0].u * vertices[0].z * q0
+						+ vertices[1].u * vertices[1].z * q1 + vertices[2].u * vertices[2].z * q2;
+				const float vq = vertices[0].v * vertices[0].z * q0
+						+ vertices[1].v * vertices[1].z * q1 + vertices[2].v * vertices[2].z * q2;
+				const float sampleX = sampleXFixed / 16.f - state.nativeOriginX;
+				const float sampleY = sampleYFixed / 16.f - state.nativeOriginY;
+				referenceQ = q - qDxHost * sampleX - qDyHost * sampleY;
+				referenceUQ = uq - uqDxHost * sampleX - uqDyHost * sampleY;
+				referenceVQ = vq - vqDxHost * sampleX - vqDyHost * sampleY;
+			}
+			const float dqDx = qDxHost * state.nativeToHostScaleX;
+			const float dqDy = qDyHost * state.nativeToHostScaleY;
+			const float duqDx = uqDxHost * state.nativeToHostScaleX;
+			const float duqDy = uqDyHost * state.nativeToHostScaleY;
+			const float dvqDx = vqDxHost * state.nativeToHostScaleX;
+			const float dvqDy = vqDyHost * state.nativeToHostScaleY;
+			const float dxU = (duqDx * referenceQ - dqDx * referenceUQ) * textureWidth;
+			const float dxV = (dvqDx * referenceQ - dqDx * referenceVQ) * textureHeight;
+			const float dyU = (duqDy * referenceQ - dqDy * referenceUQ) * textureWidth;
+			const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ) * textureHeight;
+			command.mipNumerator = std::sqrt(std::max(dxU * dxU + dxV * dxV,
+					dyU * dyU + dyV * dyV)) * state.mipDAdjust;
+		}
 		commands.push_back(command);
 		return true;
 	}
@@ -650,7 +740,7 @@ private:
 	bool appendHybridList(const std::vector<PolyParam>& list, u32 end,
 			bool punchThrough, bool sorting, std::vector<hybrid::Triangle>& commands,
 			std::vector<u32>& textureAtlas,
-			std::unordered_map<const Color *, u32>& textureOffsets)
+			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets)
 	{
 		end = std::min<u32>(end, list.size());
 		for (u32 i = 0; i < end; ++i)
@@ -661,8 +751,8 @@ private:
 			PipelineState state;
 			configureState(poly, state, punchThrough, sorting);
 			state.deferBlend = sorting;
-			if (!state.fpuPixelCenter || state.excludeClip || state.useOffsetColor
-					|| state.textureSuperSample || state.texture.mipLevelCount > 1
+			if (!state.fpuPixelCenter || !state.tspPixelCenter || state.excludeClip || state.useOffsetColor
+					|| state.textureSuperSample
 					|| state.trilinearFilter || state.fogMode != 2 || state.colorClamp
 					|| state.shadow || state.srcSelect || state.dstSelect || state.bumpMap
 					|| state.dither || poly.tsp1.full != static_cast<u32>(-1))
@@ -745,7 +835,7 @@ private:
 
 		std::vector<hybrid::Triangle> commands;
 		std::vector<u32> textureAtlas { 0xffffffffu };
-		std::unordered_map<const Color *, u32> textureOffsets;
+		std::unordered_map<const Color *, std::array<u32, 11>> textureOffsets;
 		if (!appendHybridList(rendContext->global_param_op, pass.op_count, false, false,
 				commands, textureAtlas, textureOffsets)
 				|| !appendHybridList(rendContext->global_param_pt, pass.pt_count, true, false,

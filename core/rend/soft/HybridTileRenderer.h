@@ -54,9 +54,12 @@ struct Triangle {
   s32 minY;
   s32 maxX;
   s32 maxY;
+  u32 mipOffsets[11];
+  u32 mipLevelCount;
+  float mipNumerator;
 };
 
-static_assert(sizeof(Triangle) == 108, "Metal command layout changed");
+static_assert(sizeof(Triangle) == 160, "Metal command layout changed");
 
 struct Frame {
   u32 width = 0;

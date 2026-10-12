@@ -43,6 +43,9 @@ struct Triangle {
     int minY;
     int maxX;
     int maxY;
+    uint mipOffsets[11];
+    uint mipLevelCount;
+    float mipNumerator;
 };
 
 struct Constants {
@@ -155,32 +158,43 @@ inline uint wrapTexel(int coordinate, uint size, bool clampAxis, bool flipAxis)
     return wrapped < size ? wrapped : periodMask - wrapped;
 }
 
-inline uint sampleTexture(const device uint *texture, const Triangle t, float2 uv)
+inline uint sampleTexture(const device uint *texture, const Triangle t, float2 uv,
+        float pvrD)
 {
     const bool clampU = (t.state & (1u << 6)) != 0;
     const bool clampV = (t.state & (1u << 7)) != 0;
     const bool flipU = (t.state & (1u << 8)) != 0;
     const bool flipV = (t.state & (1u << 9)) != 0;
+    uint width = t.textureWidth;
+    uint height = t.textureHeight;
+    uint textureOffset = t.textureOffset;
+    if (t.mipLevelCount > 1) {
+        const float selected = max(0.0f, floor(max(pvrD, 1.0f)) - 1.0f);
+        const uint level = min(t.mipLevelCount - 1, uint(selected));
+        width = max(1u, width >> level);
+        height = max(1u, height >> level);
+        textureOffset = t.mipOffsets[level];
+    }
     uv.x = wrapCoordinate(uv.x, clampU, flipU);
     uv.y = wrapCoordinate(uv.y, clampV, flipV);
     const float adjustment = (t.state & (1u << 10)) != 0 ? .5f : 0.0f;
-    const float2 texel = uv * float2(t.textureWidth, t.textureHeight) - adjustment;
+    const float2 texel = uv * float2(width, height) - adjustment;
     const int2 base = int2(floor(texel));
     if ((t.state & (1u << 5)) == 0) {
         const int2 nearest = int2(floor(texel + .5f));
-        const uint x = wrapTexel(nearest.x, t.textureWidth, clampU, flipU);
-        const uint y = wrapTexel(nearest.y, t.textureHeight, clampV, flipV);
-        return texture[t.textureOffset + y * t.textureWidth + x];
+        const uint x = wrapTexel(nearest.x, width, clampU, flipU);
+        const uint y = wrapTexel(nearest.y, height, clampV, flipV);
+        return texture[textureOffset + y * width + x];
     }
-    const uint x0 = wrapTexel(base.x, t.textureWidth, clampU, flipU);
-    const uint x1 = wrapTexel(base.x + 1, t.textureWidth, clampU, flipU);
-    const uint y0 = wrapTexel(base.y, t.textureHeight, clampV, flipV);
-    const uint y1 = wrapTexel(base.y + 1, t.textureHeight, clampV, flipV);
+    const uint x0 = wrapTexel(base.x, width, clampU, flipU);
+    const uint x1 = wrapTexel(base.x + 1, width, clampU, flipU);
+    const uint y0 = wrapTexel(base.y, height, clampV, flipV);
+    const uint y1 = wrapTexel(base.y + 1, height, clampV, flipV);
     const uint samples[4] = {
-        texture[t.textureOffset + y0 * t.textureWidth + x0],
-        texture[t.textureOffset + y0 * t.textureWidth + x1],
-        texture[t.textureOffset + y1 * t.textureWidth + x0],
-        texture[t.textureOffset + y1 * t.textureWidth + x1],
+        texture[textureOffset + y0 * width + x0],
+        texture[textureOffset + y0 * width + x1],
+        texture[textureOffset + y1 * width + x0],
+        texture[textureOffset + y1 * width + x1],
     };
     const float2 fraction = texel - float2(base);
     float4 result;
@@ -280,7 +294,9 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                     + t.u[2] * t.z[2] * s2) * inverseZ;
             const float v = (t.v[0] * t.z[0] * s0 + t.v[1] * t.z[1] * s1
                     + t.v[2] * t.z[2] * s2) * inverseZ;
-            uint texel = sampleTexture(texture, t, float2(u, v));
+            const float pvrD = t.mipLevelCount > 1
+                    ? max(0.0f, z == 0.0f ? 0.0f : t.mipNumerator / (z * z)) : 1.0f;
+            uint texel = sampleTexture(texture, t, float2(u, v), pvrD);
             if ((t.state & (1u << 12)) != 0)
                 texel |= 0xff000000u;
             source = applyTexture(source, texel, (t.state >> 14) & 3);
@@ -418,13 +434,18 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     if ((triangle.state & Textured) != 0) {
       if (triangle.textureWidth == 0 || triangle.textureHeight == 0 ||
           (triangle.textureWidth & (triangle.textureWidth - 1)) != 0 ||
-          (triangle.textureHeight & (triangle.textureHeight - 1)) != 0)
+          (triangle.textureHeight & (triangle.textureHeight - 1)) != 0 ||
+          triangle.mipLevelCount == 0 || triangle.mipLevelCount > 11 ||
+          !std::isfinite(triangle.mipNumerator) || triangle.mipNumerator < 0.f)
         return false;
-      const size_t textureEnd =
-          static_cast<size_t>(triangle.textureOffset) +
-          static_cast<size_t>(triangle.textureWidth) * triangle.textureHeight;
-      if (textureEnd > frame.texture->size())
-        return false;
+      for (u32 level = 0; level < triangle.mipLevelCount; ++level) {
+        const size_t width = std::max<size_t>(1, triangle.textureWidth >> level);
+        const size_t height = std::max<size_t>(1, triangle.textureHeight >> level);
+        const size_t textureEnd =
+            static_cast<size_t>(triangle.mipOffsets[level]) + width * height;
+        if (textureEnd > frame.texture->size())
+          return false;
+      }
     }
     for (s32 y = triangle.minY / static_cast<s32>(TileSize);
          y <= triangle.maxY / static_cast<s32>(TileSize); ++y)

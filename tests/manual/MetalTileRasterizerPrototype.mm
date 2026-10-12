@@ -138,9 +138,13 @@ u32 modulate(u32 base, u32 texel) {
 }
 
 Triangle testTriangle(u32 color, float z, u32 state) {
-  return {{0, 32, 0}, {0, 0, 32}, {z, z, z}, {},    {}, {color, color, color},
-          0,          0,          0,         state, 0,  0,
-          0,          0,          0};
+  Triangle triangle{{0, 32, 0}, {0, 0, 32}, {z, z, z}, {},    {},
+                    {color, color, color},
+                    0,             0,          0,         state, 0, 0,
+                    0,             0,          0};
+  if ((state & rend::soft::hybrid::Textured) != 0)
+    triangle.mipLevelCount = 1;
+  return triangle;
 }
 
 void rasterizeReference(const std::vector<Triangle> &triangles,
@@ -225,6 +229,7 @@ int main() {
          inset,
          static_cast<s32>(Width) - 1 - inset,
          static_cast<s32>(Height) - 1 - inset});
+    triangles.back().mipLevelCount = 1;
   }
   std::vector<u32> expectedColors(Width * Height), actualColors;
   std::vector<float> expectedDepths(Width * Height), actualDepths;
@@ -310,6 +315,28 @@ int main() {
     const rend::soft::hybrid::Frame test{1, 1, &commands, &atlas};
     if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
         actualColors[0] != (index == 0 ? 0xff0000ffu : 0xff00ff00u))
+      return 1;
+  }
+
+  {
+    const std::vector<u32> mipAtlas(21);
+    std::vector<u32> levels = mipAtlas;
+    std::fill(levels.begin(), levels.begin() + 16, 0xff0000ffu);
+    std::fill(levels.begin() + 16, levels.begin() + 20, 0xff00ff00u);
+    levels[20] = 0xffff0000u;
+    Triangle command = testTriangle(
+        0xffffffffu, .5f,
+        rend::soft::hybrid::makeState(7, false, true, false, true, 0, 1, 0));
+    command.textureWidth = command.textureHeight = 4;
+    command.mipOffsets[0] = 0;
+    command.mipOffsets[1] = 16;
+    command.mipOffsets[2] = 20;
+    command.mipLevelCount = 3;
+    command.mipNumerator = .75f;
+    std::vector<Triangle> commands{command};
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &levels};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xffff0000u)
       return 1;
   }
 
