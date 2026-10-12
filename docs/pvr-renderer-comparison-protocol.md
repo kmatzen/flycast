@@ -1033,3 +1033,18 @@ and Flycast accepts ELF content directly. This source inspection identifies
 the intended transport; successful receipt of the complete probe record
 still needs runtime verification. Emulator output must remain labeled as
 emulator evidence, never hardware ground truth.
+
+The SDK kernel library and RTT probe subsequently linked successfully with
+the installed pass-1 compiler and completed newlib. `file` identifies the
+probe as a statically linked 32-bit little-endian Renesas SH ELF. The full
+SDK make returned exit 2 because its unrelated host `dcbumpgen` utility
+could not link PNG symbols; this did not prevent `libkallisti.a` or the
+probe ELF from being built. GCC pass 2 continues separately.
+
+An initial software-renderer run with null audio, single-thread rendering,
+and the SCIF console enabled successfully emitted the KallistiOS banner,
+including pinned revision `568c340`. This confirms ELF boot and the serial
+output transport. At the first observation it had not emitted any
+`PVR_RTT_` records, so no RTT rendering result is claimed. The run log is
+`/tmp/pvr-kos-probe.V8emEs/software-run.log`; initialization and probe
+completion still require investigation.
