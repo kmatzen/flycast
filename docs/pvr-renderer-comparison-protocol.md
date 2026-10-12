@@ -1200,3 +1200,22 @@ Same-frame Metal/software verification reports zero differences across
 307,200 color pixels and all 8,388,608 VRAM bytes for rtt=1. Four parser tests
 pass. Modes 0 and 3 are selectable but have not yet been executed; neither
 format selection nor matching emulators establishes hardware conformance.
+
+Modes 0 and 3 have now also executed through same-frame Metal/software
+verification. `rtt-0555-verified.log` contains 576 words `0x573d` and 448
+black `0x0000` words; allocation SHA-256 is
+`6b279b68578fa31e9cbfa9b0bc5ce2f4de8d467e78082afd9b5e4d88c1d068d0`.
+`rtt-1555-verified.log` contains 576 words `0xd73d` and 448 background
+`0x8000` words; allocation SHA-256 is
+`0b8f083bfa8444ae07eb937024557d52758ad974e35c5b5ff74af711a1f0c259`.
+Both have unchanged prefix/suffix guards and row padding, expected register
+configuration, and zero interior-sample differences. Each verifier reports
+zero differences across 307,200 color pixels and 8,388,608 VRAM bytes with
+rtt=1. Thus all four documented 16-bit formats have an executed probe case,
+but only for this opaque, undithered quad with K=0 and threshold=0. General
+alpha/K/dither behavior and original-hardware agreement remain unverified.
+
+After these runs, the full focused renderer suite passes all 135 tests on
+native ARM64 and x86-64 under Rosetta. Logs are `renderer-tests-native.log`
+and `renderer-tests-x86.log` in the isolated probe directory. This is a
+regression check of the current model, not an expanded hardware claim.
