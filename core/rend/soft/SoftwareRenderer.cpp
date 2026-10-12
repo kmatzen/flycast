@@ -33,6 +33,7 @@ extern "C" int32_t CGLTexImageIOSurface2D(CGLContextObj, GLenum, GLenum,
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
@@ -40,6 +41,27 @@ extern "C" int32_t CGLTexImageIOSurface2D(CGLContextObj, GLenum, GLenum,
 
 namespace rend::soft {
 namespace {
+
+bool writeVerificationPpm(const std::filesystem::path& path,
+		const std::vector<Color>& pixels, u32 width, u32 height)
+{
+	if (pixels.size() != static_cast<size_t>(width) * height)
+		return false;
+	FILE *file = std::fopen(path.string().c_str(), "wb");
+	if (file == nullptr)
+		return false;
+	std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+	for (const Color& color : pixels)
+	{
+		const u8 rgb[] { color.r, color.g, color.b };
+		if (std::fwrite(rgb, sizeof(rgb), 1, file) != 1)
+		{
+			std::fclose(file);
+			return false;
+		}
+	}
+	return std::fclose(file) == 0;
+}
 
 class SoftwareTexture final : public BaseTextureCacheData
 {
@@ -475,6 +497,42 @@ public:
 				mismatches += packedColor(frameStore[i]) != packedColor(hybridVerification[i]);
 			std::fprintf(stderr, "HYBRID verify pixels=%zu mismatches=%zu\n",
 					frameStore.size(), mismatches);
+			if (const char *captureDirectory =
+					std::getenv("FLYCAST_HYBRID_CAPTURE_DIR"))
+			{
+				static u64 verifiedFrame = 0;
+				static bool captured = false;
+				const u64 captureFrame = std::max<u64>(1, std::strtoull(
+						std::getenv("FLYCAST_HYBRID_CAPTURE_FRAME") != nullptr
+								? std::getenv("FLYCAST_HYBRID_CAPTURE_FRAME") : "1",
+						nullptr, 10));
+				if (!captured && ++verifiedFrame >= captureFrame)
+				{
+					std::error_code error;
+					const std::filesystem::path directory(captureDirectory);
+					std::filesystem::create_directories(directory, error);
+					std::vector<Color> difference(frameStore.size());
+					for (size_t i = 0; i < difference.size(); ++i)
+						difference[i] = {
+								static_cast<u8>(std::abs(static_cast<int>(frameStore[i].r)
+										- hybridVerification[i].r)),
+								static_cast<u8>(std::abs(static_cast<int>(frameStore[i].g)
+										- hybridVerification[i].g)),
+								static_cast<u8>(std::abs(static_cast<int>(frameStore[i].b)
+										- hybridVerification[i].b)), 255 };
+					captured = !error
+							&& writeVerificationPpm(directory / "software-oracle.ppm",
+									frameStore, width, height)
+							&& writeVerificationPpm(directory / "metal-hybrid.ppm",
+									hybridVerification, width, height)
+							&& writeVerificationPpm(directory / "absolute-difference.ppm",
+									difference, width, height);
+					std::fprintf(stderr,
+							"HYBRID capture frame=%llu directory=%s success=%u\n",
+							static_cast<unsigned long long>(verifiedFrame),
+							captureDirectory, captured);
+				}
+			}
 		}
 		if (rendContext->isRTT)
 		{

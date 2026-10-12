@@ -6,6 +6,13 @@
 
 namespace rend::soft::hybrid {
 
+// This interface has a no-op portable implementation, but the accelerated
+// backend is currently implemented only for Apple platforms with Metal. Its
+// direct presentation path additionally depends on macOS IOSurface/OpenGL
+// interoperability. Keep the CPU SoftwareRasterizer as the portable oracle;
+// adding Vulkan, D3D, or other GPU backends requires a separate implementation
+// of this contract and its differential tests.
+
 enum StateBits : u32 {
   DepthModeMask = 7,
   DepthWrite = 1 << 3,
