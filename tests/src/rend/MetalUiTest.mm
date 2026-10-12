@@ -138,6 +138,10 @@ TEST(MetalUi, OffscreenCompositionSurvivesResizeAndBackendRecreation)
         ASSERT_NE(device, nil);
         id<MTLCommandQueue> queue = [device newCommandQueue];
         ASSERT_NE(queue, nil);
+        NSError *pipelineError = nil;
+        id<MTLRenderPipelineState> backgroundPipeline = rend::soft::createMetalPresentationPipeline(
+            device, MTLPixelFormatRGBA8Unorm, &pipelineError);
+        ASSERT_NE(backgroundPipeline, nil);
         for (int generation = 0; generation < 2; ++generation) {
             IMGUI_CHECKVERSION();
             ImGui::CreateContext();
@@ -157,7 +161,7 @@ TEST(MetalUi, OffscreenCompositionSurvivesResizeAndBackendRecreation)
                 pass.colorAttachments[0].storeAction = MTLStoreActionStore;
                 pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
                 auto frame = rend::soft::PresentationFrame::create(size, size, 1.f, {},
-                    std::vector<rend::soft::Color>(size * size, {0, 0, 255, 255}));
+                    std::vector<rend::soft::Color>(size * size, {0, 0, 255, 0}));
                 ASSERT_TRUE(frame);
                 id<MTLTexture> background = rend::soft::uploadMetalPresentationFrame(device, *frame);
                 ASSERT_NE(background, nil);
@@ -165,15 +169,14 @@ TEST(MetalUi, OffscreenCompositionSurvivesResizeAndBackendRecreation)
                 ImGui::GetIO().DeltaTime = 1.f / 60.f;
                 ImGui_ImplMetal_NewFrame(pass);
                 ImGui::NewFrame();
-                ImGui::GetBackgroundDrawList()->AddImage(
-                    ImTextureRef((ImTextureID)(uintptr_t)(__bridge void*)background),
-                    ImVec2(0, 0), ImVec2(size, size));
                 ImGui::GetForegroundDrawList()->AddRectFilled(ImVec2(8, 8), ImVec2(24, 24), IM_COL32(255, 0, 0, 255));
                 ImGui::GetForegroundDrawList()->AddText(ImVec2(2, 32), IM_COL32_WHITE, "PVR UI");
                 ImGui::Render();
                 ASSERT_GT(ImGui::GetDrawData()->TotalVtxCount, 0);
                 id<MTLCommandBuffer> command = [queue commandBuffer];
                 id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+                ASSERT_TRUE(rend::soft::encodeMetalPresentation(encoder, backgroundPipeline, background,
+                    MTLViewport{0, 0, double(size), double(size), 0, 1}));
                 ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), command, encoder);
                 [encoder endEncoding];
                 [command commit];
@@ -189,6 +192,7 @@ TEST(MetalUi, OffscreenCompositionSurvivesResizeAndBackendRecreation)
                 EXPECT_EQ(pixels[0], 0);
                 EXPECT_EQ(pixels[1], 0);
                 EXPECT_EQ(pixels[2], 255);
+                EXPECT_EQ(pixels[3], 255); // Framebuffer alpha cannot expose the green clear.
                 size_t textPixels = 0;
                 for (int y = 32; y < size; ++y)
                     for (int x = 0; x < size; ++x) {

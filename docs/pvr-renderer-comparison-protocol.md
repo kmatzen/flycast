@@ -2401,3 +2401,13 @@ for every pixel. All five tests pass on ARM64 with Metal validation and under
 Rosetta (`/tmp/pvr-metal-alpha-native.log` and
 `/tmp/pvr-metal-alpha-rosetta.log`). This checks presentation parity, not an
 additional claim about PVR hardware alpha behavior.
+
+The composition regression now draws the uploaded framebuffer through the
+shared native presentation pipeline, then ImGui through its own pipeline in
+the same render encoder. It no longer substitutes an ImGui background image
+for the presentation shader. A zero-alpha blue framebuffer must remain opaque,
+hide the green render-pass clear, and retain the red overlay and font pixels
+after target resizing and backend recreation. All five tests pass on ARM64
+with Metal validation and under Rosetta: `/tmp/pvr-metal-composed-native.log`
+and `/tmp/pvr-metal-composed-rosetta.log`. This checks pipeline-state handoff
+and composition offscreen; it does not extend the native-window delivery claims.
