@@ -54,7 +54,12 @@ path. Later measurements retained after coverage/depth correctness fixes show:
 | Opaque visibility overhead | 9.725 ms | 5.860 ms | Meets in this sample |
 
 These are the recorded benchmark samples, not newly rerun measurements for
-every subsequent commit. Native presentation has delivered all synthetic frame
+every subsequent commit. A later 12-run measurement of the current renderer
+test binary passed the p95 gates in every run: small-triangle wall p95 ranged
+12.077–14.838 ms and six-layer wall p95 8.059–9.912 ms. A small-triangle maximum
+still reached 17.562 ms. No rasterization algorithm change was made for this
+remeasurement; it must not be presented as a measured optimization gain over
+the historical failure. Native presentation has delivered all synthetic frame
 IDs in some runs but lost frames in others; producer/selection traces locate
 observed losses in the latest-only handoff. An opt-in distinct-image queue has
 not yet shown a clear practical improvement. Approximately 16.67 ms median

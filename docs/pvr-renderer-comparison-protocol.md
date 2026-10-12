@@ -2797,3 +2797,28 @@ The run still has seven measured gaps over 20 ms (maximum 33.332 ms) and uses
 null audio plus verification, so it is not a performance pass. The uniform
 probe frames validate integration, while the offscreen tests establish the
 scaling/filtering behavior; neither is a hardware PVR conformance result.
+
+### Repeated isolated renderer gates after native integration
+
+Twelve serial executions of `HybridTileRenderer.Benchmarks*` with
+`FLYCAST_HYBRID_ENFORCE_60HZ=1` passed all three tests per execution, including
+the tests' color/depth comparisons. Test binary SHA-256 before and after:
+`700c4226b5859ce54c7b2ed9d53a3a6776e0dd2b45daf992d34943dbba8da53f`.
+Full logs and GoogleTest properties are `/tmp/pvr-current-gates-{1..12}.log`
+and `/tmp/pvr-current-gates-{1..12}.xml`.
+
+| Workload | Range of per-run wall p95 | Range of GPU p95 |
+| --- | --- | --- |
+| Opaque visibility | 6.033–8.558 ms | 4.869–5.627 ms |
+| Small triangles | 12.077–14.838 ms | 8.491–10.635 ms |
+| Six-layer fill | 8.059–9.912 ms | 4.442–5.018 ms |
+
+Small-triangle and six-layer statistics each use 20 timed samples per run.
+The largest recorded individual frame was 17.562 ms for small triangles and
+10.866 ms for six-layer fill. Passing p95 therefore does not mean every frame
+met 16.67 ms. The separate 72-layer stress workload is not the six-layer gate.
+No rasterization algorithm changed for this remeasurement. The difference
+from the earlier 17.135 ms small-triangle p95 failure cannot be credited to a
+specific optimization without controlled attribution. These renderer-boundary
+tests exclude the full emulator, audio scheduling, and window presentation;
+they do not supersede the observed missing-frame/long-gap evidence.
