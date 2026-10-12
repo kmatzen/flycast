@@ -31,20 +31,7 @@ static int runProbe(bool paced, bool acknowledged, bool startupOnly)
         layer.maximumDrawableCount = 3;
         id<MTLCommandQueue> queue = [device newCommandQueue];
         NSError *error = nil;
-        NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct V { float4 p [[position]]; float2 uv; };\n"
-            "vertex V vert(uint i [[vertex_id]]) {\n"
-            "float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};\n"
-            "V v; v.p=float4(p[i],0,1); v.uv=float2((p[i].x+1)*.5,(1-p[i].y)*.5); return v; }\n"
-            "fragment float4 frag(V v [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
-            "constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
-            "return t.sample(s,v.uv); }";
-        id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
-        MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
-        descriptor.vertexFunction = [library newFunctionWithName:@"vert"];
-        descriptor.fragmentFunction = [library newFunctionWithName:@"frag"];
-        descriptor.colorAttachments[0].pixelFormat = layer.pixelFormat;
-        id<MTLRenderPipelineState> pipeline = library ? [device newRenderPipelineStateWithDescriptor:descriptor error:&error] : nil;
+        id<MTLRenderPipelineState> pipeline = rend::soft::createMetalPresentationPipeline(device, layer.pixelFormat, &error);
         if (!pipeline || !queue) {
             std::fprintf(stderr, "METAL_WINDOW init_failed %s\n", error.description.UTF8String);
             SDL_Metal_DestroyView(view); SDL_DestroyWindow(window); SDL_Quit(); return 4;
@@ -81,10 +68,10 @@ static int runProbe(bool paced, bool acknowledged, bool startupOnly)
                 pass.colorAttachments[0].storeAction = MTLStoreActionStore;
                 id<MTLCommandBuffer> command = [queue commandBuffer];
                 id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-                [encoder setRenderPipelineState:pipeline];
-                [encoder setFragmentTexture:texture atIndex:0];
-                [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                const bool encoded = rend::soft::encodeMetalPresentation(encoder, pipeline, texture,
+                    MTLViewport{0, 0, double(width), double(height), 0, 1});
                 [encoder endEncoding];
+                if (!encoded) { failed = true; break; }
                 if (paced)
                     [command presentDrawable:drawable afterMinimumDuration:1.0 / 60.0];
                 else

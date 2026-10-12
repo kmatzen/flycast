@@ -2365,3 +2365,29 @@ performance. It supports testing startup readiness in the live presenter;
 frame ownership, UI composition, audio, and emulator pacing still require
 integrated verification. The comparison's overall gate remains failed because
 its immediate controls lose images.
+
+### Shared Metal framebuffer drawing component
+
+The probe now uses `createMetalPresentationPipeline` and
+`encodeMetalPresentation` from `MetalPresentationFrame.mm`, rather than a
+private shader copy. The encoder takes a caller-owned render pass and viewport;
+it leaves clearing, overlays, command submission, and drawable ownership to
+the frontend. It currently supports nearest sampling and unrotated images.
+Five offscreen tests pass on ARM64 with Metal validation and under Rosetta,
+including exact RGBA/BGRA render-target readbacks, a 2x2 asymmetric image
+scaled into an offset viewport, correct row orientation, and untouched border
+pixels. Logs: `/tmp/pvr-metal-shared-native.log` and
+`/tmp/pvr-metal-shared-rosetta.log`.
+
+The repeated native-window comparison in
+`/tmp/pvr-metal-shared-window-20261012/report.json` weakens the earlier startup
+readiness result: the first startup-ready run delivered all 660 IDs, but the
+second lost ID 1 even after ID 0 was acknowledged. That second run had a
+roughly 100 ms interval from ID 0 to ID 2, and a roughly 33.3 ms interval from
+ID 261 to ID 262. The immediate controls lost four IDs and zero IDs,
+respectively, demonstrating run-to-run variability. A single successful
+presentation must not be treated as a reliable readiness guarantee.
+Unchanged executable SHA-256:
+`ca0e47ad5a1d562301c4c0f77757559f9dea2e504c4a48c6e262265f27d0aa07`.
+The reusable component is still built only by the isolated tests/probe;
+native emulator window integration and reliable delivery remain unfinished.

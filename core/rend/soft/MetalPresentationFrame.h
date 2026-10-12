@@ -9,5 +9,12 @@ namespace rend::soft {
 // texture is independent: later uploads cannot mutate an in-flight image.
 // The caller retains it until its rendering command buffer completes.
 id<MTLTexture> uploadMetalPresentationFrame(id<MTLDevice> device, const PresentationFrame& frame);
+id<MTLRenderPipelineState> createMetalPresentationPipeline(id<MTLDevice> device,
+    MTLPixelFormat outputFormat, NSError **error);
+// Encodes a nearest-sampled, unrotated display image into an existing pass.
+// The caller owns pass clearing, viewport/layout, overlays, submission, and
+// resource lifetime. This function neither ends the pass nor presents it.
+bool encodeMetalPresentation(id<MTLRenderCommandEncoder> encoder,
+    id<MTLRenderPipelineState> pipeline, id<MTLTexture> texture, MTLViewport viewport);
 }
 #endif

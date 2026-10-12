@@ -31,6 +31,56 @@ TEST(MetalUi, AllocationFailureReturnsNoTexture)
     }
 }
 
+TEST(MetalUi, PresentationPipelinePreservesOrientationChannelsAndViewport)
+{
+    @autoreleasepool {
+        using namespace rend::soft;
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        ASSERT_NE(device, nil);
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        const std::vector<Color> source {{13, 27, 43, 255}, {61, 79, 97, 255},
+            {113, 131, 149, 255}, {167, 181, 199, 255}};
+        auto frame = PresentationFrame::create(2, 2, 1.f, {}, source);
+        id<MTLTexture> texture = uploadMetalPresentationFrame(device, *frame);
+        ASSERT_NE(texture, nil);
+        for (MTLPixelFormat format : {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm}) {
+            NSError *error = nil;
+            id<MTLRenderPipelineState> pipeline = createMetalPresentationPipeline(device, format, &error);
+            ASSERT_NE(pipeline, nil);
+            MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                width:6 height:6 mipmapped:NO];
+            descriptor.usage = MTLTextureUsageRenderTarget;
+            descriptor.storageMode = MTLStorageModeShared;
+            id<MTLTexture> target = [device newTextureWithDescriptor:descriptor];
+            ASSERT_NE(target, nil);
+            MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = target;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+            EXPECT_FALSE(encodeMetalPresentation(encoder, pipeline, texture, MTLViewport{0, 0, 0, 1, 0, 1}));
+            EXPECT_TRUE(encodeMetalPresentation(encoder, pipeline, texture, MTLViewport{1, 1, 4, 4, 0, 1}));
+            [encoder endEncoding];
+            [command commit];
+            [command waitUntilCompleted];
+            ASSERT_EQ(command.status, MTLCommandBufferStatusCompleted);
+            std::vector<Color> pixels(36);
+            [target getBytes:pixels.data() bytesPerRow:6 * sizeof(Color)
+                fromRegion:MTLRegionMake2D(0, 0, 6, 6) mipmapLevel:0];
+            for (unsigned y = 0; y < 6; ++y)
+                for (unsigned x = 0; x < 6; ++x) {
+                    Color actual = pixels[y * 6 + x];
+                    if (format == MTLPixelFormatBGRA8Unorm) std::swap(actual.r, actual.b);
+                    const Color expected = x >= 1 && x < 5 && y >= 1 && y < 5
+                        ? source[((y - 1) / 2) * 2 + (x - 1) / 2] : Color{0, 0, 0, 255};
+                    EXPECT_EQ(actual, expected) << "at " << x << ',' << y;
+                }
+        }
+    }
+}
+
 TEST(MetalUi, RejectsOversizedUploadsBeforeCallingMetal)
 {
     @autoreleasepool {
