@@ -172,6 +172,29 @@ stage ordering from fractional precision or spatial phase within dithering,
 nor explain the residual 50 words. Hardware correctness remains a separate
 question from agreement between backends.
 
+### Reproducing the pixel analysis
+
+`tools/compare-pvr-vram.mjs` compares physical 8 MiB VRAM files using the
+Dreamcast bank mapping and an explicit RGB565 framebuffer layout. It reports
+whole-file SHA-256 hashes, physical byte differences, framebuffer pixel
+differences, native channel errors, affected rows, 4×4 phase counts, and up
+to 64 differing pixel coordinates. It rejects unsupported sizes, odd alignment,
+and framebuffer layouts that wrap VRAM. It does not rescale or filter pixels.
+
+For the frame-4 captures:
+
+```sh
+node tools/compare-pvr-vram.mjs \
+  /tmp/pvr-frame4.NgB49X/gl.rendered.vram \
+  /tmp/pvr-frame4.NgB49X/sw.rendered.vram 0x200000 1280 640 480
+```
+
+The tool reproduces 1,732 differing framebuffer pixels for normal rendering
+and 50 for the no-dither experiment. The latter occupy 15 of 16 pixel phases,
+at rows 111 through 382; they are not confined to one dither-table position.
+This spatial observation does not yet isolate sampling or interpolation as
+the cause. JSON reports are saved beside both capture sets as `comparison.json`.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
