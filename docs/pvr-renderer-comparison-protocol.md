@@ -1314,3 +1314,17 @@ all-games performance claim.
 All seven production RTT probe cases also pass with 16x16 work bins,
 including full-VRAM hybrid/software verification. Preserved artifacts and
 ELF hashes are in `/tmp/pvr-rtt-bin16-20261012/report.json`.
+
+Small-triangle timing now separately records CPU preparation, submission
+wait, readback, and path-selection counters. A 16x16-bin repeat records
+wall p95 17.57 ms, encode p95 4.63 ms, submit/wait p95 13.26 ms, device p95
+11.97 ms, and readback p95 0.15 ms. It uses ordered autosort but zero
+hardware-visibility bins. Quantiles describe separate distributions and
+must not be summed into a purported measured frame time.
+
+A controlled 8x8-bin experiment preserved benchmark output but regressed
+wall p95 to 19.61 ms, with encode p95 7.45 ms and GPU p95 11.61 ms. The
+six-layer wall p95 also regressed to 22.15 ms, failing its gate. Results
+are `/tmp/pvr-bin8.xml`. The 8x8 change was rejected and both CPU/Metal bin
+sizes restored to 16. The timing breakdown remains to guide further work;
+the experiment does not justify relaxing correctness or frame-budget gates.

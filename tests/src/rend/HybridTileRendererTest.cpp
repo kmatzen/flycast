@@ -2051,17 +2051,23 @@ TEST(HybridTileRenderer, BenchmarksDocumentedSmallTriangleMix)
 	expectEqual(reference, colors, depths);
 	const auto expectedColors = colors;
 	const auto expectedDepths = depths;
-	std::array<double, 20> wall, gpu;
+	std::array<double, 20> wall, gpu, encode, wait, readback;
 	for (size_t i = 0; i < wall.size(); ++i) {
 		const auto start = std::chrono::steady_clock::now();
 		ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
 		wall[i] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		gpu[i] = timing.gpuExecutionMilliseconds;
+		encode[i] = timing.encodeMilliseconds;
+		wait[i] = timing.gpuMilliseconds;
+		readback[i] = timing.readbackMilliseconds;
 		ASSERT_EQ(colors, expectedColors);
 		ASSERT_EQ(depths, expectedDepths);
 	}
 	std::sort(wall.begin(), wall.end());
 	std::sort(gpu.begin(), gpu.end());
+	std::sort(encode.begin(), encode.end());
+	std::sort(wait.begin(), wait.end());
+	std::sort(readback.begin(), readback.end());
 	RecordProperty("triangles_per_frame", count);
 	RecordProperty("opaque_triangles", opaqueCount);
 	RecordProperty("translucent_triangles", count - opaqueCount);
@@ -2069,6 +2075,12 @@ TEST(HybridTileRenderer, BenchmarksDocumentedSmallTriangleMix)
 	RecordProperty("render_p95_ms", wall[18]);
 	RecordProperty("render_max_ms", wall.back());
 	RecordProperty("gpu_p95_ms", gpu[18]);
+	RecordProperty("encode_p95_ms", encode[18]);
+	RecordProperty("submit_wait_p95_ms", wait[18]);
+	RecordProperty("readback_p95_ms", readback[18]);
+	RecordProperty("hardware_visibility_tiles", timing.hardwareVisibilityTiles);
+	RecordProperty("total_work_bins", timing.totalTiles);
+	RecordProperty("ordered_autosort", timing.orderedAutosortFrames);
 	if (std::getenv("FLYCAST_HYBRID_ENFORCE_60HZ") != nullptr) {
 		EXPECT_LE(wall[18], 1000. / 60.);
 		EXPECT_LE(gpu[18], 1000. / 60.);
