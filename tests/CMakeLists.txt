@@ -34,6 +34,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         src/input/SDLControllerMappingTest.cpp
         src/oslib/I18nTest.cpp
         src/rend/SoftwareRasterizerTest.cpp
+        src/rend/PresentationFrameTest.cpp
         src/rend/HybridTileRendererTest.cpp
         src/rend/TextureDecodeTest.cpp
         src/util/PeriodicThreadTest.cpp
@@ -44,6 +45,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 # fast oracle/differential target without linking the emulator or its frontends.
 add_executable(flycast-renderer-tests EXCLUDE_FROM_ALL
         src/rend/SoftwareRasterizerTest.cpp
+        src/rend/PresentationFrameTest.cpp
         src/rend/HybridTileRendererTest.cpp
         src/rend/TextureDecodeTest.cpp
         ../core/rend/texconv.cpp

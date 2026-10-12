@@ -1841,3 +1841,39 @@ the change. The process stopped normally, the temporary flag and `glFlush`
 were removed, and the normal app was rebuilt. No production code from this
 experiment remains. It rules out this particular early-submission approach,
 not all possible presentation scheduling improvements.
+
+### Owned framebuffer display images
+
+The software renderer now retains framebuffer-read output in an owned,
+immutable `PresentationFrame` instead of using a `SoftwareRasterizer` as a
+display buffer. The packet owns converted RGBA pixels, dimensions, aspect
+ratio, and the captured framebuffer border color. Display and screenshot
+consumers retain the packet locally. A later render or producer replacement
+cannot mutate its storage, and a borrowed raw Metal surface cannot override
+it. Blank-video packets contain the captured border color. Framebuffer reads,
+VRAM writes, and render-completion synchronization are unchanged.
+
+This also fixes a metadata mismatch: the GL letterbox clear previously read
+live `VO_BORDER_COL`, even though `RenderFramebuffer` receives latched border
+state. Framebuffer presentation now uses that captured color. Non-framebuffer
+direct presentation is unchanged. Host rotation/filter preferences still use
+the existing UI settings.
+
+`PresentationFrame` tests retain an older consumer image while changing the
+source pixels, metadata, dimensions, and producer reference. Invalid sizes
+and nonfinite/nonpositive aspect ratios are rejected without multiplication
+overflow. All 144 renderer tests pass on native ARM64 and Rosetta in
+`/tmp/pvr-owned-display-{native,rosetta}.log`. The rebuilt application compares
+229 Seaman color buffers and 229 full-VRAM snapshots with zero mismatches in
+`/tmp/pvr-owned-display-seaman.log`; this is boot/idle differential evidence,
+not display timing or hardware conformance evidence.
+All twenty RTT probe cases pass their stated checks in
+`/tmp/pvr-rtt-owned-display-20261012/report.json`; the six dither cases remain
+differential-only, not independently validated hardware results.
+
+This is a prerequisite for separating display and rendering, not that
+separation itself. The shared pointer is currently accessed by the existing
+consumer thread; cross-thread publication still needs synchronization. The
+threaded framebuffer-read/VRAM ordering concern is not resolved by owning the
+output after the read, nor are borrowed GPU surfaces made immutable by this
+change. No performance improvement or tear-free scheduling is claimed.

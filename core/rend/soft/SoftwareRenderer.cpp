@@ -2,6 +2,7 @@
 
 #include "HybridTileRenderer.h"
 #include "SoftwareRasterizer.h"
+#include "PresentationFrame.h"
 #include "cfg/option.h"
 #include "hw/pvr/Renderer_if.h"
 #include "hw/pvr/ta.h"
@@ -184,7 +185,7 @@ public:
 #endif
 		textureCache.Clear();
 		screenRasterizer.reset();
-		framebufferRasterizer.reset();
+		framebufferPresentation.reset();
 		rttRasterizer.reset();
 		displayRasterizer = nullptr;
 		rasterizer = nullptr;
@@ -229,7 +230,11 @@ public:
 			targetRasterizer = std::make_unique<SoftwareRasterizer>(width, height);
 		rasterizer = targetRasterizer.get();
 		if (!rendContext->isRTT)
+		{
 			displayRasterizer = rasterizer;
+			if (!config::EmulateFramebuffer)
+				framebufferPresentation.reset();
+		}
 		std::vector<Color> previousFrameStore;
 		if (!rendContext->isRTT)
 		{
@@ -600,40 +605,33 @@ public:
 		hybridQueuedPresentation = {};
 		int width = 0;
 		int height = 0;
+		const Color border { static_cast<u8>(info.vo_border_col.red() * 255.f),
+				static_cast<u8>(info.vo_border_col.green() * 255.f),
+				static_cast<u8>(info.vo_border_col.blue() * 255.f), 255 };
+		std::vector<Color> pixels;
 		if (info.fb_r_ctrl.fb_enable == 0 || info.vo_control.blank_video == 1)
 		{
 			getDCFramebufferReadSize(info, width, height);
-			const u32 rasterWidth = std::max(1, width);
-			const u32 rasterHeight = std::max(1, height);
-			if (!framebufferRasterizer || framebufferRasterizer->width() != rasterWidth
-					|| framebufferRasterizer->height() != rasterHeight)
-				framebufferRasterizer = std::make_unique<SoftwareRasterizer>(rasterWidth, rasterHeight);
-			rasterizer = framebufferRasterizer.get();
-			displayRasterizer = rasterizer;
-			rasterizer->clear({ static_cast<u8>(info.vo_border_col.red() * 255.f),
-				static_cast<u8>(info.vo_border_col.green() * 255.f),
-				static_cast<u8>(info.vo_border_col.blue() * 255.f), 255 });
-			frameReady = true;
-			clearLastFrame = false;
-			frameAspectRatio = getDCFramebufferAspectRatio();
-			rendContext = nullptr;
-			return;
+			width = std::max(1, width);
+			height = std::max(1, height);
+			pixels.assign(static_cast<size_t>(width) * height, border);
 		}
-		ReadFramebuffer(info, framebufferPixels, width, height);
-		if (!framebufferRasterizer || framebufferRasterizer->width() != static_cast<u32>(width)
-				|| framebufferRasterizer->height() != static_cast<u32>(height))
-			framebufferRasterizer = std::make_unique<SoftwareRasterizer>(width, height);
-		rasterizer = framebufferRasterizer.get();
-		displayRasterizer = rasterizer;
-		for (int y = 0; y < height; ++y)
-			for (int x = 0; x < width; ++x)
-			{
-				const u32 value = *framebufferPixels.data(x, y);
-				rasterizer->setPixel(x, y, {
-					static_cast<u8>(value), static_cast<u8>(value >> 8),
-					static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) });
-			}
-		frameReady = true;
+		else
+		{
+			ReadFramebuffer(info, framebufferPixels, width, height);
+			pixels.resize(static_cast<size_t>(width) * height);
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width; ++x)
+				{
+					const u32 value = *framebufferPixels.data(x, y);
+					pixels[static_cast<size_t>(y) * width + x] = {
+						static_cast<u8>(value), static_cast<u8>(value >> 8),
+						static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) };
+				}
+		}
+		framebufferPresentation = PresentationFrame::create(width, height,
+				getDCFramebufferAspectRatio(), border, std::move(pixels));
+		frameReady = framebufferPresentation != nullptr;
 		clearLastFrame = false;
 		frameAspectRatio = getDCFramebufferAspectRatio();
 		rendContext = nullptr;
@@ -641,7 +639,7 @@ public:
 
 	bool RenderLastFrame() override
 	{
-		if (!displayRasterizer || clearLastFrame)
+		if ((!framebufferPresentation && !displayRasterizer) || clearLastFrame)
 			return false;
 		return drawFrame();
 	}
@@ -665,23 +663,24 @@ public:
 		const bool traceHybrid = std::getenv("FLYCAST_HYBRID_TRACE") != nullptr
 				|| std::getenv("FLYCAST_HYBRID_TIMING") != nullptr;
 		const auto presentWallStart = std::chrono::steady_clock::now();
-		if (!displayRasterizer)
+		const auto frame = framebufferPresentation;
+		if (!frame && !displayRasterizer)
 			return false;
 	#ifdef USE_OPENGL
 	#ifndef TARGET_IPHONE
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	#endif
 		const bool prepared = !presentationBuffer.empty();
-		const auto& pixels = prepared
+		const auto& pixels = frame ? frame->pixels : prepared
 				? presentationBuffer : displayRasterizer->colorBuffer();
-		const u32 pixelWidth = prepared ? presentationWidth : displayRasterizer->width();
-		const u32 pixelHeight = prepared ? presentationHeight : displayRasterizer->height();
+		const u32 pixelWidth = frame ? frame->width : prepared ? presentationWidth : displayRasterizer->width();
+		const u32 pixelHeight = frame ? frame->height : prepared ? presentationHeight : displayRasterizer->height();
 		glActiveTexture(GL_TEXTURE0);
 		const GLint filter = config::LinearInterpolation ? GL_LINEAR : GL_NEAREST;
 		bool surfacePrepared = false;
 		GLuint surfaceTexture = 0;
 #ifdef TARGET_MAC
-		if (hybridPresentation.handle != nullptr
+		if (!frame && hybridPresentation.handle != nullptr
 				&& hybridPresentation.width == pixelWidth
 				&& hybridPresentation.height == pixelHeight)
 		{
@@ -724,12 +723,16 @@ public:
 			glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
 		}
 		glViewport(0, 0, settings.display.width, settings.display.height);
-		glcache.ClearColor(VO_BORDER_COL.red(), VO_BORDER_COL.green(), VO_BORDER_COL.blue(), 1.f);
+		if (frame)
+			glcache.ClearColor(frame->border.r / 255.f, frame->border.g / 255.f,
+					frame->border.b / 255.f, 1.f);
+		else
+			glcache.ClearColor(VO_BORDER_COL.red(), VO_BORDER_COL.green(), VO_BORDER_COL.blue(), 1.f);
 		glClear(GL_COLOR_BUFFER_BIT);
 		int dx = 0;
 		int dy = 0;
 		getWindowboxDimensions(settings.display.width, settings.display.height,
-				frameAspectRatio, dx, dy, config::Rotate90);
+				frame ? frame->aspectRatio : frameAspectRatio, dx, dy, config::Rotate90);
 		glViewport(dx, dy, settings.display.width - dx * 2, settings.display.height - dy * 2);
 		glcache.Disable(GL_BLEND);
 		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -772,14 +775,15 @@ public:
 
 	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override
 	{
-		if (!displayRasterizer || clearLastFrame)
+		const auto frame = framebufferPresentation;
+		if ((!frame && !displayRasterizer) || clearLastFrame)
 			return false;
 		const bool prepared = !presentationBuffer.empty();
-		const int sourceWidth = prepared ? presentationWidth : displayRasterizer->width();
-		const int sourceHeight = prepared ? presentationHeight : displayRasterizer->height();
+		const int sourceWidth = frame ? frame->width : prepared ? presentationWidth : displayRasterizer->width();
+		const int sourceHeight = frame ? frame->height : prepared ? presentationHeight : displayRasterizer->height();
 		const int orientedWidth = config::Rotate90 ? sourceHeight : sourceWidth;
 		const int orientedHeight = config::Rotate90 ? sourceWidth : sourceHeight;
-		const float aspectRatio = frameAspectRatio;
+		const float aspectRatio = frame ? frame->aspectRatio : frameAspectRatio;
 		if (width == 0 && height == 0)
 		{
 			width = orientedWidth;
@@ -795,7 +799,7 @@ public:
 		else if (height == 0)
 			height = std::max(1, static_cast<int>(width / aspectRatio));
 		data.resize(static_cast<size_t>(width) * height * 3);
-		const auto& source = prepared ? presentationBuffer : displayRasterizer->colorBuffer();
+		const auto& source = frame ? frame->pixels : prepared ? presentationBuffer : displayRasterizer->colorBuffer();
 		for (int y = 0; y < height; ++y)
 			for (int x = 0; x < width; ++x)
 			{
@@ -2425,7 +2429,7 @@ private:
 	// destinations. Keeping separate CPU surfaces also preserves the previous
 	// display frame when an intervening RTT render uses identical dimensions.
 	std::unique_ptr<SoftwareRasterizer> screenRasterizer;
-	std::unique_ptr<SoftwareRasterizer> framebufferRasterizer;
+	std::shared_ptr<const PresentationFrame> framebufferPresentation;
 	std::unique_ptr<SoftwareRasterizer> rttRasterizer;
 	SoftwareRasterizer *rasterizer = nullptr;
 	SoftwareRasterizer *displayRasterizer = nullptr;
