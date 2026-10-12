@@ -1003,6 +1003,8 @@ private:
 					return false;
 				timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
 				timing.gpuMilliseconds += modifierTiming.gpuMilliseconds;
+				timing.gpuExecutionMilliseconds +=
+					modifierTiming.gpuExecutionMilliseconds;
 				timing.readbackMilliseconds += modifierTiming.readbackMilliseconds;
 			}
 			if (cpuTranslucent)
@@ -1061,6 +1063,8 @@ private:
 			totalTextures += textureOffsets.size();
 			totalTiming.encodeMilliseconds += timing.encodeMilliseconds;
 			totalTiming.gpuMilliseconds += timing.gpuMilliseconds;
+			totalTiming.gpuExecutionMilliseconds +=
+				timing.gpuExecutionMilliseconds;
 			totalTiming.readbackMilliseconds += timing.readbackMilliseconds;
 			totalTiming.hardwareVisibilityTiles += timing.hardwareVisibilityTiles;
 			totalTiming.totalTiles += timing.totalTiles;
@@ -1075,9 +1079,10 @@ private:
 		}
 			frameStore = std::move(committed);
 			if (trace)
-				std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u/%zu tiles=%u/%u reject=%u lists=%u/%u/%u\n",
+				std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f wait=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u/%zu tiles=%u/%u reject=%u lists=%u/%u/%u\n",
 						rendContext->render_passes.size(), totalTriangles, totalTextures,
 						totalTiming.encodeMilliseconds, totalTiming.gpuMilliseconds,
+						totalTiming.gpuExecutionMilliseconds,
 						totalTiming.readbackMilliseconds, totalCpuTranslucentMilliseconds,
 						totalTiming.hardwareVisibilityTiles, totalTiming.totalTiles,
 						totalTiming.orderedAutosortFrames, rendContext->render_passes.size(),
@@ -1208,6 +1213,8 @@ private:
 				return reject("modifier-backend-failure");
 			timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
 			timing.gpuMilliseconds += modifierTiming.gpuMilliseconds;
+			timing.gpuExecutionMilliseconds +=
+				modifierTiming.gpuExecutionMilliseconds;
 			timing.readbackMilliseconds += modifierTiming.readbackMilliseconds;
 		}
 		double cpuTranslucentMilliseconds = 0.;
@@ -1249,9 +1256,10 @@ private:
 					}
 				}
 		if (trace)
-			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u tiles=%u/%u reject=%u lists=%u/%u/%u\n",
+			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f wait=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u tiles=%u/%u reject=%u lists=%u/%u/%u\n",
 					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,
-					timing.gpuMilliseconds, timing.readbackMilliseconds,
+					timing.gpuMilliseconds, timing.gpuExecutionMilliseconds,
+					timing.readbackMilliseconds,
 					cpuTranslucentMilliseconds, timing.hardwareVisibilityTiles,
 					timing.totalTiles, timing.orderedAutosortFrames,
 					timing.orderedAutosortTiles, timing.totalTiles,

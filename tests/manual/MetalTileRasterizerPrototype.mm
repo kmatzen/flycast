@@ -711,12 +711,13 @@ int main() {
       std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count() /
       20.;
   std::printf(
-      "triangles=%zu cpu_ms=%.3f encode_ms=%.3f gpu_ms=%.3f "
+      "triangles=%zu cpu_ms=%.3f encode_ms=%.3f wait_ms=%.3f gpu_ms=%.3f "
       "opaque_triangles=%zu opaque_gpu_ms=%.3f serial_opaque_gpu_ms=%.3f "
       "ordered_opaque_gpu_ms=%.3f ordered_mismatches=%zu readback_ms=%.3f "
       "color_mismatches=%zu depth_bit_mismatches=%zu\n",
       triangles.size(), cpuMs, timing.encodeMilliseconds,
-      timing.gpuMilliseconds, opaqueTriangles.size(),
+      timing.gpuMilliseconds, timing.gpuExecutionMilliseconds,
+      opaqueTriangles.size(),
       opaqueTiming.gpuMilliseconds, serialOpaqueTiming.gpuMilliseconds,
       orderedOpaqueTiming.gpuMilliseconds, orderedMismatches,
       timing.readbackMilliseconds,

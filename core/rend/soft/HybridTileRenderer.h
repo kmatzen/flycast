@@ -119,7 +119,11 @@ struct Frame {
 
 struct Timing {
   double encodeMilliseconds = 0.;
+  // CPU wall time from command submission through completion. This includes
+  // queueing and the forced synchronization required by the current caller.
   double gpuMilliseconds = 0.;
+  // Device timestamps for actual GPU execution, excluding CPU-side queueing.
+  double gpuExecutionMilliseconds = 0.;
   double readbackMilliseconds = 0.;
   u32 hardwareVisibilityTiles = 0;
   u32 totalTiles = 0;

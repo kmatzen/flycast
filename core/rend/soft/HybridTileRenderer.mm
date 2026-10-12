@@ -728,6 +728,27 @@ template [[host_name("rasterTilesOrderedAutosort")]] kernel
 
 class MetalState {
 public:
+  enum BufferSlot : u32 {
+    Triangles,
+    TileOffsets,
+    TileReferences,
+    Texture,
+    Fog,
+    Modifier,
+    DepthClear,
+    OpaqueMask,
+    PunchMask,
+    TranslucentMask,
+    HardwareVisibilityTiles,
+    Color,
+    Depth,
+    Overflow,
+    Secondary,
+    VisibilityVertices,
+    VisibilityPrimitives,
+    BufferSlotCount,
+  };
+
   MetalState() {
     device = MTLCreateSystemDefaultDevice();
     if (device == nil)
@@ -777,21 +798,68 @@ public:
 
   bool valid() const { return queue != nil && pipeline != nil; }
 
+  id<MTLBuffer> buffer(BufferSlot slot, size_t length,
+                       const void *contents = nullptr) {
+    if (length == 0)
+      return nil;
+    ReusableBuffer &allocation = buffers[slot];
+    if (allocation.capacity < length) {
+      size_t capacity = std::max<size_t>(4096, allocation.capacity);
+      while (capacity < length)
+        capacity *= 2;
+      allocation.value =
+          [device newBufferWithLength:capacity
+                              options:MTLResourceStorageModeShared];
+      allocation.capacity = allocation.value != nil ? capacity : 0;
+    }
+    if (allocation.value != nil && contents != nullptr)
+      std::memcpy(allocation.value.contents, contents, length);
+    return allocation.value;
+  }
+
+  template <typename T>
+  id<MTLBuffer> upload(BufferSlot slot, const std::vector<T> &data) {
+    return data.empty()
+        ? nil
+        : buffer(slot, data.size() * sizeof(T), data.data());
+  }
+
+  id<MTLTexture> visibilityTexture(u32 width, u32 height) {
+    width = std::max(1u, width);
+    height = std::max(1u, height);
+    if (visibility == nil || visibilityWidth != width ||
+        visibilityHeight != height) {
+      MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+                                        width:width
+                                       height:height
+                                    mipmapped:NO];
+      descriptor.usage =
+          MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+      descriptor.storageMode = MTLStorageModePrivate;
+      visibility = [device newTextureWithDescriptor:descriptor];
+      visibilityWidth = visibility != nil ? width : 0;
+      visibilityHeight = visibility != nil ? height : 0;
+    }
+    return visibility;
+  }
+
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> pipeline = nil;
   id<MTLComputePipelineState> orderedAutosortPipeline = nil;
   id<MTLRenderPipelineState> visibilityPipeline = nil;
-};
 
-template <typename T>
-id<MTLBuffer> makeBuffer(id<MTLDevice> device, const std::vector<T> &data) {
-  if (data.empty())
-    return nil;
-  return [device newBufferWithBytes:data.data()
-                             length:data.size() * sizeof(T)
-                            options:MTLResourceStorageModeShared];
-}
+private:
+  struct ReusableBuffer {
+    id<MTLBuffer> value = nil;
+    size_t capacity = 0;
+  };
+  std::array<ReusableBuffer, BufferSlotCount> buffers;
+  id<MTLTexture> visibility = nil;
+  u32 visibilityWidth = 0;
+  u32 visibilityHeight = 0;
+};
 
 } // namespace
 
@@ -1118,7 +1186,6 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     if (visibilityVertices.empty())
       useHardwareVisibility = false;
   }
-
   const size_t pixelCount = static_cast<size_t>(frame.width) * frame.height;
   if (frame.initialColors != nullptr &&
       frame.initialColors->size() != pixelCount)
@@ -1135,57 +1202,50 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   for (const std::vector<u8> *mask : masks)
     if (mask != nullptr && mask->size() != pixelCount)
       return false;
-  id<MTLBuffer> triangleBuffer = makeBuffer(metal.device, *frame.triangles);
-  id<MTLBuffer> offsetBuffer = makeBuffer(metal.device, tileOffsets);
-  id<MTLBuffer> referenceBuffer = makeBuffer(metal.device, tileReferences);
-  id<MTLBuffer> textureBuffer = makeBuffer(metal.device, *frame.texture);
+  id<MTLBuffer> triangleBuffer =
+      metal.upload(MetalState::Triangles, *frame.triangles);
+  id<MTLBuffer> offsetBuffer =
+      metal.upload(MetalState::TileOffsets, tileOffsets);
+  id<MTLBuffer> referenceBuffer =
+      metal.upload(MetalState::TileReferences, tileReferences);
+  id<MTLBuffer> textureBuffer =
+      metal.upload(MetalState::Texture, *frame.texture);
   const std::array<u32, 128> emptyFog {};
-  id<MTLBuffer> fogBuffer = [metal.device
-      newBufferWithBytes:frame.fogTable != nullptr ? frame.fogTable : emptyFog.data()
-                length:emptyFog.size() * sizeof(u32)
-               options:MTLResourceStorageModeShared];
+  id<MTLBuffer> fogBuffer = metal.buffer(
+      MetalState::Fog, emptyFog.size() * sizeof(u32),
+      frame.fogTable != nullptr ? frame.fogTable : emptyFog.data());
   const std::vector<u8> emptyModifier(pixelCount);
-  id<MTLBuffer> modifierBuffer = makeBuffer(metal.device,
+  id<MTLBuffer> modifierBuffer = metal.upload(MetalState::Modifier,
       frame.modifierMask != nullptr ? *frame.modifierMask : emptyModifier);
   const std::vector<u8> emptyMask(pixelCount);
   const std::vector<u8> fullMask(pixelCount, 1);
-  id<MTLBuffer> depthClearBuffer = makeBuffer(metal.device,
+  id<MTLBuffer> depthClearBuffer = metal.upload(MetalState::DepthClear,
       frame.depthClearMask != nullptr ? *frame.depthClearMask : emptyMask);
-  id<MTLBuffer> opaqueMaskBuffer = makeBuffer(metal.device,
+  id<MTLBuffer> opaqueMaskBuffer = metal.upload(MetalState::OpaqueMask,
       frame.opaqueMask != nullptr ? *frame.opaqueMask : fullMask);
-  id<MTLBuffer> punchMaskBuffer = makeBuffer(metal.device,
+  id<MTLBuffer> punchMaskBuffer = metal.upload(MetalState::PunchMask,
       frame.punchThroughMask != nullptr ? *frame.punchThroughMask : fullMask);
-  id<MTLBuffer> translucentMaskBuffer = makeBuffer(metal.device,
+  id<MTLBuffer> translucentMaskBuffer = metal.upload(MetalState::TranslucentMask,
       frame.translucentMask != nullptr ? *frame.translucentMask : fullMask);
   id<MTLBuffer> hardwareVisibilityTileBuffer =
-      makeBuffer(metal.device, hardwareVisibilityTiles);
+      metal.upload(MetalState::HardwareVisibilityTiles,
+                   hardwareVisibilityTiles);
   id<MTLBuffer> colorBuffer =
-      [metal.device newBufferWithLength:pixelCount * sizeof(u32)
-                                options:MTLResourceStorageModeShared];
+      metal.buffer(MetalState::Color, pixelCount * sizeof(u32));
   id<MTLBuffer> depthBuffer =
-      [metal.device newBufferWithLength:pixelCount * sizeof(float)
-                                options:MTLResourceStorageModeShared];
+      metal.buffer(MetalState::Depth, pixelCount * sizeof(float));
   id<MTLBuffer> overflowBuffer =
-      [metal.device newBufferWithLength:sizeof(u32)
-                                options:MTLResourceStorageModeShared];
+      metal.buffer(MetalState::Overflow, sizeof(u32));
   id<MTLBuffer> secondaryBuffer =
-      [metal.device newBufferWithLength:pixelCount * sizeof(u32)
-                                options:MTLResourceStorageModeShared];
+      metal.buffer(MetalState::Secondary, pixelCount * sizeof(u32));
   id<MTLBuffer> visibilityVertexBuffer = useHardwareVisibility
-      ? makeBuffer(metal.device, visibilityVertices) : nil;
+      ? metal.upload(MetalState::VisibilityVertices, visibilityVertices) : nil;
   id<MTLBuffer> visibilityPrimitiveBuffer = useHardwareVisibility
-      ? makeBuffer(metal.device, visibilityPrimitiveIndices) : nil;
-  MTLTextureDescriptor *visibilityDescriptor = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
-                                  width:useHardwareVisibility ? frame.width : 1
-                                 height:useHardwareVisibility ? frame.height : 1
-                              mipmapped:NO];
-  visibilityDescriptor.usage = useHardwareVisibility
-      ? MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead
-      : MTLTextureUsageShaderRead;
-  visibilityDescriptor.storageMode = MTLStorageModePrivate;
+      ? metal.upload(MetalState::VisibilityPrimitives,
+                     visibilityPrimitiveIndices)
+      : nil;
   id<MTLTexture> visibilityTexture =
-      [metal.device newTextureWithDescriptor:visibilityDescriptor];
+      metal.visibilityTexture(frame.width, frame.height);
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
       overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
@@ -1301,6 +1361,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
             .count();
     timing->gpuMilliseconds =
         std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
+    timing->gpuExecutionMilliseconds =
+        std::max(0., (command.GPUEndTime - command.GPUStartTime) * 1000.);
     timing->readbackMilliseconds =
         std::chrono::duration<double, std::milli>(readbackEnd - readbackStart)
             .count();
