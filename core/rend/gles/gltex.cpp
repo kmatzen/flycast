@@ -3,6 +3,8 @@
 #include "hw/pvr/pvr_mem.h"
 
 #include <memory>
+#include <cstdio>
+#include <cstdlib>
 
 GlTextureCache TexCache;
 void (TextureCacheData::*TextureCacheData::uploadToGpu)(int, int, const u8 *, bool, bool) = &TextureCacheData::UploadToGPUGl2;
@@ -254,6 +256,18 @@ void ReadRTTBuffer()
 
 			u8 *p = (u8 *)tmp_buf.data();
 			glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, p);
+			if (std::getenv("FLYCAST_PVR_TRACE_RTT_READBACK") != nullptr && w > 0 && h > 0)
+			{
+				// Sample the 32x32 diagnostic probe's interior, even when the
+				// host render target is larger than the programmed PVR clip.
+				const u32 x = w > 16 ? 16 : w - 1;
+				const u32 y = h > 16 ? 16 : h - 1;
+				const u8 *sample = p + (static_cast<size_t>(y) * w + x) * 4;
+				std::fprintf(stderr, "PVR_GL_RTT_READBACK width=%u height=%u stride=%u pack=%u dither=%u x=%u y=%u rgba=%02x%02x%02x%02x\n",
+						w, h, linestride, static_cast<unsigned>(fb_packmode),
+						static_cast<unsigned>(gl.rendContext->fb_W_CTRL.fb_dither),
+						x, y, sample[0], sample[1], sample[2], sample[3]);
+			}
 
 			WriteTextureToVRam(w, h, p, dst, gl.rendContext->fb_W_CTRL, linestride, gl.rendContext->fbClip);
 		}

@@ -1109,3 +1109,20 @@ allocation hash is
 This establishes a reproducible backend difference under this configuration,
 not an OpenGL accuracy verdict: color processing/settings and matched-input
 provenance still need investigation, followed by original-hardware comparison.
+
+An opt-in `FLYCAST_PVR_TRACE_RTT_READBACK=1` diagnostic now logs the RGBA
+sample at (16,16), immediately after OpenGL readback and before CPU packing.
+It does not modify pixels. In `rtt-opengl-trace-run.log` it reports a 640x480
+host target, 72-byte stride, pack=1, dither=0, and `rgba=adceefff`.
+Applying the existing `roundColor` routine gives R=22, G=52, B=30 and packed
+`0xb69e`, explaining the observed CPU writeback exactly. In contrast,
+truncating those readback bytes gives `0xae7d`.
+
+The readback RGB bytes are consistent with expanding (21,51,29), the RGB565
+components of `0xae7d`, to normalized 8-bit channels. `BindRTT` requests an
+RGB texture with `GL_UNSIGNED_SHORT_5_6_5`; this supports a double-quantization
+explanation (host target quantization followed by rounded CPU packing).
+The actual host attachment bit depths have not yet been queried, so that
+first-stage attribution remains an inference. The diagnostic build passed;
+no existing-renderer quantization policy was changed and no hardware
+correctness claim follows from this observation.
