@@ -695,7 +695,8 @@ TEST(HybridTileRenderer, MatchesOracleForMipSelectionAndTrilinearWeights)
 	for (const Case test : {
 			Case { 1.f, false, false }, Case { 2.f, false, false },
 			Case { 3.f, false, false }, Case { 1.5f, true, false },
-			Case { 1.5f, true, true } })
+			Case { 1.5f, true, true }, Case { 0x1p32f, false, false },
+			Case { 0x1p32f, false, true }, Case { 0x1p40f, false, true } })
 	{
 		SoftwareRasterizer cpu(2, 2);
 		PipelineState state;
@@ -727,6 +728,8 @@ TEST(HybridTileRenderer, MatchesOracleForMipSelectionAndTrilinearWeights)
 		ASSERT_TRUE(hybrid::render(frame, colors, depths))
 				<< "pvrD=" << test.pvrD << " passB=" << test.passB;
 		expectEqual(cpu, colors, depths);
+		if (test.pvrD >= 0x1p32f)
+			EXPECT_EQ(cpu.pixel(0, 0), texels[20]);
 	}
 }
 

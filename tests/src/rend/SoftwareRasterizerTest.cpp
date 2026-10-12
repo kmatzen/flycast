@@ -415,6 +415,15 @@ TEST(SoftwareRasterizer, SelectsMipLevelFromPvrD)
 	state.trilinearPassB = true;
 	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, 0.f, state, 1.f), level1[0]);
 	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, 0.f, state, 2.f), level2[0]);
+	for (bool supersample : { false, true })
+		for (bool passB : { false, true })
+			for (float largeD : { 0x1p32f, 0x1p64f, std::numeric_limits<float>::max() })
+			{
+				state.textureSuperSample = supersample;
+				state.trilinearPassB = passB;
+				EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture, 0.f, 0.f, state, largeD), level2[0])
+						<< "D=" << largeD << " supersample=" << supersample << " passB=" << passB;
+			}
 }
 
 TEST(SoftwareRasterizer, MapsPvrSmallestFirstMipStorage)

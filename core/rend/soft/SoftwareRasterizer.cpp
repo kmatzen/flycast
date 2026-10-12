@@ -471,6 +471,9 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 		// texture, promotes the D-selected map to the next higher resolution.
 		if (state.textureSuperSample)
 			selected = std::max(0.f, selected - 1.f);
+		// Bound the float before conversion: extreme finite derivatives can
+		// exceed u32, and adding pass B to a saturated integer can wrap to zero.
+		selected = std::min(selected, float(texture.mipLevelCount - 1));
 		const u32 level = std::min<u32>(texture.mipLevelCount - 1,
 				static_cast<u32>(selected) + (state.trilinearPassB ? 1u : 0u));
 		pixels = texture.mipLevels[level];

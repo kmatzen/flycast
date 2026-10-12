@@ -242,6 +242,7 @@ inline uint sampleTexture(const device uint *texture, const device Triangle& t, 
         if ((t.state & (1u << 30)) != 0)
             selected = max(0.0f, selected - 1.0f);
         const uint passOffset = (t.state & (1u << 25)) != 0 ? 1u : 0u;
+        selected = min(selected, float(t.mipLevelCount - 1));
         const uint level = min(t.mipLevelCount - 1, uint(selected) + passOffset);
         width = max(1u, width >> level);
         height = max(1u, height >> level);
