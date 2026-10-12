@@ -973,6 +973,41 @@ TEST(SoftwareRasterizer, QuantizesFramebufferAndAppendsDisplayConcatBits)
 	EXPECT_EQ(pixels[1], (Color { 0x98, 0x40, 0x90, 0xff }));
 }
 
+TEST(SoftwareRasterizer, PacksFramebufferAlphaThresholdInclusivelyForEveryBytePair)
+{
+	// Sega Dreamcast/Dev.Box System Architecture, FB_W_CTRL (p. 343):
+	// ARGB1555 stores alpha=1 when pixel alpha >= fb_alpha_threshold.
+	// Read the stored word as RGB565 so bit 15 is observable as red bit 7;
+	// a normal 0555 scanout would hide exactly the bit under test.
+	for (unsigned threshold = 0; threshold < 256; ++threshold)
+	{
+		std::vector<Color> pixels;
+		for (unsigned alpha = 0; alpha < 256; ++alpha)
+			pixels.push_back({ 0, 0, 0, static_cast<u8>(alpha) });
+		SoftwareRasterizer::convertFramebufferForDisplay(pixels, 3, 0,
+				static_cast<u8>(threshold), 1, 0);
+		ASSERT_EQ(pixels.size(), 256u);
+		for (unsigned alpha = 0; alpha < 256; ++alpha)
+			EXPECT_EQ(pixels[alpha], (Color {
+					static_cast<u8>(alpha >= threshold ? 128 : 0), 0, 0, 255 }))
+					<< "alpha=" << alpha << " threshold=" << threshold;
+	}
+}
+
+TEST(SoftwareRasterizer, PacksFramebufferKBitIndependentlyOfPixelAlpha)
+{
+	// KRGB0555 takes only K[7], not pixel alpha or K's lower seven bits.
+	for (unsigned k = 0; k < 256; ++k)
+	{
+		std::vector<Color> pixels { { 0, 0, 0, 0 }, { 0, 0, 0, 255 } };
+		SoftwareRasterizer::convertFramebufferForDisplay(pixels, 0,
+				static_cast<u8>(k), 0, 1, 0);
+		for (const Color& pixel : pixels)
+			EXPECT_EQ(pixel, (Color { static_cast<u8>(k & 128), 0, 0, 255 }))
+					<< "K=" << k;
+	}
+}
+
 TEST(SoftwareRasterizer, RebuildsPresentationFromUnditheredFrameStore)
 {
 	const std::vector<Color> frameStore { { 100, 100, 100, 100 } };

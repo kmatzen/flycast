@@ -831,3 +831,13 @@ This exercises the new integration check for screen framebuffer writes; RTT
 and multipass coverage must be established separately. Both paths still share
 framebuffer conversion code, so agreement does not independently prove that
 conversion matches Dreamcast hardware, nor does it measure host scanout.
+
+The software display-conversion tests now independently check two explicit
+FB_W_CTRL rules from Sega's Dreamcast/Dev.Box System Architecture, printed
+page 343: ARGB1555 uses an inclusive alpha threshold, and KRGB0555 uses K[7].
+All 65536 alpha/threshold byte pairs and all 256 K values with both zero and
+full pixel alpha are covered. Tests reinterpret the written word as RGB565
+to expose bit 15, which normal 0555 scanout discards. All 127 renderer tests
+pass on ARM64 and under x86_64 Rosetta. This covers the software presentation
+conversion helper, not direct execution of the separate TexCache VRAM writer;
+it is a documented-rule regression check, not a hardware measurement.
