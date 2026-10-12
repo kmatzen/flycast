@@ -203,6 +203,44 @@ TEST(HybridTileRenderer, HardwareVisibilityShadesOnlyOpaqueIspWinner)
 	EXPECT_EQ(timing.hardwareVisibilityTiles, 1u);
 }
 
+TEST(HybridTileRenderer, VisibilityBatchingPreservesGapsDifferentListsAndPartialRows)
+{
+	constexpr u32 width = 65, height = 33;
+	for (bool fallbackGap : {false, true})
+		for (bool centered : {false, true}) {
+			SCOPED_TRACE(fallbackGap);
+			SCOPED_TRACE(centered);
+			SoftwareRasterizer cpu(width, height);
+			cpu.clear({});
+			PipelineState state;
+			state.depthMode = DepthMode::GreaterOrEqual;
+			state.fpuPixelCenter = centered;
+			const Color red {255, 0, 0, 255}, green {0, 255, 0, 255};
+			const Vertex a {0, 0, 1, red}, b {132, 0, 1, red}, c {0, 68, 1, red};
+			cpu.drawTriangle(a, b, c, state);
+			const u32 gpuState = hybrid::makeState(6, true, false, false, true, 0, 1, 0);
+			auto base = triangle(a, b, c, gpuState);
+			base.maxX = width - 1;
+			base.maxY = height - 1;
+			const float z = fallbackGap ? 1.f : 2.f;
+			const Vertex d {16, 0, z, green}, e {32, 0, z, green}, f {16, 16, z, green};
+			cpu.drawTriangle(d, e, f, state);
+			std::vector<hybrid::Triangle> commands {base, triangle(d, e, f, gpuState)};
+			for (auto& command : commands) command.fpuSampleOffset = centered ? 8 : 0;
+			const std::vector<u32> texture {0xffffffffu}, initial(width * height, pack(Color {}));
+			hybrid::Frame frame {width, height, &commands, &texture, &initial};
+			std::vector<u32> colors;
+			std::vector<float> depths;
+			hybrid::Timing timing;
+			ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+			expectEqual(cpu, colors, depths);
+			EXPECT_EQ(timing.hardwareVisibilityTiles, fallbackGap ? 14u : 15u);
+			EXPECT_EQ(timing.hardwareVisibilityDraws,
+				std::getenv("FLYCAST_HYBRID_DISABLE_VISIBILITY_BATCHING") != nullptr
+					? (fallbackGap ? 14u : 15u) : (fallbackGap ? 4u : 5u));
+		}
+}
+
 TEST(HybridTileRenderer, RejectsMalformedCommandsWithoutPoisoningBackend)
 {
 	const Color white { 255, 255, 255, 255 };
@@ -1997,6 +2035,53 @@ TEST(HybridTileRenderer, AsyncPresentationChainsFramesWithoutCpuUpload)
 	for (size_t pixel = 0; pixel < secondColors.size(); ++pixel)
 		EXPECT_EQ(secondColors[pixel], pack(cpu.colorBuffer()[pixel]))
 				<< "second frame pixel=" << pixel;
+}
+
+TEST(HybridTileRenderer, BenchmarksOpaqueVisibilityBatches)
+{
+	constexpr u32 width = 640, height = 480;
+	SoftwareRasterizer cpu(width, height);
+	cpu.clear({});
+	std::vector<hybrid::Triangle> commands;
+	PipelineState state;
+	state.depthMode = DepthMode::GreaterOrEqual;
+	for (u32 layer = 0; layer < 8; ++layer) {
+		const Color color { static_cast<u8>(31 * layer), 53, 197, 255 };
+		const float z = 1.f + layer;
+		const Vertex a {0, 0, z, color}, b {1280, 0, z, color}, c {0, 960, z, color};
+		cpu.drawTriangle(a, b, c, state);
+		auto command = triangle(a, b, c, hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+		command.maxX = width - 1;
+		command.maxY = height - 1;
+		commands.push_back(command);
+	}
+	const std::vector<u32> texture {0xffffffffu}, initial(width * height, pack(Color {}));
+	hybrid::Frame frame {width, height, &commands, &texture, &initial};
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	hybrid::Timing timing;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+	expectEqual(cpu, colors, depths);
+	const auto expectedColors = colors;
+	const auto expectedDepths = depths;
+	std::array<double, 100> wall, gpu;
+	for (size_t i = 0; i < wall.size(); ++i) {
+		const auto start = std::chrono::steady_clock::now();
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+		wall[i] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		gpu[i] = timing.gpuExecutionMilliseconds;
+		ASSERT_EQ(colors, expectedColors);
+		ASSERT_EQ(depths, expectedDepths);
+	}
+	std::sort(wall.begin(), wall.end());
+	std::sort(gpu.begin(), gpu.end());
+	RecordProperty("render_p95_ms", wall[94]);
+	RecordProperty("gpu_p95_ms", gpu[94]);
+	RecordProperty("hardware_visibility_tiles", timing.hardwareVisibilityTiles);
+	EXPECT_EQ(timing.hardwareVisibilityTiles, 1200u);
+	RecordProperty("hardware_visibility_draws", timing.hardwareVisibilityDraws);
+	EXPECT_EQ(timing.hardwareVisibilityDraws,
+		std::getenv("FLYCAST_HYBRID_DISABLE_VISIBILITY_BATCHING") != nullptr ? 1200u : 30u);
 }
 
 TEST(HybridTileRenderer, BenchmarksDocumentedSmallTriangleMix)

@@ -1503,3 +1503,48 @@ The new eligibility proof and its temporary test were removed; the prior
 conservative visibility policy remains. A future attempt should investigate
 the per-bin visibility vertex duplication and draw/encoding overhead rather
 than assuming that admitting more hardware work improves end-to-end time.
+
+### Batch identical neighboring visibility draws
+
+The conservative eligibility rules remain unchanged. Adjacent visibility bins
+in the same row now share one draw only when their complete ordered primitive
+index lists are identical. The draw's scissor is the union of those bins, so
+each pixel sees the same primitives in the same order. Empty/fallback bins,
+different lists, and row boundaries stop a batch; partial right/bottom bins
+retain their framebuffer bounds. `Timing.hardwareVisibilityDraws` records
+actual calls. `FLYCAST_HYBRID_DISABLE_VISIBILITY_BATCHING=1` restores per-bin
+draws for controlled comparison without rebuilding.
+
+`VisibilityBatchingPreservesGapsDifferentListsAndPartialRows` compares complete
+software color/depth at both sample offsets on a 65x33 framebuffer, with a
+different-list bin or an ineligible equal-depth bin interrupting a row.
+`BenchmarksOpaqueVisibilityBatches` checks eight overlapping opaque triangles
+at 640x480, comparing every timed sample's buffers after timing. It performs
+100 samples and reduces 1,200 visibility draws to 30 without changing the
+1,200 eligible bins. This is a submission-overhead workload, not a claimed
+Dreamcast-spec throughput workload.
+
+The first 20-sample measurements were noisy: wall p95 8.767 ms before versus
+11.698 ms after, then 7.953 ms on a repeat. Three paired 100-sample runs using
+the same binary and the disable switch gave these wall p95 results:
+
+| Pair | Per-bin draws | Batched draws |
+| --- | --- | --- |
+| 0 | 8.644 ms | 7.600 ms |
+| 1 | 8.308 ms | 7.200 ms |
+| 2 | 8.544 ms | 7.874 ms |
+
+Artifacts: `/tmp/pvr-batch-{off,on}-{0,1,2}.xml`. This is a modest 8–13%
+wall-time improvement in that workload, not a large general speedup. GPU p95
+does not improve in every pair; the optimization targets submission overhead.
+An initial broader timing run overlapped an app build and failed the
+small-triangle wall gate (19.444 ms). After compilation finished,
+`/tmp/pvr-batch-gates-idle.xml` passes both established 60-Hz gates:
+small-triangle wall/GPU p95 14.246/11.100 ms and six-layer wall/GPU p95
+7.302/4.229 ms. These remain renderer-boundary results, not gameplay claims.
+All 138 correctness tests pass on native ARM64 and Rosetta, and the ARM64
+app builds successfully.
+The rebuilt app also completes all twenty RTT probe cases in
+`/tmp/pvr-rtt-batched-20261012/report.json`, with zero color/full-VRAM
+differences. The six dither cases retain their restricted differential-only
+acceptance scope; none of these runs establishes original-hardware accuracy.

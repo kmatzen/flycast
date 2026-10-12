@@ -1608,6 +1608,8 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
                     size:pixelCount * sizeof(u32)];
     [blit endEncoding];
   }
+  u32 hardwareVisibilityDraws = 0;
+  const bool batchVisibility = std::getenv("FLYCAST_HYBRID_DISABLE_VISIBILITY_BATCHING") == nullptr;
   if (useHardwareVisibility) {
     MTLRenderPassDescriptor *pass =
         [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1626,10 +1628,21 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
         continue;
       const u32 tileX = tile % tilesX;
       const u32 tileY = tile / tilesX;
+      // Merge only horizontal neighbors with exactly the same ordered
+      // primitives. The wider scissor is their union; no pixel gains a
+      // primitive or sees a different order. Keep gaps and row boundaries.
+      u32 runLength = 1;
+      const auto first = visibilityPrimitiveIndices.begin() + visibilityDrawStarts[tile] / 3;
+      const auto last = first + visibilityDrawCounts[tile] / 3;
+      while (batchVisibility && tileX + runLength < tilesX &&
+             visibilityDrawCounts[tile + runLength] == visibilityDrawCounts[tile] &&
+             std::equal(first, last, visibilityPrimitiveIndices.begin() +
+                 visibilityDrawStarts[tile + runLength] / 3))
+        ++runLength;
       const MTLScissorRect scissor{
           static_cast<NSUInteger>(tileX * TileSize),
           static_cast<NSUInteger>(tileY * TileSize),
-          static_cast<NSUInteger>(std::min(TileSize,
+          static_cast<NSUInteger>(std::min(TileSize * runLength,
               frame.width - tileX * TileSize)),
           static_cast<NSUInteger>(std::min(TileSize,
               frame.height - tileY * TileSize))};
@@ -1639,6 +1652,8 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       [visibilityEncoder drawPrimitives:MTLPrimitiveTypeTriangle
                             vertexStart:visibilityDrawStarts[tile]
                             vertexCount:visibilityDrawCounts[tile]];
+      ++hardwareVisibilityDraws;
+      tile += runLength - 1;
     }
     [visibilityEncoder endEncoding];
   }
@@ -1711,6 +1726,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
             .count();
     timing->hardwareVisibilityTiles = static_cast<u32>(std::count(
         hardwareVisibilityTiles.begin(), hardwareVisibilityTiles.end(), u8{1}));
+    timing->hardwareVisibilityDraws = hardwareVisibilityDraws;
     timing->totalTiles = static_cast<u32>(hardwareVisibilityTiles.size());
     timing->orderedAutosortFrames = orderedAutosort ? 1 : 0;
     timing->orderedAutosortTiles = orderedAutosortTiles;

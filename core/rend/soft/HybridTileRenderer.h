@@ -154,6 +154,7 @@ struct Timing {
   double gpuExecutionMilliseconds = 0.;
   double readbackMilliseconds = 0.;
   u32 hardwareVisibilityTiles = 0;
+  u32 hardwareVisibilityDraws = 0;
   u32 totalTiles = 0;
   u32 orderedAutosortFrames = 0;
   u32 orderedAutosortTiles = 0;
