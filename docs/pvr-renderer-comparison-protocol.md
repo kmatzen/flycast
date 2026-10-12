@@ -2175,3 +2175,44 @@ backend lifecycle together, including ImGui texture ownership; this checkout
 does not currently include an ImGui Metal backend. Preserve the existing
 fully converted software image as its input rather than bypassing framebuffer
 semantics to reuse an earlier Metal accumulation surface.
+
+### Native Metal UI prerequisite
+
+The matching Dear ImGui v1.92.6 Metal backend is now vendored from
+`https://github.com/ocornut/imgui/tree/v1.92.6/backends`, with its upstream
+MIT license in `core/deps/imgui/LICENSE.txt`. Backend implementation and header
+SHA-256 values are, respectively:
+`8aba9bfdb2ecf85f7c7c1dd9af980f0f296f51324f65decdcc96d913dd015788` and
+`76dccde7cb59b39e697e0ba850ca27f2df036bf758cd5717274e4264407bbb04`.
+
+An Apple desktop-only, separately requested test target compiles this backend
+with Flycast's actual ImGui core, CJK extensions, and FreeType loader:
+
+```sh
+cmake --build build-renderer-tests --target flycast-metal-ui-tests -j8
+build-renderer-tests/tests/flycast-metal-ui-tests
+arch -x86_64 build-renderer-tests/tests/flycast-metal-ui-tests
+```
+
+It renders an opaque rectangle and text over a known blue background, checks
+the GPU texture readback, changes target dimensions, and destroys/recreates
+the backend. The target is excluded from normal builds. This is an offscreen
+host-UI integration test, not an emulator-window presenter, a Dreamcast
+accuracy check, or a pacing benchmark. No default renderer selection changes.
+
+The offscreen test passes on ARM64 and x86-64 under Rosetta, and on ARM64
+with `MTL_DEBUG_LAYER=1` (Metal API validation enabled). Logs:
+`/tmp/pvr-metal-ui-native.log` and `/tmp/pvr-metal-ui-rosetta.log`.
+The four rendered cases cover two sizes in each of two backend lifetimes.
+They check a red rectangle, an untouched blue pixel, and non-background
+pixels in the text region (font atlas sampling); they do not assert a
+platform-independent font glyph golden image.
+
+The local universal test build initially selected Intel-only libpng for its
+FreeType dependency. The build cache was corrected to use
+`/tmp/pvr-metal-ui-libpng-universal.dylib`, assembled with `lipo -create` from
+the installed Intel and ARM libpng libraries. No system library was modified.
+Other hosts need their own architecture-compatible FreeType dependencies;
+that temporary path is not part of tracked build configuration. Existing
+deployment-target warnings from those host libraries remain and this run does
+not establish compatibility with older macOS versions.
