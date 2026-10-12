@@ -898,3 +898,14 @@ pixel continuation, a row advance crossing the boundary, and linear staging.
 The app builds and all 132 tests pass on ARM64 and x86_64 Rosetta. This removes
 an unbounded host-pointer path and implements the modeled VRAM address wrap;
 real-hardware RTT boundary behavior and live RTT scenes remain unverified.
+
+Post-writer-change live regression (`12bb2560c` app build) repeated muted
+Seaman verification with hybrid, color/VRAM verification, full framebuffer
+emulation, single-threaded rendering, and experimental late-swap enabled.
+All 505 compared frames matched in both color buffers and complete 8 MiB
+VRAM images, with zero logged hybrid rejections. The run reached the
+16-triangle, six-texture translucent sequence. Log:
+`/tmp/pvr-write-regression-live.log`; the owned emulator was stopped.
+All verified frames were screen writes (`rtt=0`), so this is a live regression
+check for the common framebuffer path, not live coverage of the RTT wrap fix.
+No performance conclusion is drawn from a verifier-enabled run.
