@@ -2730,3 +2730,18 @@ windows rather than synchronized game-state captures, and instrumentation is
 not free. No input was driven and no visual screenshot was captured. These
 are unattended boot/idle samples, not a Seaman playthrough, an audible-quality
 assessment (the computer remained muted), or proof of hardware accuracy.
+
+The runner now pins `config:aica.BufferSize=2822` (the buffer size already
+observed in the first pair) and accepts `--reverse` to run OpenGL first.
+It also retains the last periodic audio record separately from the final one.
+The reversed pair at `/tmp/pvr-native-seaman-reverse-20261012/report.json`
+used the same application hash and completed normally: OpenGL had zero
+underruns, native had two (2048 silence frames), and neither dropped input
+audio. Native's final periodic report still showed zero underruns; the final
+record showed two with zero queued input frames. This does not distinguish
+late-run starvation from shutdown-related silence and must not be relabeled
+as zero underruns. Native had 2589 callbacks and one skipped callback.
+Both paths again sampled approximately 1x emulated speed. The reversal of the
+apparent audio advantage means these samples do not establish a native Metal
+performance win. No buffer-size increase or audio-backend implementation
+change was made to improve the reported numbers.
