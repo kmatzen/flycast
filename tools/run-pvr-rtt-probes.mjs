@@ -22,6 +22,10 @@ for (const k of [1, 127, 128, 255])
 // K must not substitute for vertex alpha or affect RGB in other formats.
 for (const mode of [1, 2, 3])
   cases.push({ name: `mode-${mode}-k-255-alpha-0`, mode, alpha: 0, threshold: 128, k: 255 });
+for (const mode of [0, 1, 2, 3])
+  cases.push({ name: `mode-${mode}-dither`, mode, alpha: 255, threshold: 0, dither: 1 });
+cases.push({ name: 'argb4444-dither-alpha-15', mode: 2, alpha: 15, threshold: 128, dither: 1 });
+cases.push({ name: 'argb1555-dither-alpha-127', mode: 3, alpha: 127, threshold: 128, dither: 1 });
 
 async function execute(command, args, env, logPath, stopAtEnd = false) {
   const fd = openSync(logPath, 'wx');
@@ -66,7 +70,7 @@ const report = { execution: 'emulator', hardwareValidated: false,
   flycast, flycastSha256: hashFile(flycast), sdkEnv,
   probeSourceSha256: hashFile(resolve(probeDir, 'probe.c')), cases: [] };
 for (const item of cases) {
-  const flags = `-DPVR_PROBE_PACK_MODE=${item.mode} -DPVR_PROBE_ALPHA=${item.alpha} -DPVR_PROBE_ALPHA_THRESHOLD=${item.threshold} -DPVR_PROBE_K=${item.k ?? 0}`;
+  const flags = `-DPVR_PROBE_PACK_MODE=${item.mode} -DPVR_PROBE_ALPHA=${item.alpha} -DPVR_PROBE_ALPHA_THRESHOLD=${item.threshold} -DPVR_PROBE_K=${item.k ?? 0} -DPVR_PROBE_DITHER=${item.dither ?? 0}`;
   await execute('/bin/bash', ['-c', 'source "$1" && make -B -C "$2" "CFLAGS=$3"',
     'pvr-probe-build', sdkEnv, probeDir, flags], process.env, resolve(output, `${item.name}.build.log`));
   const elf = resolve(output, `${item.name}.elf`);
@@ -85,14 +89,23 @@ for (const item of cases) {
   const vramVerified = /HYBRID verify_vram bytes=8388608 mismatches=0 rtt=1(?:\r?\n)/.test(log);
   const colorVerified = /HYBRID verify pixels=307200 mismatches=0(?:\r?\n)/.test(log);
   const nonzeroMismatch = /HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(log);
+  // Dither has no independent expected interior here. Do not report a
+  // documented-packing pass merely because the two implementations agree.
+  const interiorExpectedColorVerified = item.dither ? null
+    : observed.interiorPixelsDifferentFromRequestedColor === 0;
+  const interiorWritten = observed.interiorPhaseHistograms.every(phase => !('a5a5' in phase));
   const passed = observed.packmode === item.mode && observed.alpha === item.alpha
     && observed.threshold === item.threshold && observed.k === (item.k ?? 0) && observed.expectedConfiguration
+    && observed.dither === (item.dither ?? 0)
     && observed.prefixGuardChangedBytes === 0 && observed.suffixGuardChangedBytes === 0
-    && observed.paddingChangedBytes === 0 && observed.interiorPixelsDifferentFromRequestedColor === 0
+    && observed.paddingChangedBytes === 0 && interiorWritten
+    && (item.dither ? observed.interiorPixelsDifferentFromRequestedColor === null : interiorExpectedColorVerified)
     && vramVerified && colorVerified && !nonzeroMismatch;
-  report.cases.push({ ...item, elfSha256: hashFile(elf), passed, vramVerified, colorVerified, observed });
+  report.cases.push({ ...item, elfSha256: hashFile(elf), passed, interiorExpectedColorVerified,
+    acceptanceScope: item.dither ? 'capture integrity and software-Metal agreement only' : 'documented undithered packing and software-Metal agreement',
+    vramVerified, colorVerified, observed });
   writeFileSync(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(`${item.name}: ${passed ? 'PASS' : 'FAIL'}`);
+  console.log(`${item.name}: ${passed ? 'PASS' : 'FAIL'}${item.dither ? ' (differential only; dither correctness unverified)' : ''}`);
   if (!passed) throw Error(`Probe regression: inspect ${output}`);
 }
 console.log(`Completed ${report.cases.length} emulator cases. Hardware validation remains false. Report: ${output}/report.json`);

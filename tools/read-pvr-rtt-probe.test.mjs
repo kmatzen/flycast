@@ -110,3 +110,31 @@ test('schema 4 separates K from alpha and requires the programmed K register', (
         assert.throws(() => readProbe(log.replace(` k=${hex(k)}`, '')));
       }
 });
+
+test('schema 5 retains dither phase observations without manufacturing expected values', () => {
+  const lines = fixture();
+  lines[0] = lines[0].replace('schema=1', 'schema=5') + ' packmode=1 alpha=ff threshold=00 k=00 dither=1';
+  lines[1] = lines[1].replace('pack=00000001', 'pack=00000009');
+  const bytes = Buffer.alloc(2368, 0xa5);
+  for (let y = 8; y < 24; ++y)
+    for (let x = 8; x < 24; ++x)
+      bytes.writeUInt16LE((y % 4) * 4 + x % 4, 32 + (y * 36 + x) * 2);
+  for (let offset = 0; offset < bytes.length; offset += 32)
+    lines[2 + offset / 32] = `PVR_RTT_BYTES offset=${offset.toString(16).padStart(4, '0')} data=${bytes.subarray(offset, offset + 32).toString('hex')}`;
+  const log = lines.join('\n');
+  const result = readProbe(log);
+  assert.equal(result.dither, 1);
+  assert.equal(result.expectedConfiguration, true);
+  assert.equal(result.expectedInteriorWord, null);
+  assert.equal(result.interiorPixelsDifferentFromRequestedColor, null);
+  assert.equal(result.hardwareValidated, false);
+  assert.match(result.interiorExpectation, /unavailable/);
+  for (let phase = 0; phase < 16; ++phase)
+    assert.deepEqual(result.interiorPhaseHistograms[phase], { [phase.toString(16).padStart(4, '0')]: 16 });
+  assert.throws(() => readProbe(log.replace('dither=1', 'dither=2')));
+  assert.equal(readProbe(log.replace('dither=1', 'dither=0')).expectedConfiguration, false);
+  const undithered = readProbe(log.replace('dither=1', 'dither=0').replace('pack=00000009', 'pack=00000001'));
+  assert.equal(undithered.expectedConfiguration, true);
+  assert.equal(undithered.expectedInteriorWord, 0xae7d);
+  assert.equal(undithered.interiorPixelsDifferentFromRequestedColor, 256);
+});

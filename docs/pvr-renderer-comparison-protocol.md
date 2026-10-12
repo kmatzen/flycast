@@ -1435,3 +1435,48 @@ proof of the packer itself. Dither behavior and original-hardware agreement
 remain unverified. The register description establishes the K expectation
 precisely but does not itself specify a complete dither matrix, so no new
 dither golden is inferred from it.
+
+### Phase-resolved dither observations, without a hardware golden
+
+Schema 5 adds `PVR_PROBE_DITHER` (0 or 1) and records the requested dither bit.
+The reader collects sixteen interior word histograms indexed by
+`(y % 4) * 4 + x % 4`, each covering sixteen pixels inside the constant-color
+quad. Dither-enabled reports deliberately return null for both
+`expectedInteriorWord` and `interiorPixelsDifferentFromRequestedColor`.
+The register description establishes the enable bit but does not independently
+establish the matrix, phase, or alpha increment. Repeating the implementation's
+matrix in the reader would therefore not supply a hardware expectation.
+
+The runner now executes twenty cases. Fourteen retain the documented
+undithered-packing checks. Six additional dither cases cover all four 16-bit
+formats plus ARGB4444 alpha=15 and ARGB1555 alpha=127/threshold=128. Their
+acceptance scope is explicitly only capture integrity and software–Metal
+agreement: expected registers, unchanged guards and padding, written interior,
+and zero differential color/full-VRAM errors. The report's
+`interiorExpectedColorVerified` remains null for these six cases.
+
+All twenty completed successfully in
+`/tmp/pvr-rtt-dither-20261012/report.json`; the directory retains the ELFs,
+hashes, build logs, and raw dumps. Seven reader tests pass, including synthetic
+phase indexing and rejection of invalid dither fields. No renderer behavior
+changed; a source comment now identifies the alpha increment as the existing
+GPU-path model rather than an independently verified PVR rule.
+
+For RGB565, the observed interior packed words by phase are:
+
+| y mod 4 / x mod 4 | 0 | 1 | 2 | 3 |
+| --- | --- | --- | --- | --- |
+| 0 | ae7e | b69e | ae7e | b69e |
+| 1 | ae7e | ae7d | b67e | ae7e |
+| 2 | ae7e | b69e | ae7e | b69e |
+| 3 | b67e | ae7e | ae7e | ae7d |
+
+Every phase has sixteen identical interior observations in this case. Its
+allocation SHA256 is
+`3963f633743d35b9fae80b8e3cbd0dbd2ba8de7cee1d02dec19438f120760668`.
+The alpha-boundary cases expose the model's constant increment: ARGB4444
+alpha=15 stores alpha nibble 1, while ARGB1555 alpha=127 at threshold=128
+stores alpha bit 1. These are observations to compare against physical
+hardware, not evidence that those alpha rules are correct. In particular,
+the shared post-render dither and packing path is outside the independent
+CPU/GPU comparison boundary.

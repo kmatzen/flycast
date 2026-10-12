@@ -851,8 +851,9 @@ void SoftwareRasterizer::ditherFramebuffer(std::vector<Color>& pixels, u32 width
 			color.r = static_cast<u8>(std::min(255, color.r + dither / divisorR));
 			color.g = static_cast<u8>(std::min(255, color.g + dither / divisorG));
 			color.b = static_cast<u8>(std::min(255, color.b + dither / divisorB));
-			// The PVR's alpha dither input is a constant one; only RGB uses
-			// the spatial 4x4 matrix (matching the hardware renderer paths).
+			// Model the existing GPU paths: alpha receives a constant one,
+			// while RGB uses the spatial matrix. Original-hardware validation
+			// of this rule and the matrix is still required.
 			color.a = static_cast<u8>(std::min(255, color.a + 1));
 		}
 }
