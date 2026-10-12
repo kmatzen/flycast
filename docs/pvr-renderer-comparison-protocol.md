@@ -281,3 +281,26 @@ FLYCAST_HYBRID_GEOMETRY_SAMPLES=16384 \
 This extends differential coverage of mixed geometry and pixel states, not
 hardware conformance coverage. Each sample is an independent triangle; use
 the separate overlapping-scene corpus to exercise interactions among polygons.
+
+### Synchronous renderer performance boundary
+
+The six-layer benchmark now records 20 warmed synchronous `hybrid::render`
+calls, with median, nearest-rank p95, and maximum wall-clock duration, plus GPU
+p95. Timing ends after readback and before the test checks that the returned
+color and depth buffers match the warm-up output. This checks repeatability,
+not hardware accuracy. `FLYCAST_HYBRID_ENFORCE_60HZ=1` requires both GPU and
+whole-render-call p95 to stay within 16.67 ms, rather than checking a single GPU
+timestamp alone.
+
+An initial M1 run measured render-call median 6.45 ms, p95 9.13 ms, maximum
+9.16 ms, and GPU p95 7.20 ms. These are one-run observations, not guaranteed
+limits. The boundary includes renderer preparation, synchronization, and
+readback, but excludes emulator CPU/audio work, upstream command generation,
+and display presentation. It is therefore not an end-to-end 60 fps claim.
+
+```sh
+FLYCAST_HYBRID_ENFORCE_60HZ=1 \
+  ./build-renderer-tests/tests/flycast-renderer-tests \
+  --gtest_filter=HybridTileRenderer.BenchmarksDreamcastFillRateAnd72LayerStress \
+  --gtest_output=xml:/tmp/pvr-render-boundary-benchmark.xml
+```

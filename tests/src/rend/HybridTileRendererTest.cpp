@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -2062,7 +2063,35 @@ TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
 	RecordProperty("dreamcast_budget_layers", budgetLayers);
 	RecordProperty("dreamcast_budget_gpu_ms", budgetTiming.gpuExecutionMilliseconds);
 	RecordProperty("frame_budget_ms", frameBudgetMilliseconds);
+	// Measure the synchronous renderer boundary as well as GPU execution.
+	// The preceding draw warms pipelines; repeated samples expose scheduling
+	// and readback costs that a single GPU timestamp cannot capture.
+	std::array<double, 20> renderMilliseconds;
+	std::array<double, 20> gpuMilliseconds;
+	const auto expectedColors = colors;
+	const auto expectedDepths = depths;
+	for (size_t sample = 0; sample < renderMilliseconds.size(); ++sample)
+	{
+		const auto start = std::chrono::steady_clock::now();
+		ASSERT_TRUE(hybrid::render(budgetFrame, colors, depths, &budgetTiming));
+		renderMilliseconds[sample] = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - start).count();
+		gpuMilliseconds[sample] = budgetTiming.gpuExecutionMilliseconds;
+		ASSERT_EQ(colors, expectedColors) << "sample=" << sample;
+		ASSERT_EQ(depths, expectedDepths) << "sample=" << sample;
+	}
+	std::sort(renderMilliseconds.begin(), renderMilliseconds.end());
+	std::sort(gpuMilliseconds.begin(), gpuMilliseconds.end());
+	RecordProperty("dreamcast_budget_samples", renderMilliseconds.size());
+	RecordProperty("dreamcast_budget_render_median_ms",
+			(renderMilliseconds[9] + renderMilliseconds[10]) / 2.);
+	RecordProperty("dreamcast_budget_render_p95_ms", renderMilliseconds[18]);
+	RecordProperty("dreamcast_budget_render_max_ms", renderMilliseconds.back());
+	RecordProperty("dreamcast_budget_gpu_p95_ms", gpuMilliseconds[18]);
 	if (std::getenv("FLYCAST_HYBRID_ENFORCE_60HZ") != nullptr)
-		EXPECT_LE(budgetTiming.gpuExecutionMilliseconds, frameBudgetMilliseconds);
+	{
+		EXPECT_LE(gpuMilliseconds[18], frameBudgetMilliseconds);
+		EXPECT_LE(renderMilliseconds[18], frameBudgetMilliseconds);
+	}
 }
 #endif
