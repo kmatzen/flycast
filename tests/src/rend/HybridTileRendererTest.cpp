@@ -377,7 +377,7 @@ TEST(HybridTileRenderer, MatchesOracleForTextureAddressingModes)
 TEST(HybridTileRenderer, MatchesOracleForPunchThroughAlphaTest)
 {
 	const Color texels[] {
-		{ 220, 30, 20, 40 }, { 220, 30, 20, 120 },
+		{ 220, 30, 20, 40 }, { 220, 30, 20, 100 },
 		{ 220, 30, 20, 99 }, { 220, 30, 20, 255 },
 	};
 	const std::vector<u32> texture {
@@ -409,6 +409,54 @@ TEST(HybridTileRenderer, MatchesOracleForPunchThroughAlphaTest)
 	std::vector<float> depths;
 	ASSERT_TRUE(hybrid::render(frame, colors, depths));
 	expectEqual(cpu, colors, depths);
+	EXPECT_EQ(cpu.pixel(1, 0).a, 255);
+}
+
+TEST(HybridTileRenderer, PunchThroughHoleExposesFartherAcceptedFragment)
+{
+	const Color frontTexels[] {
+		{ 230, 30, 20, 255 }, { 230, 30, 20, 0 },
+		{ 230, 30, 20, 255 }, { 230, 30, 20, 0 },
+	};
+	const Color backTexels[] {
+		{ 20, 220, 60, 255 }, { 20, 220, 60, 255 },
+		{ 20, 220, 60, 255 }, { 20, 220, 60, 255 },
+	};
+	std::vector<u32> texture;
+	for (Color texel : frontTexels) texture.push_back(pack(texel));
+	for (Color texel : backTexels) texture.push_back(pack(texel));
+	const Color background { 20, 40, 160, 255 };
+	const Color white { 255, 255, 255, 255 };
+	SoftwareRasterizer cpu(2, 2);
+	cpu.clear(background);
+	PipelineState punch;
+	punch.depthMode = DepthMode::GreaterOrEqual;
+	punch.alphaTest = true;
+	punch.alphaReference = 128;
+	punch.texture = { frontTexels, 2, 2 };
+	drawTexturedQuad(cpu, 2.f, white, punch);
+	punch.texture = { backTexels, 2, 2 };
+	drawTexturedQuad(cpu, 1.f, white, punch);
+
+	u32 state = hybrid::makeState(6, true, true, false, true, 0, 1, 0)
+			| hybrid::AlphaTest | (1u << hybrid::ListTypeShift);
+	std::vector<hybrid::Triangle> commands;
+	appendTexturedQuad(commands, 2.f, white, state, 2, 2);
+	appendTexturedQuad(commands, 1.f, white, state, 2, 2);
+	for (size_t i = 0; i < commands.size(); ++i)
+	{
+		commands[i].textureOffset = i < 2 ? 0 : 4;
+		commands[i].mipOffsets[0] = commands[i].textureOffset;
+		commands[i].alphaReference = 128;
+	}
+	const std::vector<u32> initialColors(4, pack(background));
+	hybrid::Frame frame { 2, 2, &commands, &texture, &initialColors };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+	EXPECT_EQ(cpu.pixel(0, 0), frontTexels[0]);
+	EXPECT_EQ(cpu.pixel(1, 0), backTexels[1]);
 }
 
 TEST(HybridTileRenderer, MatchesOracleForClampAndVertexFog)
