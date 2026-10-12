@@ -173,6 +173,7 @@ public:
 			s32 x0, s32 y0, s32 x1, s32 y1) const;
 	void clearVisibility();
 	void restoreDepth(const std::vector<float>& depth);
+	void restoreColor(const std::vector<Color>& color);
 	void clearModifierResults();
 	void clearDeferredFragments();
 	void resolveDeferredFragments();

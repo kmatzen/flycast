@@ -241,6 +241,12 @@ void SoftwareRasterizer::restoreDepth(const std::vector<float>& depth)
 		depthBuffer_ = depth;
 }
 
+void SoftwareRasterizer::restoreColor(const std::vector<Color>& color)
+{
+	if (color.size() == colorBuffer_.size())
+		colorBuffer_ = color;
+}
+
 void SoftwareRasterizer::clearModifierResults()
 {
 	for (u8& stencil : stencilBuffer_)

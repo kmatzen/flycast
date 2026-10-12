@@ -15,6 +15,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -845,19 +846,13 @@ private:
 		if (config::EmulateFramebuffer)
 			return reject("framebuffer-emulation");
 		const RenderPass& pass = rendContext->render_passes[0];
-		if (pass.mvo_tr_count != 0)
-			return reject("translucent-modifier-volumes");
 		const bool autosort = !config::PerStripSorting && pass.autosort;
 		const bool hasOpaque = pass.op_count != 0;
 		const bool hasPunch = pass.pt_count != 0;
 		const bool hasTranslucent = pass.tr_count != 0;
-		if (pass.mvo_count != 0 && hasTranslucent && !autosort)
-			return reject("unsupported-modifier-volume-mode");
-		if (pass.mvo_count != 0)
-			for (u32 i = 0; i < std::min<u32>(pass.tr_count,
-					rendContext->global_param_tr.size()); ++i)
-				if (rendContext->global_param_tr[i].pcw.Shadow)
-					return reject("translucent-shadow");
+		const bool useOpaqueModifiers = config::ModifierVolumes && pass.mvo_count != 0;
+		const bool cpuTranslucent = config::ModifierVolumes && hasTranslucent
+				&& (pass.mvo_count != 0 || pass.mvo_tr_count != 0);
 		if (!passRegions[0].empty())
 		{
 			std::vector<u8> coverage(static_cast<size_t>(width) * height);
@@ -887,8 +882,8 @@ private:
 				commands, textureAtlas, textureOffsets)
 				|| !appendHybridList(rendContext->global_param_pt, pass.pt_count, true, false,
 						commands, textureAtlas, textureOffsets)
-				|| !appendHybridList(rendContext->global_param_tr, pass.tr_count, false, autosort,
-						commands, textureAtlas, textureOffsets)
+				|| (!cpuTranslucent && !appendHybridList(rendContext->global_param_tr,
+						pass.tr_count, false, autosort, commands, textureAtlas, textureOffsets))
 				|| commands.empty())
 			return reject("unsupported-polygon-state");
 		std::vector<u32> initial(frameStore.size());
@@ -906,7 +901,7 @@ private:
 		if (!hybrid::render(frame, output, depth, &timing) || output.size() != frameStore.size())
 			return reject("backend-failure");
 		std::vector<u8> modifierMask;
-		if (pass.mvo_count != 0)
+		if (useOpaqueModifiers)
 		{
 			SoftwareRasterizer modifierRasterizer(width, height);
 			modifierRasterizer.restoreDepth(depth);
@@ -927,11 +922,31 @@ private:
 			timing.gpuMilliseconds += modifierTiming.gpuMilliseconds;
 			timing.readbackMilliseconds += modifierTiming.readbackMilliseconds;
 		}
+		double cpuTranslucentMilliseconds = 0.;
+		if (cpuTranslucent)
+		{
+			const auto cpuStart = std::chrono::steady_clock::now();
+			std::vector<Color> opaqueColors(output.size());
+			std::memcpy(opaqueColors.data(), output.data(), output.size() * sizeof(u32));
+			SoftwareRasterizer translucentRasterizer(width, height);
+			translucentRasterizer.restoreColor(opaqueColors);
+			translucentRasterizer.restoreDepth(depth);
+			translucentRasterizer.clearSecondary();
+			SoftwareRasterizer *savedRasterizer = rasterizer;
+			rasterizer = &translucentRasterizer;
+			drawTranslucentPass(0, RenderPass {}, pass, passRegions[0]);
+			rasterizer = savedRasterizer;
+			std::memcpy(output.data(), translucentRasterizer.colorBuffer().data(),
+					output.size() * sizeof(u32));
+			cpuTranslucentMilliseconds = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - cpuStart).count();
+		}
 		std::memcpy(frameStore.data(), output.data(), output.size() * sizeof(u32));
 		if (trace)
-			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",
+			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f\n",
 					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,
-					timing.gpuMilliseconds, timing.readbackMilliseconds);
+					timing.gpuMilliseconds, timing.readbackMilliseconds,
+					cpuTranslucentMilliseconds);
 		return true;
 	}
 
