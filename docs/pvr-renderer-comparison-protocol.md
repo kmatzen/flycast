@@ -401,3 +401,29 @@ The muted Seaman frame-4 check in `/tmp/pvr-context-capture.c8w16g/` produced
 two 18249-byte JSON files. Both parsed successfully and matched field-for-field:
 41 top-level fields, 128 fog words, 300 six-word region entries, and 640x480
 dimensions. Both write-success records were checked and the emulator stopped.
+
+### OpenGL/software recheck with retained inputs and latched state
+
+Using the same diagnostic build, a separate muted OpenGL run captured frame 4
+with `pvr.rend=0`, single-threaded rendering, and full framebuffer emulation.
+The instantiated backend logged `opengl`. Its artifacts use the `gl` prefix
+in `/tmp/pvr-context-capture.c8w16g/`; software uses `sw`.
+
+Byte comparisons were identical for:
+
+- `input.context-0.ta` (256 bytes);
+- `processed.vram` (8 MiB);
+- `processed.registers` and `rendered.registers` (32 KiB each);
+- `processed.context.json` and `rendered.context.json` (18249 bytes each).
+
+The JSON was also parsed and every named field compared. The rendered VRAM
+still differs at 1732 framebuffer pixels (1905 physical bytes), with maximum
+native RGB565 channel differences of `[1, 1, 1]`. Signed software-minus-OpenGL
+channel sums remain `[410, 603, 548]`. The pixel report is `comparison.json`.
+The owned OpenGL process was stopped after capture.
+
+This reproduces the earlier pixel difference while ruling out differences in
+the additional captured fields for this run. It does not rule out uncaptured
+geometry/configuration/cache state and does not determine which renderer agrees
+with hardware. It is stronger input-equivalence evidence, not full replay or a
+hardware correctness result.
