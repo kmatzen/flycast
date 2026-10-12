@@ -393,6 +393,9 @@ TEST(SoftwareRasterizer, MirrorsBothTextureAxesAcrossFlipPeriods)
 
 TEST(SoftwareRasterizer, SelectsMipLevelFromPvrD)
 {
+	EXPECT_EQ(SoftwareRasterizer::textureFootprint(3.f, 4.f, 0.f, 1.f), 5.f);
+	EXPECT_EQ(SoftwareRasterizer::textureFootprint(3.f * 0x1p64f, 4.f * 0x1p64f,
+			0.f, 0x1p64f), 5.f * 0x1p64f);
 	const Color level0[16] { { 255, 0, 0, 255 } };
 	const Color level1[4] { { 0, 255, 0, 255 } };
 	const Color level2[1] { { 0, 0, 255, 255 } };

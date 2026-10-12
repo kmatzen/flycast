@@ -204,6 +204,7 @@ public:
 	static Color sampleTexture(const TextureView& texture, float u, float v,
 			const PipelineState& state, float pvrD = 1.f);
 	static float decodeMipDAdjust(u32 encoded);
+	static float textureFootprint(float dxU, float dxV, float dyU, float dyV);
 	static void forceNearestFiltering(PipelineState& state);
 	static TextureView makeTextureView(const Color *pixels, u32 width, u32 height,
 			bool mipmapped);

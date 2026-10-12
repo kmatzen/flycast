@@ -546,6 +546,16 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 #endif
 }
 
+float SoftwareRasterizer::textureFootprint(float dxU, float dxV, float dyU, float dyV)
+{
+	const float squared = std::max(dxU * dxU + dxV * dxV, dyU * dyU + dyV * dyV);
+	if (std::isfinite(squared))
+		return std::sqrt(squared);
+	// A representable length can have an unrepresentable squared length.
+	// Preserve normal-path rounding while avoiding that intermediate overflow.
+	return std::max(std::hypot(dxU, dxV), std::hypot(dyU, dyV));
+}
+
 float SoftwareRasterizer::decodeMipDAdjust(u32 encoded)
 {
 	encoded &= 0xf;
@@ -1148,8 +1158,7 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 		const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ)
 				* fragmentState.texture.height;
 		result.valid = true;
-		result.numerator = std::sqrt(std::max(dxU * dxU + dxV * dxV,
-				dyU * dyU + dyV * dyV)) * fragmentState.mipDAdjust;
+		result.numerator = textureFootprint(dxU, dxV, dyU, dyV) * fragmentState.mipDAdjust;
 		return result;
 	};
 	const PipelineState& area1State = state.useArea1VertexData || state.area1 == nullptr
@@ -1372,8 +1381,7 @@ void SoftwareRasterizer::drawTriangle(const Vertex& in0, const Vertex& in1, cons
 								* reciprocalDenominator * fragmentState.texture.width;
 						const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ)
 								* reciprocalDenominator * fragmentState.texture.height;
-						const float footprint = std::sqrt(std::max(dxU * dxU + dxV * dxV,
-								dyU * dyU + dyV * dyV));
+						const float footprint = textureFootprint(dxU, dxV, dyU, dyV);
 						pvrD = std::max(0.f, footprint * fragmentState.mipDAdjust);
 					}
 				}

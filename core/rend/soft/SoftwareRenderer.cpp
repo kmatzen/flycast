@@ -1048,8 +1048,8 @@ private:
 			const float dxV = (dvqDx * referenceQ - dqDx * referenceVQ) * textureHeight;
 			const float dyU = (duqDy * referenceQ - dqDy * referenceUQ) * textureWidth;
 			const float dyV = (dvqDy * referenceQ - dqDy * referenceVQ) * textureHeight;
-			command.mipNumerator = std::sqrt(std::max(dxU * dxU + dxV * dxV,
-					dyU * dyU + dyV * dyV)) * state.mipDAdjust;
+			command.mipNumerator = SoftwareRasterizer::textureFootprint(dxU, dxV, dyU, dyV)
+					* state.mipDAdjust;
 		}
 		commands.push_back(command);
 		return true;

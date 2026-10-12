@@ -696,7 +696,8 @@ TEST(HybridTileRenderer, MatchesOracleForMipSelectionAndTrilinearWeights)
 			Case { 1.f, false, false }, Case { 2.f, false, false },
 			Case { 3.f, false, false }, Case { 1.5f, true, false },
 			Case { 1.5f, true, true }, Case { 0x1p32f, false, false },
-			Case { 0x1p32f, false, true }, Case { 0x1p40f, false, true } })
+			Case { 0x1p32f, false, true }, Case { 0x1p40f, false, true },
+			Case { 0x1p64f, false, false } })
 	{
 		SoftwareRasterizer cpu(2, 2);
 		PipelineState state;
