@@ -703,6 +703,42 @@ std::vector<Color> SoftwareRasterizer::filterVertical(const std::vector<Color>& 
 	return destination;
 }
 
+std::vector<Color> SoftwareRasterizer::scaleVerticalPvr(
+		const std::vector<Color>& source, u32 width, u32 height,
+		u32 outputHeight, u32 scaleFactor)
+{
+	if (width == 0 || height == 0 || outputHeight == 0
+			|| source.size() < static_cast<size_t>(width) * height)
+		return {};
+	// SCALER_CTL is unsigned 6.10 fixed point. The PVR starts at source line
+	// zero and advances by the programmed factor for each output line. Do not
+	// infer a new ratio from the truncated destination height: notably, 0x0401
+	// is the documented near-1x flicker-free setting and emits one fewer line.
+	if (scaleFactor == 0)
+		scaleFactor = 1024;
+	std::vector<Color> destination(static_cast<size_t>(width) * outputHeight);
+	for (u32 y = 0; y < outputHeight; ++y)
+	{
+		const u64 sourceFixed = static_cast<u64>(y) * scaleFactor;
+		const u32 y0 = std::min<u32>(sourceFixed >> 10, height - 1);
+		const u32 y1 = std::min(y0 + 1, height - 1);
+		const float fraction = static_cast<float>(sourceFixed & 0x3ff) / 1024.f;
+		for (u32 x = 0; x < width; ++x)
+		{
+			const Color& top = source[static_cast<size_t>(y0) * width + x];
+			const Color& bottom = source[static_cast<size_t>(y1) * width + x];
+			auto interpolate = [&](auto member) {
+				return clampByte(top.*member + (bottom.*member - top.*member) * fraction);
+			};
+			destination[static_cast<size_t>(y) * width + x] = {
+				interpolate(&Color::r), interpolate(&Color::g),
+				interpolate(&Color::b), interpolate(&Color::a)
+			};
+		}
+	}
+	return destination;
+}
+
 std::vector<Color> SoftwareRasterizer::selectInterlacedField(
 		const std::vector<Color>& source, u32 width, u32 height, u32 outputHeight,
 		bool oddField)

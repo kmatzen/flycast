@@ -212,6 +212,8 @@ public:
 			u32 sourceWidth, u32 sourceHeight, u32 destinationWidth, u32 destinationHeight);
 	static std::vector<Color> filterVertical(const std::vector<Color>& source,
 			u32 width, u32 height, u8 outerCoefficient, u8 centerCoefficient);
+	static std::vector<Color> scaleVerticalPvr(const std::vector<Color>& source,
+			u32 width, u32 height, u32 outputHeight, u32 scaleFactor);
 	static std::vector<Color> selectInterlacedField(const std::vector<Color>& source,
 			u32 width, u32 height, u32 outputHeight, bool oddField);
 	static std::vector<Color> scaleHorizontalHalf(const std::vector<Color>& source,

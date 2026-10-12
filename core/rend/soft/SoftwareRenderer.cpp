@@ -1876,6 +1876,15 @@ private:
 			scaleSourceHeight = scaledSize.y;
 			output = field.data();
 		}
+		if (scaledSize.y != static_cast<int>(scaleSourceHeight))
+		{
+			scaled = SoftwareRasterizer::scaleVerticalPvr(*scaleSource,
+					scaleSourceWidth, scaleSourceHeight, scaledSize.y,
+					rendContext->scaler_ctl.vscalefactor);
+			scaleSource = &scaled;
+			scaleSourceHeight = scaledSize.y;
+			output = scaled.data();
+		}
 		if (rendContext->scaler_ctl.hscale && sourceWidth >= 2)
 		{
 			horizontal = SoftwareRasterizer::scaleHorizontalHalf(*scaleSource,
@@ -1934,6 +1943,7 @@ private:
 		std::vector<Color> field;
 		std::vector<Color> horizontal;
 		std::vector<Color> scaled;
+		std::vector<Color> ditheredOutput;
 		const Color *output = source.data();
 		const std::vector<Color> *scaleSource = &source;
 		u32 scaleSourceWidth = sourceWidth;
@@ -1957,6 +1967,15 @@ private:
 			scaleSourceHeight = scaledSize.y;
 			output = field.data();
 		}
+		if (scaledSize.y != static_cast<int>(scaleSourceHeight))
+		{
+			scaled = SoftwareRasterizer::scaleVerticalPvr(*scaleSource,
+					scaleSourceWidth, scaleSourceHeight, scaledSize.y,
+					rendContext->scaler_ctl.vscalefactor);
+			scaleSource = &scaled;
+			scaleSourceHeight = scaledSize.y;
+			output = scaled.data();
+		}
 		if (rendContext->scaler_ctl.hscale && sourceWidth >= 2)
 		{
 			horizontal = SoftwareRasterizer::scaleHorizontalHalf(*scaleSource,
@@ -1975,12 +1994,11 @@ private:
 		if (rendContext->fb_W_CTRL.fb_dither
 				&& rendContext->fb_W_CTRL.fb_packmode <= 3)
 		{
-			if (scaled.empty())
-				scaled.assign(output,
-						output + static_cast<size_t>(scaledSize.x) * scaledSize.y);
-			SoftwareRasterizer::ditherFramebuffer(scaled, scaledSize.x, scaledSize.y,
+			ditheredOutput.assign(output,
+					output + static_cast<size_t>(scaledSize.x) * scaledSize.y);
+			SoftwareRasterizer::ditherFramebuffer(ditheredOutput, scaledSize.x, scaledSize.y,
 					rendContext->fb_W_CTRL.fb_packmode);
-			output = scaled.data();
+			output = ditheredOutput.data();
 		}
 		for (const RegionInfo& region : committedRegions)
 		{

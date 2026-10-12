@@ -454,6 +454,27 @@ TEST(SoftwareRasterizer, AppliesPvrThreeLineVerticalFilter)
 	EXPECT_EQ(filtered[2], (Color { 175, 175, 175, 175 }));
 }
 
+TEST(SoftwareRasterizer, UsesProgrammedPvrVerticalScaleFactor)
+{
+	const std::vector<Color> source {
+		{ 0, 0, 0, 0 }, { 64, 64, 64, 64 }, { 128, 128, 128, 128 },
+		{ 192, 192, 192, 192 }, { 255, 255, 255, 255 },
+	};
+	const auto scaled = SoftwareRasterizer::scaleVerticalPvr(source, 1, 5, 4, 0x500);
+	ASSERT_EQ(scaled.size(), 4u);
+	// A 1.25 source-line step samples 0, 1.25, 2.5, and 3.75. A generic
+	// destination-size ratio would instead shift every sample by 1/8 line.
+	EXPECT_EQ(scaled[0], (Color { 0, 0, 0, 0 }));
+	EXPECT_EQ(scaled[1], (Color { 80, 80, 80, 80 }));
+	EXPECT_EQ(scaled[2], (Color { 160, 160, 160, 160 }));
+	EXPECT_EQ(scaled[3], (Color { 239, 239, 239, 239 }));
+
+	const auto flickerFree = SoftwareRasterizer::scaleVerticalPvr(
+			source, 1, 5, 4, 0x401);
+	EXPECT_EQ(flickerFree.front(), source.front());
+	EXPECT_EQ(flickerFree[1], source[1]);
+}
+
 TEST(SoftwareRasterizer, SelectsPvrInterlaceFieldLines)
 {
 	const std::vector<Color> source {
