@@ -877,3 +877,12 @@ The new test failed before the fix and passes afterward. The app builds and
 all 130 tests pass on ARM64 and x86_64 Rosetta. This hardens the writer's input
 contract; it does not imply a demonstrated game-visible defect for the normal
 software-renderer path, which generally supplies preclipped rectangles.
+
+The production `pvr_map32` arithmetic now delegates to the pure
+`pvrMap32Address` helper with unchanged platform mask/bank parameters. A test
+checks all 8388608 Dreamcast byte addresses against a quotient/remainder
+bank-interleaving reference, plus explicit bank-transition and aperture-wrap
+cases. The app builds and all 131 tests pass on ARM64 and x86_64 Rosetta.
+This establishes agreement between the production mapping and the modeled
+bank layout; it is not a physical-hardware observation and does not yet test
+write side effects, dirty tracking, RTT pointer wrapping, or Naomi geometry.

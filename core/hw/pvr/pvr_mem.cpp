@@ -5,6 +5,7 @@
 	Most of this was hacked together when i needed support for YUV-dma for thps2 ;)
 */
 #include "pvr_mem.h"
+#include "vram_map.h"
 #include "Renderer_if.h"
 #include "ta.h"
 #include "hw/holly/sb.h"
@@ -288,19 +289,7 @@ void DYNACALL TAWriteSQ(u32 address, const SQBuffer *sqb)
 
 static u32 pvr_map32(u32 offset32)
 {
-	//64b wide bus is achieved by interleaving the banks every 32 bits
-	const u32 static_bits = VRAM_MASK - (VRAM_BANK_BIT * 2 - 1) + 3;
-	const u32 offset_bits = (VRAM_BANK_BIT - 1) & ~3;
-
-	u32 bank = (offset32 & VRAM_BANK_BIT) / VRAM_BANK_BIT;
-
-	u32 rv = offset32 & static_bits;
-
-	rv |= (offset32 & offset_bits) * 2;
-
-	rv |= bank * 4;
-	
-	return rv;
+	return pvrMap32Address(offset32, VRAM_MASK, VRAM_BANK_BIT);
 }
 
 template<typename T, bool upper>

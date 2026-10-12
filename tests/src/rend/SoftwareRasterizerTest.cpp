@@ -1,12 +1,31 @@
 #include "rend/soft/SoftwareRasterizer.h"
 #include "hw/pvr/pvr_regs.h"
 #include "rend/FramebufferWrite.h"
+#include "hw/pvr/vram_map.h"
 
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
 
 using namespace rend::soft;
+
+TEST(SoftwareRasterizer, MapsEveryDreamcastVramByteAcrossBanksAndApertureWrap)
+{
+	// Independent quotient/remainder formulation: two 4 MiB banks supply
+	// alternating four-byte lanes of each physical eight-byte word.
+	for (u32 address = 0; address < 0x800000; ++address)
+	{
+		const u32 bank = address / 0x400000;
+		const u32 offset = address % 0x400000;
+		const u32 expected = (offset / 4) * 8 + bank * 4 + offset % 4;
+		ASSERT_EQ(pvrMap32Address(address, 0x7fffff, 0x400000), expected)
+				<< "address=" << address;
+	}
+	EXPECT_EQ(pvrMap32Address(0x3fffff, 0x7fffff, 0x400000), 0x7ffffbu);
+	EXPECT_EQ(pvrMap32Address(0x400000, 0x7fffff, 0x400000), 4u);
+	EXPECT_EQ(pvrMap32Address(0x7fffff, 0x7fffff, 0x400000), 0x7fffffu);
+	EXPECT_EQ(pvrMap32Address(0x800000, 0x7fffff, 0x400000), 0u);
+}
 
 TEST(SoftwareRasterizer, PreservesBytePaddingAtClippedRgb888RowStart)
 {
