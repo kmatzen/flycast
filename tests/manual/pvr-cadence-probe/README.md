@@ -115,3 +115,40 @@ stream logs. Experimental app SHA-256:
 The ELF hash is unchanged. These are exploratory results, not a performance
 claim. Next investigation should locate time spent between frame publication,
 UI acquisition, and completed swap before changing buffering again.
+
+### Publication/selection/swap trace
+
+Pass `--stages` to the cadence runner to enable `FLYCAST_PVR_TRACE_STAGES`.
+Then analyze each separate stderr log:
+
+```sh
+node tools/read-pvr-stages.mjs /path/to/vsync-on-1.stderr.log
+node --test tools/read-pvr-stages.test.mjs
+```
+
+The records use a process-wide monotonic clock and immutable image sequence
+numbers. Publication is timestamped immediately before the mailbox store;
+selection follows the UI mailbox load; swap follows the host swap return.
+The selection-to-swap interval includes upload, drawing, UI scheduling, and
+swap waiting, so it does not isolate a GPU or display-driver stall. Logging
+itself adds overhead. These are diagnostic runs, not performance benchmarks.
+
+In `/tmp/pvr-cadence-stages-20261012`, the two VSync runs missed one and six
+measured IDs respectively. Every missing ID had a publication record but no
+selection record. Both non-VSync runs missed none. VSync run one selected ID
+539 at 410878106277 microseconds and completed its swap at 410878133379
+(27,102 microseconds later). In between, IDs 540 and 541 were published at
+410878120110 and 410878129527. The next selection was 541: 540 was replaced
+before UI selection, not omitted by the PVR rendering work.
+
+Selection-to-swap medians were 15,701 and 14,955 microseconds for the VSync
+runs. Their p95 values were 16,933 and 16,942. Both had zero audio underruns;
+the non-VSync runs had nine and zero. App SHA-256:
+`8951acc796c24276f9345aad4d3a750abcc5ce55be4b397b3f50dde93cde89cc`.
+ELF hash is unchanged. The captures fail the complete measured-delivery gate.
+
+A native Metal presentation experiment must preserve the fully converted
+framebuffer packet, rather than bypass framebuffer packing/readback semantics.
+It also needs the UI overlay, resizing, paused-image retention, and teardown
+to work together: the existing OpenGL driver owns both ImGui rendering and
+the final swap. Replacing only the rasterizer does not replace that path.

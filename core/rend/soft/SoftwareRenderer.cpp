@@ -664,6 +664,7 @@ public:
 		auto frame = PresentationFrame::create(width, height, aspectRatio, border,
 				std::move(pixels), ++presentationSequence, presentationContentSequence);
 		frameReady = frame != nullptr;
+		tracePresentationStage("publish", frame);
 		framebufferPresentation.publish(std::move(frame));
 		clearLastFrame = false;
 		frameAspectRatio = getDCFramebufferAspectRatio();
@@ -698,10 +699,23 @@ public:
 		clearLastFrame = false;
 	}
 
+	void tracePresentationStage(const char *stage, const std::shared_ptr<const PresentationFrame>& frame) const
+	{
+		if (!emulationThreadRendering || !frame || std::getenv("FLYCAST_PVR_TRACE_STAGES") == nullptr)
+			return;
+		const auto time = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+		const int id = frame->width == 640 && frame->height == 480
+				? decodeCadenceProbeId(frame->pixels[240 * 640 + 320]) : -1;
+		std::fprintf(stderr, "PVR_STAGE stage=%s sequence=%llu id=%d time_us=%lld\n", stage,
+				static_cast<unsigned long long>(frame->sequence), id, static_cast<long long>(time));
+	}
+
 	void PresentationCompleted() override
 	{
 		if (!emulationThreadRendering || !pendingPresentedFramebuffer)
 			return;
+		tracePresentationStage("swap", pendingPresentedFramebuffer);
 		presentationDelivery.complete(pendingPresentedFramebuffer->sequence);
 		presentationContentDelivery.complete(pendingPresentedFramebuffer->contentSequence);
 		if (std::getenv("FLYCAST_PVR_TRACE_CADENCE_IDS") != nullptr
@@ -730,6 +744,7 @@ public:
 			auto frame = framebufferPresentation.acquire();
 			if (!frame || frame == lastPresentedFramebuffer || clearLastFrame)
 				return false;
+			tracePresentationStage("select", frame);
 			lastPresentedFramebuffer = std::move(frame);
 	#ifndef LIBRETRO
 			imguiDriver->setFrameRendered();

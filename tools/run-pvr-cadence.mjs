@@ -3,13 +3,13 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const [appArg, elfArg, outputArg] = process.argv.slice(2);
-if (process.argv.length !== 5)
-  throw Error('Usage: node tools/run-pvr-cadence.mjs /path/to/Flycast /path/to/pvr-cadence-probe.elf /new/output/directory');
+const [appArg, elfArg, outputArg, trace] = process.argv.slice(2);
+if (process.argv.length !== 5 && !(process.argv.length === 6 && trace === '--stages'))
+  throw Error('Usage: node tools/run-pvr-cadence.mjs /path/to/Flycast /path/to/pvr-cadence-probe.elf /new/output/directory [--stages]');
 const app = resolve(appArg), elf = resolve(elfArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
-const report = { schema: 1, app, elf, appHash: hash(app), elfHash: hash(elf), hardwareValidated: false, cases: [] };
+const report = { schema: 1, app, elf, stageTracing: trace === '--stages', appHash: hash(app), elfHash: hash(elf), hardwareValidated: false, cases: [] };
 
 for (let run = 0; run < 4; ++run) {
   const vsync = run % 2 === 0;
@@ -21,6 +21,7 @@ for (let run = 0; run < 4; ++run) {
   Object.assign(env, { FLYCAST_HYBRID_SOFT: '1', FLYCAST_PVR_DECOUPLED_PRESENT: '1',
     FLYCAST_PVR_TRACE_DELIVERY: '1', FLYCAST_PVR_TRACE_CADENCE_IDS: '1',
     FLYCAST_PVR_TRACE_EMULATION: '1', FLYCAST_AUDIO_TRACE_DELIVERY: '1' });
+  if (trace === '--stages') env.FLYCAST_PVR_TRACE_STAGES = '1';
   const log = await new Promise((accept, reject) => {
     const child = spawn(app, ['-config', 'audio:backend=sdl2', '-config', 'config:pvr.rend=7',
       '-config', 'config:rend.ThreadedRendering=yes', '-config', 'config:rend.EmulateFramebuffer=yes',
