@@ -17,13 +17,21 @@ template<typename Clip, typename WriteRow>
 void forEachFramebufferWriteRow(u32 width, u32 height, const u8 *data,
 		u32 base, u32 bytesPerPixel, u32 lineStride, const Clip& clip, WriteRow writeRow)
 {
-	const u32 xmax = std::min<u32>(width, clip.origin.x + clip.size.x);
-	const u32 ymax = std::min<u32>(height, clip.origin.y + clip.size.y);
-	for (u32 y = clip.origin.y; y < ymax; ++y)
+	if (clip.size.x <= 0 || clip.size.y <= 0)
+		return;
+	const u32 xmin = static_cast<u32>(std::clamp<s64>(clip.origin.x, 0, width));
+	const u32 ymin = static_cast<u32>(std::clamp<s64>(clip.origin.y, 0, height));
+	const u32 xmax = static_cast<u32>(std::clamp<s64>(
+			static_cast<s64>(clip.origin.x) + clip.size.x, 0, width));
+	const u32 ymax = static_cast<u32>(std::clamp<s64>(
+			static_cast<s64>(clip.origin.y) + clip.size.y, 0, height));
+	if (xmin >= xmax || ymin >= ymax)
+		return;
+	for (u32 y = ymin; y < ymax; ++y)
 	{
-		const u8 *source = data + (static_cast<size_t>(y) * width + clip.origin.x) * 4;
+		const u8 *source = data + (static_cast<size_t>(y) * width + xmin) * 4;
 		const u32 address = framebufferWriteRowAddress(base, width, bytesPerPixel,
-				lineStride, y) + clip.origin.x * bytesPerPixel;
-		writeRow(address, source, clip.origin.x, xmax, y);
+				lineStride, y) + xmin * bytesPerPixel;
+		writeRow(address, source, xmin, xmax, y);
 	}
 }

@@ -53,6 +53,28 @@ TEST(SoftwareRasterizer, WritesClippedRgb888RowsWithoutTouchingPadding)
 	EXPECT_EQ(actual, expected); // Includes clipped pixels, padding, and guards.
 }
 
+TEST(SoftwareRasterizer, IntersectsFramebufferClipBeforeFormingSourcePointers)
+{
+	struct Clip { struct Point { int x, y; }; Point origin, size; };
+	std::vector<u8> source(4 * 4 * 4);
+	unsigned calls = 0;
+	forEachFramebufferWriteRow(4, 4, source.data(), 0, 3, 16,
+			Clip { { -1, -1 }, { 3, 3 } },
+			[&](u32 address, const u8 *pixel, u32 xmin, u32 xmax, u32 y) {
+				EXPECT_EQ(xmin, 0u);
+				EXPECT_EQ(xmax, 2u);
+				EXPECT_EQ(y, calls++);
+				EXPECT_EQ(pixel, source.data() + y * 16);
+				EXPECT_EQ(address, y * 16);
+			});
+	EXPECT_EQ(calls, 2u);
+	for (const Clip clip : { Clip { { 0, 0 }, { 0, 4 } },
+			Clip { { 5, 0 }, { 3, 4 } }, Clip { { 0, 5 }, { 4, 3 } },
+			Clip { { -4, 0 }, { 2, 4 } }, Clip { { 0, 0 }, { -1, 4 } } })
+		forEachFramebufferWriteRow(4, 4, source.data(), 0, 3, 16, clip,
+				[&](u32, const u8 *, u32, u32, u32) { ADD_FAILURE() << "Empty intersection wrote a row"; });
+}
+
 TEST(SoftwareRasterizer, TruncatesBackgroundDepthRegisterLowBits)
 {
 	ISP_BACKGND_D_type depth {};

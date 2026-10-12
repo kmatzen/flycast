@@ -867,3 +867,13 @@ indexed expected bytes, including untouched pixels and padding. All 129 tests
 pass on ARM64 and x86_64 Rosetta, and the app builds. This covers production
 source/destination row traversal, but the test callback does not exercise
 `FBPixelWriter`'s physical VRAM mapping or the production color packer.
+
+A follow-up failing regression exposed missing clip intersection in that
+traversal: negative top-left coordinates skipped visible rows, and empty or
+fully outside rectangles still invoked the row callback. The traversal now
+intersects signed clip bounds with image dimensions before constructing source
+pointers, rejects nonpositive extents, and uses 64-bit endpoint arithmetic.
+The new test failed before the fix and passes afterward. The app builds and
+all 130 tests pass on ARM64 and x86_64 Rosetta. This hardens the writer's input
+contract; it does not imply a demonstrated game-visible defect for the normal
+software-renderer path, which generally supplies preclipped rectangles.
