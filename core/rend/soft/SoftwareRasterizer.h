@@ -189,6 +189,7 @@ public:
 	u32 height() const { return height_; }
 	const std::vector<Color>& colorBuffer() const { return colorBuffer_; }
 	const std::vector<float>& depthBuffer() const { return depthBuffer_; }
+	const std::vector<Color>& secondaryBuffer() const { return secondaryBuffer_; }
 	const std::vector<u8>& stencilBuffer() const { return stencilBuffer_; }
 	Color pixel(u32 x, u32 y) const;
 	float depth(u32 x, u32 y) const;

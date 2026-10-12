@@ -878,13 +878,13 @@ private:
 		RenderPass previous {};
 		size_t totalTriangles = 0;
 		size_t totalTextures = 0;
+		double totalCpuTranslucentMilliseconds = 0.;
 		hybrid::Timing totalTiming;
 		for (size_t passIndex = 0; passIndex < rendContext->render_passes.size(); ++passIndex)
 		{
 			const RenderPass& pass = rendContext->render_passes[passIndex];
 			const std::vector<RegionInfo>& regions = passRegions[passIndex];
-			if (regions.empty() || (config::ModifierVolumes
-					&& pass.mvo_tr_count != previous.mvo_tr_count))
+			if (regions.empty())
 				return false;
 			const bool useOpaqueModifiers = config::ModifierVolumes
 					&& pass.mvo_count != previous.mvo_count;
@@ -896,11 +896,12 @@ private:
 			std::vector<u8> punchMask(pixelCount);
 			std::vector<u8> translucentMask(pixelCount);
 			std::vector<u8> opaqueModifierMask(pixelCount);
+			bool regionSortDiffers = false;
 			for (const RegionInfo& region : regions)
 			{
 				if (hasTranslucent && region.translucentPresent
 						&& region.autosort != autosort)
-					return false;
+					regionSortDiffers = true;
 				const s32 x0 = std::clamp<s32>(region.x0, 0, width);
 				const s32 y0 = std::clamp<s32>(region.y0, 0, height);
 				const s32 x1 = std::clamp<s32>(region.x1, 0, width);
@@ -916,6 +917,10 @@ private:
 					if (region.opaqueModifierPresent) std::fill(opaqueModifierMask.begin() + first, opaqueModifierMask.begin() + last, 1);
 				}
 			}
+			const bool cpuTranslucent = hasTranslucent && (regionSortDiffers
+					|| (config::ModifierVolumes
+							&& (pass.mvo_count != previous.mvo_count
+									|| pass.mvo_tr_count != previous.mvo_tr_count)));
 
 			std::vector<hybrid::Triangle> commands;
 			std::vector<u32> textureAtlas { 0xffffffffu };
@@ -924,8 +929,9 @@ private:
 					pass.op_count, false, false, 0, commands, textureAtlas, textureOffsets)
 					|| !appendHybridList(rendContext->global_param_pt, previous.pt_count,
 							pass.pt_count, true, false, 1, commands, textureAtlas, textureOffsets)
-					|| !appendHybridList(rendContext->global_param_tr, previous.tr_count,
-							pass.tr_count, false, autosort, 2, commands, textureAtlas, textureOffsets)
+					|| (!cpuTranslucent && !appendHybridList(rendContext->global_param_tr,
+							previous.tr_count, pass.tr_count, false, autosort, 2,
+							commands, textureAtlas, textureOffsets))
 					|| commands.empty())
 				return false;
 			hybrid::Frame frame { width, height, &commands, &textureAtlas, &accumulation };
@@ -980,6 +986,34 @@ private:
 				timing.gpuMilliseconds += modifierTiming.gpuMilliseconds;
 				timing.readbackMilliseconds += modifierTiming.readbackMilliseconds;
 			}
+			if (cpuTranslucent)
+			{
+				const auto cpuStart = std::chrono::steady_clock::now();
+				std::vector<Color> colors(output.size());
+				std::vector<Color> secondary(preservedSecondary.size());
+				std::memcpy(colors.data(), output.data(), output.size() * sizeof(u32));
+				std::memcpy(secondary.data(), preservedSecondary.data(),
+						preservedSecondary.size() * sizeof(u32));
+				SoftwareRasterizer translucentRasterizer(width, height);
+				translucentRasterizer.restoreColor(colors);
+				translucentRasterizer.restoreDepth(preservedDepth);
+				translucentRasterizer.restoreSecondary(secondary);
+				SoftwareRasterizer *savedRasterizer = rasterizer;
+				const std::vector<u8> *savedCoverageMask = activeCoverageMask;
+				rasterizer = &translucentRasterizer;
+				drawTranslucentPass(passIndex, previous, pass, regions);
+				activeCoverageMask = savedCoverageMask;
+				rasterizer = savedRasterizer;
+				std::memcpy(output.data(), translucentRasterizer.colorBuffer().data(),
+						output.size() * sizeof(u32));
+				preservedDepth = translucentRasterizer.depthBuffer();
+				preservedSecondary.resize(pixelCount);
+				std::memcpy(preservedSecondary.data(),
+						translucentRasterizer.secondaryBuffer().data(),
+						pixelCount * sizeof(u32));
+				totalCpuTranslucentMilliseconds += std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() - cpuStart).count();
+			}
 			accumulation = std::move(output);
 			std::vector<RegionInfo> committedRegions;
 			for (const RegionInfo& region : regions)
@@ -1008,10 +1042,10 @@ private:
 		}
 		frameStore = std::move(committed);
 		if (trace)
-			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",
+			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f\n",
 					rendContext->render_passes.size(), totalTriangles, totalTextures,
 					totalTiming.encodeMilliseconds, totalTiming.gpuMilliseconds,
-					totalTiming.readbackMilliseconds);
+					totalTiming.readbackMilliseconds, totalCpuTranslucentMilliseconds);
 		return true;
 	}
 
