@@ -208,15 +208,18 @@ public:
 		{
 			if (rendContext->isRTT)
 			{
-				std::vector<RegionInfo> committedRegions;
-				for (const RegionInfo& region : passRegions[0])
-					if (region.flushAccumulate)
-						committedRegions.push_back(region);
-				if (committedRegions.empty() && passRegions[0].empty())
-					committedRegions.push_back({ 0, 0, static_cast<s32>(width),
-							static_cast<s32>(height), false, true, false, false,
-							true, true, true, true, true });
-				writeFramebufferToVram(frameStore, committedRegions);
+				if (rendContext->render_passes.size() == 1)
+				{
+					std::vector<RegionInfo> committedRegions;
+					for (const RegionInfo& region : passRegions[0])
+						if (region.flushAccumulate)
+							committedRegions.push_back(region);
+					if (committedRegions.empty() && passRegions[0].empty())
+						committedRegions.push_back({ 0, 0, static_cast<s32>(width),
+								static_cast<s32>(height), false, true, false, false,
+								true, true, true, true, true });
+					writeFramebufferToVram(frameStore, committedRegions);
+				}
 				rasterizer = screenRasterizer.get();
 				activeCoverageMask = nullptr;
 				return false;
@@ -869,7 +872,7 @@ private:
 			return false;
 		std::vector<u32> accumulation(frameStore.size());
 		std::memcpy(accumulation.data(), frameStore.data(), frameStore.size() * sizeof(Color));
-		std::vector<u32> committed = accumulation;
+		std::vector<Color> committed = frameStore;
 		std::vector<float> preservedDepth;
 		std::vector<u32> preservedSecondary;
 		RenderPass previous {};
@@ -948,9 +951,11 @@ private:
 					|| output.size() != accumulation.size())
 				return false;
 			accumulation = std::move(output);
+			std::vector<RegionInfo> committedRegions;
 			for (const RegionInfo& region : regions)
 				if (region.flushAccumulate)
 				{
+					committedRegions.push_back(region);
 					const s32 x0 = std::clamp<s32>(region.x0, 0, width);
 					const s32 y0 = std::clamp<s32>(region.y0, 0, height);
 					const s32 x1 = std::clamp<s32>(region.x1, 0, width);
@@ -958,9 +963,11 @@ private:
 					for (s32 y = y0; y < y1; ++y)
 					{
 						const size_t first = static_cast<size_t>(y) * width + x0;
-						std::copy(accumulation.begin() + first,
-								accumulation.begin() + first + (x1 - x0), committed.begin() + first);
+						std::memcpy(committed.data() + first, accumulation.data() + first,
+								static_cast<size_t>(x1 - x0) * sizeof(u32));
 					}
+			if (rendContext->isRTT && !committedRegions.empty())
+				writeFramebufferToVram(committed, committedRegions);
 				}
 			totalTriangles += commands.size();
 			totalTextures += textureOffsets.size();
@@ -969,7 +976,7 @@ private:
 			totalTiming.readbackMilliseconds += timing.readbackMilliseconds;
 			previous = pass;
 		}
-		std::memcpy(frameStore.data(), committed.data(), committed.size() * sizeof(u32));
+		frameStore = std::move(committed);
 		if (trace)
 			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",
 					rendContext->render_passes.size(), totalTriangles, totalTextures,
@@ -998,8 +1005,8 @@ private:
 			return reject("framebuffer-emulation");
 		if (rendContext->render_passes.size() > 1)
 		{
-			if (rendContext->isRTT)
-				return reject("multipass-render-to-texture");
+			if (rendContext->isRTT && std::getenv("FLYCAST_HYBRID_VERIFY") != nullptr)
+				return reject("multipass-rtt-verification-mutates-vram");
 			return tryRenderHybridPasses(width, height, passRegions, frameStore, trace)
 					|| reject("unsupported-multiple-passes");
 		}
