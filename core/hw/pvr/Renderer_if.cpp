@@ -873,7 +873,31 @@ int rend_end_render(int tag, int cycles, int jitter, void *arg)
 		asic_RaiseInterrupt(holly_RENDER_DONE_vd);
 	}
 	if (pend_rend && config::ThreadedRendering)
+	{
+		const bool traceWait = std::getenv("FLYCAST_PVR_TRACE_RENDER_WAIT") != nullptr;
+		const auto start = traceWait ? std::chrono::steady_clock::now()
+				: std::chrono::steady_clock::time_point {};
 		renderEnd.Wait();
+		if (traceWait)
+		{
+			// Emulation-thread wall wait, including any earlier presentation
+			// blocking the render consumer. This is not GPU execution time.
+			static unsigned count = 0;
+			static double totalMs = 0.;
+			static double maximumMs = 0.;
+			const double elapsedMs = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - start).count();
+			totalMs += elapsedMs;
+			maximumMs = std::max(maximumMs, elapsedMs);
+			if (++count == 120)
+			{
+				std::fprintf(stderr, "PVR_RENDER_WAIT calls=%u mean_ms=%.3f max_ms=%.3f\n",
+						count, totalMs / count, maximumMs);
+				count = 0;
+				totalMs = maximumMs = 0.;
+			}
+		}
+	}
 
 	return 0;
 }

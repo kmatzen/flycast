@@ -1793,3 +1793,31 @@ and the full-VRAM differential verifier is disabled in threaded mode. Do not
 turn VSync off by default or weaken framebuffer semantics on this evidence.
 Next investigate display wait/queue scheduling while preserving framebuffer
 read ordering, rather than assuming shader throughput alone explains 0.66x.
+
+### Render-completion wait attribution
+
+`FLYCAST_PVR_TRACE_RENDER_WAIT=1` now measures the emulation thread's
+`renderEnd.Wait()` wall time in 120-call windows. It does not change the
+wait or synchronization. These totals include queue delay and any preceding
+window presentation, not just GPU execution. The trace is threaded-only;
+partial windows are not reported and restarting the app resets its counters.
+
+The rebuilt ARM64 app repeated the preceding threaded comparison with this
+trace enabled. `/tmp/pvr-render-wait-vsync.log` reports early mean waits of
+30.496 and 31.923 ms, followed by 46.234, 47.068, 46.719, and 46.989 ms.
+The otherwise matching VSync-off run (`/tmp/pvr-render-wait-nosync.log`)
+reports early means of 9.702 and 9.861 ms, then 16.499–17.500 ms over nine
+windows. Final audio underruns were 398/1872 callbacks with VSync and
+3/2298 without; these runs differ in duration, so the raw counts are not a
+matched-duration rate comparison. Both stopped normally with zero dropped
+audio input frames. The host remained muted.
+
+Source inspection explains the coupling: `mainui_loop` processes the PVR
+queue through `emu.render()` and then calls the UI driver's `present()` on
+the same thread; the OpenGL driver swaps the window there. Full framebuffer
+emulation retains the render-completion wait until framebuffer writes are
+finished. This evidence supports separating presentation scheduling from
+queue progress, not removing the completion wait. Any such change still
+needs immutable presentation ownership, ordered framebuffer reads/writes,
+shutdown and resize handling, and verification of tear-free output. No
+scheduling or default-VSync behavior was changed by this diagnostic.
