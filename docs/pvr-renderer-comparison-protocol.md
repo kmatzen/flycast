@@ -2019,3 +2019,40 @@ there were zero PVR comparisons before recreation. Moving the checkpoints
 later tests active rendering rather than weakening that precondition. GUI
 pause/resume interaction, window resize, stopped-state recreation, and error
 injection remain separate validation work.
+
+### Retaining a paused display across renderer recreation
+
+Recreation now carries an owned software display image across destruction of
+the old renderer and GL context. The new renderer copies only RGBA pixels,
+dimensions, aspect ratio, and border color into its own presentation packet;
+it retains no old GL texture, IOSurface, rasterizer, or sequence identifier.
+Delivery accounting starts a fresh epoch. A frame marked cleared after game
+termination is not eligible for retention. Other renderer backends and the
+non-decoupled software path do not use this handoff.
+
+The lifecycle runner's `--paused` mode adds the explicit
+`FLYCAST_PVR_TEST_PAUSED_REINIT` hook. It stops and joins emulation before
+recreation, captures the current framebuffer image, requires the recreated renderer
+to remain stopped, compares the restored capture byte-for-byte, and draws
+and swaps that retained image with the new GL resources before explicitly
+resuming. The normal paused recreation path does not resume automatically.
+
+Both final-build paused cases pass in
+`/tmp/pvr-paused-final-20261012/report.json`: 79 and 204 full-VRAM comparisons
+before recreation and 40 after each, without color/VRAM mismatches. Both
+emit `paused_reinit running=0 retained=1 drawn=1` before explicit resume.
+These checks validate pixel retention and successful drawing/swap calls, not
+physical display scanout. The first case still records one skipped image
+state after resume under heavy verification; retention does not establish
+lossless delivery of every subsequent image. The earlier exploratory paused
+run, before the final cleared-frame guard and draw check, is retained in
+`/tmp/pvr-paused-reinit-20261012` and is not the final-build result.
+The same final executable also passes both running-recreation cases in
+`/tmp/pvr-retained-running-20261012/report.json`, with 79/197 full-VRAM
+comparisons before recreation and 41/40 after. Its first case likewise
+records one skipped image state, so these are lifecycle/correctness checks,
+not smooth-presentation benchmarks.
+
+This does not simulate GUI menu interaction or window resizing. Those paths,
+termination/error injection, longer play, and independent hardware validation
+remain unverified.

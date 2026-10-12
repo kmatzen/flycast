@@ -27,6 +27,7 @@
 #include "imgui_driver.h"
 #include "profiler/fc_profiler.h"
 #include "oslib/i18n.h"
+#include "rend/soft/SoftwareRenderer.h"
 
 #include <chrono>
 #include <thread>
@@ -105,6 +106,7 @@ void mainui_loop(bool forceStart)
 	// Explicit lifecycle regression hook, restricted below to the experimental
 	// decoupled renderer. Never schedules a reinit without a valid opt-in value.
 	u32 testReinitFrame = 0;
+	const bool testPausedReinit = std::getenv("FLYCAST_PVR_TEST_PAUSED_REINIT") != nullptr;
 	if (const char *value = std::getenv("FLYCAST_PVR_TEST_REINIT_FRAME"))
 	{
 		char *end = nullptr;
@@ -129,9 +131,16 @@ void mainui_loop(bool forceStart)
 			forceReinit = true;
 		bool testingReinit = testReinitFrame != 0 && MainFrameCount >= testReinitFrame
 				&& renderer != nullptr && renderer->RendersOnEmulationThread() && emu.running();
+		std::vector<u8> testRetainedImage;
+		int testRetainedWidth = 0, testRetainedHeight = 0;
 		if (testingReinit)
 		{
 			std::fprintf(stderr, "PVR_LIFECYCLE reinit_begin frame=%u running=1\n", MainFrameCount);
+			if (testPausedReinit)
+			{
+				emu.stopAndWait();
+				renderer->GetLastFrame(testRetainedImage, testRetainedWidth, testRetainedHeight);
+			}
 			testReinitFrame = 0;
 			forceReinit = true;
 		}
@@ -140,6 +149,7 @@ void mainui_loop(bool forceStart)
 		{
 			const bool resumeAfterReinit = renderer != nullptr
 					&& renderer->RendersOnEmulationThread() && emu.running();
+			const auto retainedPresentation = rend::soft::retainPresentation(renderer);
 			mainui_term();
 			int prevApi = isOpenGL(currentRenderer) || isSoftware(currentRenderer) ? 0 : isVulkan(currentRenderer) ? 1 : currentRenderer == RenderType::DirectX9 ? 2 : 3;
 			int newApi = isOpenGL(config::RendererType) || isSoftware(config::RendererType) ? 0 : isVulkan(config::RendererType) ? 1 : config::RendererType == RenderType::DirectX9 ? 2 : 3;
@@ -164,8 +174,24 @@ void mainui_loop(bool forceStart)
 				}
 			}
 			mainui_init();
+			rend::soft::restorePresentation(renderer, retainedPresentation);
 			if (resumeAfterReinit)
 				emu.start();
+			if (testingReinit && testPausedReinit)
+			{
+				std::vector<u8> restoredImage;
+				const bool captured = renderer != nullptr && renderer->GetLastFrame(
+						restoredImage, testRetainedWidth, testRetainedHeight);
+				const bool drawn = renderer != nullptr && imguiDriver != nullptr && renderer->RenderLastFrame();
+				if (drawn)
+				{
+					imguiDriver->setFrameRendered();
+					imguiDriver->present();
+				}
+				std::fprintf(stderr, "PVR_LIFECYCLE paused_reinit running=%u retained=%u drawn=%u\n",
+						emu.running(), captured && !testRetainedImage.empty() && restoredImage == testRetainedImage, drawn);
+				emu.start(); // Explicit test resume, not the normal recreation path.
+			}
 			forceReinit = false;
 			currentRenderer = config::RendererType;
 			if (testingReinit)

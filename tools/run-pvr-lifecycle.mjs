@@ -4,14 +4,15 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Integration regression, not a performance test or hardware reference.
-const [appArg, gameArg, outputArg] = process.argv.slice(2);
-if (process.argv.length !== 5)
-  throw Error('Usage: node tools/run-pvr-lifecycle.mjs /path/to/Flycast /path/to/game.cue /new/output/directory');
+const [appArg, gameArg, outputArg, modeArg] = process.argv.slice(2);
+if (process.argv.length < 5 || process.argv.length > 6 || (modeArg && modeArg !== '--paused'))
+  throw Error('Usage: node tools/run-pvr-lifecycle.mjs /path/to/Flycast /path/to/game.cue /new/output/directory [--paused]');
+const paused = modeArg === '--paused';
 const app = resolve(appArg), game = resolve(gameArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = () => createHash('sha256').update(readFileSync(app)).digest('hex');
 const executableHash = hash();
-const report = { schema: 1, app, game, executableHash, hardwareValidated: false, cases: [] };
+const report = { schema: 1, app, game, executableHash, paused, hardwareValidated: false, cases: [] };
 
 for (const frame of [480, 720]) {
   if (hash() !== executableHash) throw Error('Executable changed during lifecycle regression');
@@ -23,6 +24,7 @@ for (const frame of [480, 720]) {
     FLYCAST_PVR_DECOUPLED_PRESENT: '1', FLYCAST_PVR_TRACE_DELIVERY: '1',
     FLYCAST_PVR_TEST_REINIT_FRAME: String(frame),
   });
+  if (paused) env.FLYCAST_PVR_TEST_PAUSED_REINIT = '1';
   const log = await new Promise((accept, reject) => {
     const child = spawn(app, ['-config', 'audio:backend=null', '-config', 'config:pvr.rend=7',
       '-config', 'config:rend.ThreadedRendering=yes', '-config', 'config:rend.EmulateFramebuffer=yes',
@@ -62,6 +64,7 @@ for (const frame of [480, 720]) {
   const passed = hash() === executableHash && marker >= 0 && count(before) > 0 && count(after) >= 40
     && log.includes(`PVR_LIFECYCLE reinit_begin frame=${frame} running=1`)
     && finalReports.length === 2
+    && (!paused || log.includes('PVR_LIFECYCLE paused_reinit running=0 retained=1 drawn=1'))
     && !/HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(log)
     && /HYBRID verify pixels=307200 mismatches=0/.test(after);
   report.cases.push({ frame, passed, beforeVramComparisons: count(before), afterVramComparisons: count(after), finalReports });

@@ -671,6 +671,25 @@ public:
 
 	bool RendersOnEmulationThread() const override { return emulationThreadRendering; }
 
+	std::shared_ptr<const PresentationFrame> retainPresentation() const
+	{
+		return emulationThreadRendering && !clearLastFrame
+				? framebufferPresentation.acquire() : nullptr;
+	}
+
+	void restorePresentation(const std::shared_ptr<const PresentationFrame>& frame)
+	{
+		if (!emulationThreadRendering || !frame)
+			return;
+		// A new renderer starts a new delivery-counter epoch. Keep the image,
+		// not identifiers from the destroyed producer or any native resources.
+		auto restored = PresentationFrame::create(frame->width, frame->height,
+				frame->aspectRatio, frame->border, frame->pixels);
+		framebufferPresentation.publish(restored);
+		lastPresentedFramebuffer = std::move(restored);
+		clearLastFrame = false;
+	}
+
 	void PresentationCompleted() override
 	{
 		if (!emulationThreadRendering || !pendingPresentedFramebuffer)
@@ -2558,6 +2577,18 @@ private:
 };
 
 } // namespace
+
+std::shared_ptr<const PresentationFrame> retainPresentation(Renderer *renderer)
+{
+	auto software = dynamic_cast<SoftwareRenderer *>(renderer);
+	return software ? software->retainPresentation() : nullptr;
+}
+
+void restorePresentation(Renderer *renderer, std::shared_ptr<const PresentationFrame> frame)
+{
+	if (auto software = dynamic_cast<SoftwareRenderer *>(renderer))
+		software->restorePresentation(frame);
+}
 } // namespace rend::soft
 
 Renderer *rend_software()
