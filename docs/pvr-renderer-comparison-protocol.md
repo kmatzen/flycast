@@ -2701,3 +2701,32 @@ had one each. Ordered 1's underrun was already present at the first periodic
 audio report and did not increase afterward. These short runs do not establish
 a practical improvement over the controls, which also delivered every ID.
 The experiment remains disabled by default, not a performance solution.
+
+### Seaman native/OpenGL boot and idle samples
+
+`tools/run-pvr-game-timing.mjs APP GAME NEW_OUTPUT_DIRECTORY` performs serial
+45-second native and OpenGL samples with the same software/hybrid renderer,
+threaded EFB conversion, SDL2 audio, nearest filtering, and VSync. It disables
+verification/Metal validation and the ordered-queue experiment, preserves the
+application hash, saves separate stdout/stderr, and reports emulation-speed
+samples and final audio counters. It stops each application gracefully after
+the wall-clock duration and rejects early exits or forced termination.
+
+Seaman samples in `/tmp/pvr-native-seaman-timing-20261012/report.json` used
+application SHA-256
+`113acb340f95030889307210ac2d4a5c55bff56aee3b9d539b7daf0144c46e4c`.
+Both exited normally. Native sampled speed ranged from 0.9854 to 1.0105 times
+emulated time, with three audio underruns (3072 output silence frames), 2549
+presentation callbacks, and one zero-time callback at sequence 1. OpenGL
+sampled speed ranged from 0.9827 to 1.0049, with nine underruns (9216 output
+silence frames). Neither dropped input audio frames.
+
+Native's first periodic audio report had zero underruns, its second had two,
+and later periodic reports remained at two; the final counter was three.
+Thus the problem is not exclusively shutdown accounting. OpenGL underruns
+increased during the sample. One pair is insufficient for a comparative
+performance conclusion: startup durations differed, these were equal wall-time
+windows rather than synchronized game-state captures, and instrumentation is
+not free. No input was driven and no visual screenshot was captured. These
+are unattended boot/idle samples, not a Seaman playthrough, an audible-quality
+assessment (the computer remained muted), or proof of hardware accuracy.
