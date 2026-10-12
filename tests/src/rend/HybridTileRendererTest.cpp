@@ -1864,7 +1864,7 @@ TEST(HybridTileRenderer, OrderedAutosortUsesBoundedExactPath)
 	EXPECT_EQ(timing.totalTiles, 1u);
 	EXPECT_EQ(timing.orderedAutosortFrames, 1u);
 	EXPECT_EQ(timing.orderedAutosortTiles, 1u);
-	EXPECT_EQ(timing.globalAutosortFrames, 1u);
+	EXPECT_EQ(timing.globalAutosortFrames, 0u); // Ineligible specialization skips the global proof.
 	EXPECT_EQ(timing.simpleTranslucentFrames, 0u);
 }
 

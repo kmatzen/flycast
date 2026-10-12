@@ -1328,3 +1328,24 @@ six-layer wall p95 also regressed to 22.15 ms, failing its gate. Results
 are `/tmp/pvr-bin8.xml`. The 8x8 change was rejected and both CPU/Metal bin
 sizes restored to 16. The timing breakdown remains to guide further work;
 the experiment does not justify relaxing correctness or frame-budget gates.
+
+Global translucent-order analysis is now performed only when polygon state
+permits its sole consumer, the specialized simple-translucency shader.
+Ineligible frames retain the normal tile-local ordering proof and shader.
+The global-order timing flag is zero when that analysis is skipped rather
+than implying a proof was run. Positive-overlap checks also first reject
+disjoint integer pixel bounds, consistent with the shader's bounds test.
+
+Two 20-sample timing runs pass both renderer-boundary 60-Hz gates with
+matching software-reference pixels/depth. Small-triangle wall p95 is
+15.95 ms and 16.63 ms, respectively; GPU p95 is 11.60 ms and 11.65 ms.
+Six-layer wall p95 is 8.81 ms and 9.15 ms. XML reports are
+`/tmp/pvr-prune.xml` and `/tmp/pvr-prune-repeat.xml`. The second small-triangle
+result has almost no margin, so these passes do not establish robust
+full-emulator 60-Hz operation. All 136 focused correctness tests pass on
+ARM64 and x86-64/Rosetta. Further workload variety, sustained timing, and
+hardware accuracy validation remain required.
+
+The rebuilt application passes all seven automated RTT cases after the
+analysis pruning, including complete readback and zero color/full-VRAM
+verifier differences (`/tmp/pvr-rtt-prune-20261012/report.json`).

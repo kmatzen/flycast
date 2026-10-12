@@ -1220,9 +1220,27 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   u32 orderedAutosortTiles = 0;
   u32 orderedAutosortRejectReason = 0;
   std::vector<std::vector<u32>> orderedBins(bins.size());
-  std::vector<std::vector<u32>> globalSuccessors(frame.triangles->size());
-  std::vector<u32> globalIndegrees(frame.triangles->size());
-  std::vector<u8> globalActive(frame.triangles->size());
+  constexpr u32 SimpleTranslucentVariable = ClampU | ClampV | FlipU | FlipV |
+      TexelSampleCenter | IgnoreTextureAlpha;
+  constexpr u32 SimpleTranslucentFixed = 6 | Textured | Bilinear | UseAlpha |
+      (3u << ShadingInstructionShift) | (4u << SourceBlendShift) |
+      (5u << DestinationBlendShift) | Autosort | LookupFog |
+      (2u << ListTypeShift);
+  bool simpleCandidate = std::getenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT") == nullptr;
+  bool hasTranslucent = false;
+  for (const Triangle &triangle : *frame.triangles)
+    if (((triangle.state >> ListTypeShift) & 3) == 2) {
+      hasTranslucent = true;
+      if ((triangle.state & ~SimpleTranslucentVariable) != SimpleTranslucentFixed || triangle.effects != 0)
+        simpleCandidate = false;
+    }
+  simpleCandidate &= hasTranslucent;
+  // The global proof only gates the specialized translucent kernel. Ordinary
+  // rendering still performs the unchanged tile-local ordering proof below.
+  const size_t globalSize = simpleCandidate ? frame.triangles->size() : 0;
+  std::vector<std::vector<u32>> globalSuccessors(globalSize);
+  std::vector<u32> globalIndegrees(globalSize);
+  std::vector<u8> globalActive(globalSize);
   for (size_t tile = 0; tile < bins.size(); ++tile) {
     bool tileOrdered = frame.modifierMask == nullptr;
     if (!tileOrdered)
@@ -1280,7 +1298,8 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
             maximum = std::max(maximum, value + error);
           }
         deferred.push_back({index, minimum, maximum});
-        globalActive[index] = 1;
+        if (simpleCandidate)
+          globalActive[index] = 1;
       } else {
         orderedBins[tile].push_back(index);
       }
@@ -1289,6 +1308,9 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       auto hasPositiveAreaOverlap = [&](u32 leftIndex, u32 rightIndex) {
         const Triangle &left = (*frame.triangles)[leftIndex];
         const Triangle &right = (*frame.triangles)[rightIndex];
+        if (left.maxX < right.minX || right.maxX < left.minX ||
+            left.maxY < right.minY || right.maxY < left.minY)
+          return false;
         auto separatedByEdge = [](const Triangle &edgeTriangle,
                                   const Triangle &other) {
           for (u32 edge = 0; edge < 3; ++edge) {
@@ -1339,10 +1361,12 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
           }
           successors[before].push_back(after);
           ++indegrees[after];
-          const u32 globalBefore = deferred[before].index;
-          const u32 globalAfter = deferred[after].index;
-          globalSuccessors[globalBefore].push_back(globalAfter);
-          ++globalIndegrees[globalAfter];
+          if (simpleCandidate) {
+            const u32 globalBefore = deferred[before].index;
+            const u32 globalAfter = deferred[after].index;
+            globalSuccessors[globalBefore].push_back(globalAfter);
+            ++globalIndegrees[globalAfter];
+          }
         }
       }
       std::vector<u32> resolved;
@@ -1376,13 +1400,13 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
     orderedAutosortTiles += tileOrdered;
     orderedAutosort &= tileOrdered;
   }
-  bool globalAutosort = orderedAutosort;
+  bool globalAutosort = orderedAutosort && simpleCandidate;
   std::vector<u32> globalOrder;
   const size_t globalActiveCount = static_cast<size_t>(std::count(
       globalActive.begin(), globalActive.end(), u8{1}));
   globalOrder.reserve(globalActiveCount);
   std::priority_queue<u32, std::vector<u32>, std::greater<u32>> globalReady;
-  for (u32 candidate = 0; candidate < frame.triangles->size(); ++candidate)
+  for (u32 candidate = 0; candidate < globalSize; ++candidate)
     if (globalActive[candidate] != 0 && globalIndegrees[candidate] == 0)
       globalReady.push(candidate);
   while (globalAutosort && globalOrder.size() != globalActiveCount) {
@@ -1401,20 +1425,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   // only with the proven one-fragment ordered kernel, which cannot overflow.
   if (asynchronous && !orderedAutosort)
     return false;
-  constexpr u32 SimpleTranslucentVariable = ClampU | ClampV | FlipU | FlipV |
-      TexelSampleCenter | IgnoreTextureAlpha;
-  constexpr u32 SimpleTranslucentFixed = 6 | Textured | Bilinear | UseAlpha |
-      (3u << ShadingInstructionShift) | (4u << SourceBlendShift) |
-      (5u << DestinationBlendShift) | Autosort | LookupFog |
-      (2u << ListTypeShift);
-  bool simpleTranslucent = globalAutosort && globalActiveCount != 0 &&
-      std::getenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT") == nullptr;
-  for (const Triangle &triangle : *frame.triangles)
-    if (((triangle.state >> ListTypeShift) & 3) == 2 &&
-        ((triangle.state & ~SimpleTranslucentVariable) !=
-             SimpleTranslucentFixed ||
-         triangle.effects != 0))
-      simpleTranslucent = false;
+  const bool simpleTranslucent = globalAutosort && globalActiveCount != 0;
   const auto &referenceBins = orderedAutosort ? orderedBins : bins;
   for (const auto &bin : referenceBins) {
     tileReferences.insert(tileReferences.end(), bin.begin(), bin.end());
