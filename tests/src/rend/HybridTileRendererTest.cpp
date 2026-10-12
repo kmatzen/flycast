@@ -57,6 +57,24 @@ void appendQuad(std::vector<hybrid::Triangle>& output, float depth, Color color,
 	output.push_back(triangle(b, d, c, state));
 }
 
+void appendTexturedQuad(std::vector<hybrid::Triangle>& output, float depth, Color color,
+		u32 state, u32 width, u32 height, float uv0 = 0.f, float uv1 = 1.f)
+{
+	const Vertex a { 0, 0, depth, color, {}, uv0, uv0 };
+	const Vertex b { 2, 0, depth, color, {}, uv1, uv0 };
+	const Vertex c { 0, 2, depth, color, {}, uv0, uv1 };
+	const Vertex d { 2, 2, depth, color, {}, uv1, uv1 };
+	for (auto command : { triangle(a, b, c, state), triangle(b, d, c, state) })
+	{
+		command.textureOffset = 0;
+		command.textureWidth = width;
+		command.textureHeight = height;
+		command.mipOffsets[0] = 0;
+		command.mipLevelCount = 1;
+		output.push_back(command);
+	}
+}
+
 void drawQuad(SoftwareRasterizer& output, float depth, Color color,
 		const PipelineState& state)
 {
@@ -64,6 +82,17 @@ void drawQuad(SoftwareRasterizer& output, float depth, Color color,
 	const Vertex b { 2, 0, depth, color };
 	const Vertex c { 0, 2, depth, color };
 	const Vertex d { 2, 2, depth, color };
+	output.drawTriangle(a, b, c, state);
+	output.drawTriangle(b, d, c, state);
+}
+
+void drawTexturedQuad(SoftwareRasterizer& output, float depth, Color color,
+		const PipelineState& state, float uv0 = 0.f, float uv1 = 1.f)
+{
+	const Vertex a { 0, 0, depth, color, {}, uv0, uv0 };
+	const Vertex b { 2, 0, depth, color, {}, uv1, uv0 };
+	const Vertex c { 0, 2, depth, color, {}, uv0, uv1 };
+	const Vertex d { 2, 2, depth, color, {}, uv1, uv1 };
 	output.drawTriangle(a, b, c, state);
 	output.drawTriangle(b, d, c, state);
 }
@@ -168,5 +197,76 @@ TEST(HybridTileRenderer, MatchesOracleForEveryBlendFactorPair)
 					<< "source=" << source << " destination=" << destination;
 			expectEqual(cpu, colors, depths);
 		}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForTextureFilteringAndShading)
+{
+	const Color texels[] {
+		{ 240, 20, 40, 32 }, { 10, 220, 60, 96 },
+		{ 30, 70, 230, 160 }, { 210, 190, 20, 224 },
+	};
+	const Color base { 173, 109, 67, 151 };
+	const std::vector<u32> texture {
+		pack(texels[0]), pack(texels[1]), pack(texels[2]), pack(texels[3])
+	};
+	for (u32 filtering = 0; filtering < 2; ++filtering)
+		for (u32 shading = 0; shading < 4; ++shading)
+		{
+			SoftwareRasterizer cpu(2, 2);
+			PipelineState state;
+			state.depthMode = DepthMode::GreaterOrEqual;
+			state.texture = { texels, 2, 2 };
+			state.bilinearFilter = filtering != 0;
+			state.shadingInstruction = shading;
+			drawTexturedQuad(cpu, 1.f, base, state);
+
+			std::vector<hybrid::Triangle> commands;
+			const u32 gpuState = hybrid::makeState(6, true, true, filtering != 0,
+					true, shading, 1, 0);
+			appendTexturedQuad(commands, 1.f, base, gpuState, 2, 2);
+			hybrid::Frame frame { 2, 2, &commands, &texture };
+			std::vector<u32> colors;
+			std::vector<float> depths;
+			ASSERT_TRUE(hybrid::render(frame, colors, depths))
+					<< "filtering=" << filtering << " shading=" << shading;
+			expectEqual(cpu, colors, depths);
+		}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForTextureAddressingModes)
+{
+	Color texels[16];
+	for (u32 i = 0; i < 16; ++i)
+		texels[i] = { static_cast<u8>(i * 13), static_cast<u8>(255 - i * 11),
+				static_cast<u8>(i * 7), 255 };
+	std::vector<u32> texture;
+	for (Color color : texels)
+		texture.push_back(pack(color));
+	const Color white { 255, 255, 255, 255 };
+	for (u32 modes = 0; modes < 16; ++modes)
+	{
+		SoftwareRasterizer cpu(2, 2);
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.texture = { texels, 4, 4 };
+		state.clampU = (modes & 1) != 0;
+		state.clampV = (modes & 2) != 0;
+		state.flipU = (modes & 4) != 0;
+		state.flipV = (modes & 8) != 0;
+		drawTexturedQuad(cpu, 1.f, white, state, -.25f, 1.75f);
+
+		u32 gpuState = hybrid::makeState(6, true, true, false, true, 0, 1, 0);
+		if (state.clampU) gpuState |= hybrid::ClampU;
+		if (state.clampV) gpuState |= hybrid::ClampV;
+		if (state.flipU) gpuState |= hybrid::FlipU;
+		if (state.flipV) gpuState |= hybrid::FlipV;
+		std::vector<hybrid::Triangle> commands;
+		appendTexturedQuad(commands, 1.f, white, gpuState, 4, 4, -.25f, 1.75f);
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "modes=" << modes;
+		expectEqual(cpu, colors, depths);
+	}
 }
 #endif
