@@ -963,3 +963,14 @@ so wrapped output cannot overwrite live SDK lists or framebuffers. Dithering
 and alternate pack modes also require auditing SDK register programming, since
 writing registers before submission may be overwritten when rendering starts.
 No probe has yet been built or run, and no new hardware result is claimed.
+
+The pinned SDK was cloned to `/tmp/pvr-kos-probe.V8emEs/KallistiOS` and its
+HEAD verified. The toolchain builder is now `utils/kos-chain` (not the older
+`utils/dc-chain` path). A C-only stable-profile build was started with four
+jobs, temporary build cleanup enabled, and installation confined to
+`/tmp/pvr-kos-probe.V8emEs/sh-elf`. Its configuration disables C++, Objective-C,
+and Objective-C++; it retains the SDK's normal SH precision modes and Newlib.
+Log: `/tmp/pvr-kos-probe.V8emEs/toolchain.log`. The first observed stage was
+downloading GCC 15.2.0; no compiler completion is claimed. Initial free disk
+space was about 11 GiB, so inspect usage before allowing later build stages
+to continue. This preparation does not install over system toolchains.
