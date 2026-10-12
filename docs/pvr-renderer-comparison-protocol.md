@@ -2154,3 +2154,24 @@ that predates the marker extension and is not a final-binary result. The 147
 renderer unit tests also passed on ARM64. These checks establish composition
 preservation in the tested paths, not physical scanout, interactive menu/resize
 coverage, or improved cadence. Native Metal presentation remains unimplemented.
+
+The regression test was also checked against a negative control: temporarily
+removing the `!softwareBackgroundDrawn` guard restored the old second draw.
+At checkpoint 480 the test reported `PVR_UI_COMPOSITION match=0 bytes=4915200`
+and terminated with `UI composition overwritten before swap`. Raw evidence is
+in `/tmp/pvr-ui-negative-20261012/frame-480.log`. The runner rejected the
+unexpected early exit; this was not a timeout or a successful lifecycle run.
+The old behavior was then removed again before rebuilding the fixed binary.
+Both restored checkpoints passed in `/tmp/pvr-ui-restored-20261012/report.json`
+with the same fixed-binary hash as above: 80/196 full-VRAM comparisons before
+recreation and 41/40 afterward, with no mismatches. The first run still skipped
+one content state during verification; this is not a lossless-delivery result.
+
+Native-presentation integration constraint found during source inspection:
+the bundled `SDL_Metal_CreateView` converts a window's flags from OpenGL to
+Metal and calls `SDL_GL_UnloadLibrary`. It is not an independent overlay to
+bolt onto the active GL window. A native presenter must own the window/UI
+backend lifecycle together, including ImGui texture ownership; this checkout
+does not currently include an ImGui Metal backend. Preserve the existing
+fully converted software image as its input rather than bypassing framebuffer
+semantics to reuse an earlier Metal accumulation surface.
