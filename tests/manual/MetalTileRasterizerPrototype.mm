@@ -269,6 +269,27 @@ int main() {
   if (!rend::soft::hybrid::render(serialOpaqueFrame, opaqueColors, opaqueDepths,
                                   &serialOpaqueTiming))
     return 2;
+  std::vector<Triangle> orderedOpaqueTriangles = opaqueTriangles;
+  for (u32 index = 0; index < orderedOpaqueTriangles.size(); ++index)
+    for (float &z : orderedOpaqueTriangles[index].z)
+      z = .1f + float(index) * .02f;
+  const rend::soft::hybrid::Frame orderedOpaqueFrame{
+      Width, Height, &orderedOpaqueTriangles, &texture};
+  rend::soft::hybrid::Timing orderedOpaqueTiming;
+  std::vector<u32> orderedColors;
+  std::vector<float> orderedDepths;
+  if (!rend::soft::hybrid::render(orderedOpaqueFrame, orderedColors,
+                                  orderedDepths, &orderedOpaqueTiming))
+    return 2;
+  std::vector<u32> orderedExpectedColors(Width * Height);
+  std::vector<float> orderedExpectedDepths(Width * Height);
+  rasterizeReference(orderedOpaqueTriangles, texture, orderedExpectedColors,
+                     orderedExpectedDepths);
+  size_t orderedMismatches = 0;
+  for (size_t pixel = 0; pixel < orderedColors.size(); ++pixel)
+    orderedMismatches += orderedColors[pixel] != orderedExpectedColors[pixel]
+        || std::memcmp(&orderedDepths[pixel], &orderedExpectedDepths[pixel],
+                       sizeof(float)) != 0;
   size_t colorMismatches = 0, depthMismatches = 0;
   for (size_t i = 0; i < expectedColors.size(); ++i) {
     colorMismatches += actualColors[i] != expectedColors[i];
@@ -651,12 +672,14 @@ int main() {
   std::printf(
       "triangles=%zu cpu_ms=%.3f encode_ms=%.3f gpu_ms=%.3f "
       "opaque_triangles=%zu opaque_gpu_ms=%.3f serial_opaque_gpu_ms=%.3f "
-      "readback_ms=%.3f "
+      "ordered_opaque_gpu_ms=%.3f ordered_mismatches=%zu readback_ms=%.3f "
       "color_mismatches=%zu depth_bit_mismatches=%zu\n",
       triangles.size(), cpuMs, timing.encodeMilliseconds,
       timing.gpuMilliseconds, opaqueTriangles.size(),
       opaqueTiming.gpuMilliseconds, serialOpaqueTiming.gpuMilliseconds,
+      orderedOpaqueTiming.gpuMilliseconds, orderedMismatches,
       timing.readbackMilliseconds,
       colorMismatches, depthMismatches);
-  return colorMismatches == 0 && depthMismatches == 0 ? 0 : 1;
+  return colorMismatches == 0 && depthMismatches == 0 &&
+      orderedMismatches == 0 ? 0 : 1;
 }

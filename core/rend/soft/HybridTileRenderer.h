@@ -121,6 +121,8 @@ struct Timing {
   double encodeMilliseconds = 0.;
   double gpuMilliseconds = 0.;
   double readbackMilliseconds = 0.;
+  u32 hardwareVisibilityTiles = 0;
+  u32 totalTiles = 0;
 };
 
 // Renders the currently supported exact subset into packed RGBA8 and IEEE

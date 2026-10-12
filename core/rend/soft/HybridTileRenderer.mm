@@ -26,9 +26,20 @@ struct Constants {
   u32 useInitialDepth;
   u32 useInitialSecondary;
   u32 deferOpaqueShading;
+  u32 useHardwareVisibility;
+  float visibilityBias;
 };
 
-static_assert(sizeof(Constants) == 44);
+static_assert(sizeof(Constants) == 52);
+
+struct VisibilityVertex {
+  s32 x;
+  s32 y;
+  float z;
+  u32 padding;
+};
+
+static_assert(sizeof(VisibilityVertex) == 16);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -82,7 +93,31 @@ struct Constants {
     uint useInitialDepth;
     uint useInitialSecondary;
     uint deferOpaqueShading;
+    uint useHardwareVisibility;
+    float visibilityBias;
 };
+
+struct VisibilityVertex { int2 fixedPosition; float z; uint padding; };
+struct VisibilityVarying { float4 position [[position]]; };
+
+vertex VisibilityVarying visibilityVertex(
+        const device VisibilityVertex *vertices [[buffer(0)]],
+        constant Constants& constants [[buffer(1)]], uint id [[vertex_id]])
+{
+    const float2 screen = float2(vertices[id].fixedPosition) / 16.0f
+            + constants.visibilityBias;
+    VisibilityVarying result;
+    result.position = float4(screen.x / float(constants.width) * 2.0f - 1.0f,
+            1.0f - screen.y / float(constants.height) * 2.0f, 0.5f, 1.0f);
+    return result;
+}
+
+fragment uint visibilityFragment(
+        const device uint *primitiveIndices [[buffer(0)]],
+        uint primitive [[primitive_id]])
+{
+    return primitiveIndices[primitive] + 1;
+}
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
 {
@@ -313,6 +348,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uchar *punchThroughMask [[buffer(12)]],
         const device uchar *translucentMask [[buffer(13)]],
         device uint *secondaryColors [[buffer(14)]],
+        const device uchar *hardwareVisibilityTiles [[buffer(15)]],
+        texture2d<uint, access::read> visibility [[texture(0)]],
         uint2 pixel [[thread_position_in_grid]])
 {
     if (pixel.x >= constants.width || pixel.y >= constants.height)
@@ -329,9 +366,36 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     // Resolve that winner with the same fixed edge/depth arithmetic first, then
     // let the main loop shade it once. Punch-through and translucent parameters
     // retain their ordered paths because acceptance/blending depends on shading.
-    uint opaqueWinnerReference = 0xffffffffu;
+    uint opaqueWinnerTriangle = 0xffffffffu;
     float opaqueFinalDepth = depth;
     if (constants.deferOpaqueShading != 0 && opaqueMask[offset] != 0) {
+        const bool hardwareTile = constants.useHardwareVisibility != 0
+                && hardwareVisibilityTiles[tile] != 0;
+        if (hardwareTile) {
+            const uint candidate = visibility.read(pixel).x;
+            if (candidate != 0) {
+                const uint candidateIndex = candidate - 1;
+                const device Triangle& candidateTriangle = triangles[candidateIndex];
+                const int sx = int(pixel.x) * 16 + candidateTriangle.fpuSampleOffset;
+                const int sy = int(pixel.y) * 16 + candidateTriangle.fpuSampleOffset;
+                const long area = edge(candidateTriangle.x[0], candidateTriangle.y[0],
+                        candidateTriangle.x[1], candidateTriangle.y[1],
+                        candidateTriangle.x[2], candidateTriangle.y[2]);
+                const float s0 = float(edge(candidateTriangle.x[1], candidateTriangle.y[1],
+                        candidateTriangle.x[2], candidateTriangle.y[2], sx, sy)) / float(area);
+                const float s1 = float(edge(candidateTriangle.x[2], candidateTriangle.y[2],
+                        candidateTriangle.x[0], candidateTriangle.y[0], sx, sy)) / float(area);
+                const float s2 = float(edge(candidateTriangle.x[0], candidateTriangle.y[0],
+                        candidateTriangle.x[1], candidateTriangle.y[1], sx, sy)) / float(area);
+                const float candidateDepth = candidateTriangle.z[0] * s0
+                        + candidateTriangle.z[1] * s1 + candidateTriangle.z[2] * s2;
+                if ((candidateTriangle.state & 7) == 7 || candidateDepth >= depth) {
+                    opaqueWinnerTriangle = candidateIndex;
+                    opaqueFinalDepth = candidateDepth;
+                }
+            }
+        }
+        if (!hardwareTile)
         for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
             const uint triangleIndex = tileReferences[i];
             const device Triangle& base = triangles[triangleIndex];
@@ -368,7 +432,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
             if (!depthTest(t.state, depthZ, opaqueFinalDepth))
                 continue;
-            opaqueWinnerReference = i;
+            opaqueWinnerTriangle = triangleIndex;
             if ((t.state & (1u << 3)) != 0)
                 opaqueFinalDepth = depthZ;
         }
@@ -395,7 +459,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             continue;
         const bool deferredOpaque = constants.deferOpaqueShading != 0
                 && listType == 0;
-        if (deferredOpaque && i != opaqueWinnerReference)
+        if (deferredOpaque && triangleIndex != opaqueWinnerTriangle)
             continue;
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
                 || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
@@ -681,7 +745,16 @@ public:
     id<MTLFunction> function = [library newFunctionWithName:@"rasterTiles"];
     pipeline = [device newComputePipelineStateWithFunction:function
                                                      error:&error];
-    if (pipeline != nil)
+    MTLRenderPipelineDescriptor *visibilityDescriptor =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    visibilityDescriptor.vertexFunction =
+        [library newFunctionWithName:@"visibilityVertex"];
+    visibilityDescriptor.fragmentFunction =
+        [library newFunctionWithName:@"visibilityFragment"];
+    visibilityDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
+    visibilityPipeline = [device
+        newRenderPipelineStateWithDescriptor:visibilityDescriptor error:&error];
+    if (pipeline != nil && visibilityPipeline != nil)
       queue = [device newCommandQueue];
   }
 
@@ -690,6 +763,7 @@ public:
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> pipeline = nil;
+  id<MTLRenderPipelineState> visibilityPipeline = nil;
 };
 
 template <typename T>
@@ -718,6 +792,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   const u32 tilesY = (frame.height + TileSize - 1) / TileSize;
   bool hasOpaque = false;
   bool deferOpaqueShading = true;
+  bool useHardwareVisibility = true;
+  s32 visibilitySampleOffset = -1;
   std::vector<std::vector<u32>> bins(static_cast<size_t>(tilesX) * tilesY);
   for (u32 index = 0; index < frame.triangles->size(); ++index) {
     const Triangle &triangle = (*frame.triangles)[index];
@@ -771,6 +847,17 @@ bool render(const Frame &frame, std::vector<u32> &colors,
           (triangle.state & (AlphaTest | Autosort)) != 0 ||
           (triangle.effects & (SourceSelect | DestinationSelect)) != 0)
         deferOpaqueShading = false;
+      const u32 depthMode = triangle.state & DepthModeMask;
+      if ((depthMode != 6 && depthMode != 7) ||
+          (triangle.state & DepthWrite) == 0 ||
+          triangle.area1Index != std::numeric_limits<u32>::max() ||
+          (triangle.state & Area1Only) != 0 ||
+          (triangle.effects & ExcludeClip) != 0 ||
+          (triangle.fpuSampleOffset != 0 && triangle.fpuSampleOffset != 8) ||
+          (visibilitySampleOffset != -1 &&
+           visibilitySampleOffset != triangle.fpuSampleOffset))
+        useHardwareVisibility = false;
+      visibilitySampleOffset = triangle.fpuSampleOffset;
     }
     for (s32 y = triangle.minY / static_cast<s32>(TileSize);
          y <= triangle.maxY / static_cast<s32>(TileSize); ++y)
@@ -783,6 +870,76 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   for (const auto &bin : bins) {
     tileReferences.insert(tileReferences.end(), bin.begin(), bin.end());
     tileOffsets.push_back(static_cast<u32>(tileReferences.size()));
+  }
+  useHardwareVisibility = useHardwareVisibility && hasOpaque &&
+      deferOpaqueShading && frame.modifierMask == nullptr &&
+      frame.initialDepths == nullptr;
+  std::vector<VisibilityVertex> visibilityVertices;
+  std::vector<u32> visibilityPrimitiveIndices;
+  std::vector<u8> hardwareVisibilityTiles(bins.size());
+  std::vector<u32> visibilityDrawStarts(bins.size());
+  std::vector<u32> visibilityDrawCounts(bins.size());
+  if (useHardwareVisibility) {
+    for (u32 tile = 0; tile < bins.size(); ++tile) {
+      std::vector<u32> alwaysReferences;
+      std::vector<u32> depthReferences;
+      bool sawDepthTested = false;
+      bool ordered = true;
+      for (u32 index : bins[tile])
+        if (((*frame.triangles)[index].state >> ListTypeShift & 3) == 0) {
+          if (((*frame.triangles)[index].state & DepthModeMask) == 7) {
+            if (sawDepthTested) {
+              ordered = false;
+              break;
+            }
+            alwaysReferences.push_back(index);
+          } else {
+            sawDepthTested = true;
+            depthReferences.push_back(index);
+          }
+        }
+      std::sort(depthReferences.begin(), depthReferences.end(),
+          [&](u32 left, u32 right) {
+            const Triangle &a = (*frame.triangles)[left];
+            const Triangle &b = (*frame.triangles)[right];
+            return std::min({a.z[0], a.z[1], a.z[2]}) <
+                std::min({b.z[0], b.z[1], b.z[2]});
+          });
+      float previousMaximum = -std::numeric_limits<float>::infinity();
+      for (u32 index : alwaysReferences) {
+        const Triangle &triangle = (*frame.triangles)[index];
+        previousMaximum = std::max(previousMaximum,
+            std::max({triangle.z[0], triangle.z[1], triangle.z[2]}));
+      }
+      for (u32 index : depthReferences) {
+        const Triangle &triangle = (*frame.triangles)[index];
+        const float minimum = std::min({triangle.z[0], triangle.z[1],
+                                        triangle.z[2]});
+        if (minimum <= previousMaximum) {
+          ordered = false;
+          break;
+        }
+        previousMaximum = std::max({triangle.z[0], triangle.z[1],
+                                    triangle.z[2]});
+      }
+      if (!ordered)
+        continue;
+      hardwareVisibilityTiles[tile] = 1;
+      visibilityDrawStarts[tile] = static_cast<u32>(visibilityVertices.size());
+      alwaysReferences.insert(alwaysReferences.end(), depthReferences.begin(),
+                              depthReferences.end());
+      for (u32 index : alwaysReferences) {
+        const Triangle &triangle = (*frame.triangles)[index];
+        visibilityPrimitiveIndices.push_back(index);
+        for (u32 vertex = 0; vertex < 3; ++vertex)
+          visibilityVertices.push_back({triangle.x[vertex], triangle.y[vertex],
+                                        triangle.z[vertex], 0});
+      }
+      visibilityDrawCounts[tile] =
+          static_cast<u32>(visibilityVertices.size()) - visibilityDrawStarts[tile];
+    }
+    if (visibilityVertices.empty())
+      useHardwareVisibility = false;
   }
 
   const size_t pixelCount = static_cast<size_t>(frame.width) * frame.height;
@@ -823,6 +980,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
       frame.punchThroughMask != nullptr ? *frame.punchThroughMask : fullMask);
   id<MTLBuffer> translucentMaskBuffer = makeBuffer(metal.device,
       frame.translucentMask != nullptr ? *frame.translucentMask : fullMask);
+  id<MTLBuffer> hardwareVisibilityTileBuffer =
+      makeBuffer(metal.device, hardwareVisibilityTiles);
   id<MTLBuffer> colorBuffer =
       [metal.device newBufferWithLength:pixelCount * sizeof(u32)
                                 options:MTLResourceStorageModeShared];
@@ -835,12 +994,30 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   id<MTLBuffer> secondaryBuffer =
       [metal.device newBufferWithLength:pixelCount * sizeof(u32)
                                 options:MTLResourceStorageModeShared];
+  id<MTLBuffer> visibilityVertexBuffer = useHardwareVisibility
+      ? makeBuffer(metal.device, visibilityVertices) : nil;
+  id<MTLBuffer> visibilityPrimitiveBuffer = useHardwareVisibility
+      ? makeBuffer(metal.device, visibilityPrimitiveIndices) : nil;
+  MTLTextureDescriptor *visibilityDescriptor = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+                                  width:useHardwareVisibility ? frame.width : 1
+                                 height:useHardwareVisibility ? frame.height : 1
+                              mipmapped:NO];
+  visibilityDescriptor.usage = useHardwareVisibility
+      ? MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead
+      : MTLTextureUsageShaderRead;
+  visibilityDescriptor.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> visibilityTexture =
+      [metal.device newTextureWithDescriptor:visibilityDescriptor];
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
       overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
       depthClearBuffer == nil || opaqueMaskBuffer == nil ||
       punchMaskBuffer == nil || translucentMaskBuffer == nil ||
-      secondaryBuffer == nil)
+      hardwareVisibilityTileBuffer == nil || secondaryBuffer == nil ||
+      visibilityTexture == nil ||
+      (useHardwareVisibility && (visibilityVertexBuffer == nil ||
+          visibilityPrimitiveBuffer == nil)))
     return false;
   *static_cast<u32 *>(overflowBuffer.contents) = 0;
   if (frame.initialColors != nullptr)
@@ -858,10 +1035,46 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                             frame.modifierMask != nullptr ? 1u : 0u,
                             frame.initialDepths != nullptr ? 1u : 0u,
                             frame.initialSecondary != nullptr ? 1u : 0u,
-                            hasOpaque && deferOpaqueShading ? 1u : 0u};
+                            hasOpaque && deferOpaqueShading ? 1u : 0u,
+                            useHardwareVisibility ? 1u : 0u,
+                            visibilitySampleOffset == 0 ? .5f : 0.f};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
+  if (useHardwareVisibility) {
+    MTLRenderPassDescriptor *pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = visibilityTexture;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    id<MTLRenderCommandEncoder> visibilityEncoder =
+        [command renderCommandEncoderWithDescriptor:pass];
+    [visibilityEncoder setRenderPipelineState:metal.visibilityPipeline];
+    [visibilityEncoder setVertexBuffer:visibilityVertexBuffer offset:0 atIndex:0];
+    [visibilityEncoder setVertexBytes:&constants length:sizeof(constants) atIndex:1];
+    [visibilityEncoder setCullMode:MTLCullModeNone];
+    for (u32 tile = 0; tile < bins.size(); ++tile) {
+      if (visibilityDrawCounts[tile] == 0)
+        continue;
+      const u32 tileX = tile % tilesX;
+      const u32 tileY = tile / tilesX;
+      const MTLScissorRect scissor{
+          static_cast<NSUInteger>(tileX * TileSize),
+          static_cast<NSUInteger>(tileY * TileSize),
+          static_cast<NSUInteger>(std::min(TileSize,
+              frame.width - tileX * TileSize)),
+          static_cast<NSUInteger>(std::min(TileSize,
+              frame.height - tileY * TileSize))};
+      [visibilityEncoder setScissorRect:scissor];
+      [visibilityEncoder setFragmentBuffer:visibilityPrimitiveBuffer
+          offset:(visibilityDrawStarts[tile] / 3) * sizeof(u32) atIndex:0];
+      [visibilityEncoder drawPrimitives:MTLPrimitiveTypeTriangle
+                            vertexStart:visibilityDrawStarts[tile]
+                            vertexCount:visibilityDrawCounts[tile]];
+    }
+    [visibilityEncoder endEncoding];
+  }
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
   [encoder setComputePipelineState:metal.pipeline];
   [encoder setBuffer:triangleBuffer offset:0 atIndex:0];
@@ -879,6 +1092,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:punchMaskBuffer offset:0 atIndex:12];
   [encoder setBuffer:translucentMaskBuffer offset:0 atIndex:13];
   [encoder setBuffer:secondaryBuffer offset:0 atIndex:14];
+  [encoder setBuffer:hardwareVisibilityTileBuffer offset:0 atIndex:15];
+  [encoder setTexture:visibilityTexture atIndex:0];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
@@ -911,6 +1126,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     timing->readbackMilliseconds =
         std::chrono::duration<double, std::milli>(readbackEnd - readbackStart)
             .count();
+    timing->hardwareVisibilityTiles = static_cast<u32>(std::count(
+        hardwareVisibilityTiles.begin(), hardwareVisibilityTiles.end(), u8{1}));
+    timing->totalTiles = static_cast<u32>(hardwareVisibilityTiles.size());
   }
   return true;
 }
