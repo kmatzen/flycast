@@ -78,6 +78,7 @@ static OnLoad _([]() {
 	}
 });
 
+#ifndef FLYCAST_TEXCONV_STANDALONE
 void palette_update()
 {
 	if (!pal_needs_update)
@@ -152,6 +153,7 @@ void palette_update()
 	for (std::size_t i = 0; i < std::size(pal_hash_256); i++)
 		pal_hash_256[i] = XXH32(&PALETTE_RAM[i << 8], 256 * 4, 7);
 }
+#endif
 
 template<typename Packer>
 inline static u32 YUV422(s32 Y, s32 Yu, s32 Yv)

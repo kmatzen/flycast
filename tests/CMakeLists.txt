@@ -46,12 +46,18 @@ add_executable(flycast-renderer-tests EXCLUDE_FROM_ALL
         src/rend/SoftwareRasterizerTest.cpp
         src/rend/HybridTileRendererTest.cpp
         src/rend/TextureDecodeTest.cpp
+        ../core/rend/texconv.cpp
         ../core/rend/soft/SoftwareRasterizer.cpp
         ../core/rend/soft/HybridTileRenderer.cpp)
-target_include_directories(flycast-renderer-tests PRIVATE ../core)
+target_include_directories(flycast-renderer-tests PRIVATE
+        ../core
+        ../core/deps
+        ../core/deps/glm)
 target_link_libraries(flycast-renderer-tests PRIVATE
         GTest::gtest_main
-        nowide::nowide)
+        nowide::nowide
+        xxHash::xxhash)
+target_compile_definitions(flycast-renderer-tests PRIVATE FLYCAST_TEXCONV_STANDALONE)
 
 if(APPLE AND NOT IOS)
     target_sources(flycast-renderer-tests PRIVATE
