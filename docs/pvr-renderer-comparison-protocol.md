@@ -487,3 +487,22 @@ frame-store output; this run does not independently verify every VRAM packing
 or scanout operation. The earlier raw-VRAM comparison covers a separate frame.
 Software verification and trace logging add overhead, so timings from this run
 must not be reported as uninstrumented gameplay performance.
+
+### Platform limits on existing-renderer comparisons
+
+Selecting `pvr.rend=3` in the Apple build does not test OpenGL OIT. The
+`OpenGL_OIT` factory case is excluded by `!defined(__APPLE__)`; a muted test
+run confirmed `backend=opengl-fallback` in the frame-4 input record. Its
+artifacts are under `/tmp/pvr-context-capture.c8w16g/oit*`, but the prefix is
+only the requested configuration, not evidence of the instantiated backend.
+Do not label these captures as OIT results.
+
+For a separate Vulkan comparison build, the repository macOS setup script
+specifies MoltenVK `v1.4.2-pre.973bb08`. The downloaded `MoltenVK-macos.tar`
+has SHA256 `1d9975f918418176aa7f304ab7f3137a792d8fdeca3c2423b87605614df3abf3`.
+Its dylib includes ARM64 and x86_64 slices. The isolated build directory is
+`/tmp/pvr-moltenvk.RvPkNw/build`; the existing software/Metal build is unchanged.
+Configuration must select `/opt/homebrew/lib/libpng.dylib` and the corresponding
+Homebrew include directory: default discovery selected an x86_64-only library
+under `/usr/local/lib` on this host. Configuration success alone is not proof
+that the Vulkan renderer can initialize or capture a frame.
