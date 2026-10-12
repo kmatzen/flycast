@@ -1297,3 +1297,20 @@ The rebuilt application also passes all seven automated RTT cases, each
 with complete readback and zero color/full-VRAM verifier differences;
 artifacts are `/tmp/pvr-rtt-toposort-20261012/`. This checks the ordering
 change through the production renderer as well as the focused tests.
+
+Internal hybrid work bins now use 16x16 pixels instead of 32x32, with matching
+CPU bin construction and Metal lookup. These bins accelerate candidate
+selection; they are not PVR region tiles, whose semantics remain supplied
+through per-pixel masks. The change reduces unrelated triangle checks for
+small geometry while leaving edge/depth/shading arithmetic unchanged.
+The small-triangle benchmark retains matching color/depth and measures wall
+median 16.12 ms, p95 17.47 ms, and GPU p95 11.68 ms on the M1
+(`/tmp/pvr-bin16.xml`). The wall gate still fails. In the same run, the
+six-layer workload passes both gates (wall p95 8.86 ms, GPU p95 4.83 ms).
+All 136 correctness tests pass on ARM64 and x86-64/Rosetta, and the app
+build succeeds. These workload-specific gains are not a full-emulator or
+all-games performance claim.
+
+All seven production RTT probe cases also pass with 16x16 work bins,
+including full-VRAM hybrid/software verification. Preserved artifacts and
+ELF hashes are in `/tmp/pvr-rtt-bin16-20261012/report.json`.

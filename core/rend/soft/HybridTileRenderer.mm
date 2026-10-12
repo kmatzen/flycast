@@ -16,7 +16,9 @@
 namespace rend::soft::hybrid {
 namespace {
 
-constexpr u32 TileSize = 32;
+// Internal acceleration bins, not PVR region tiles. Region semantics arrive
+// through the per-pixel masks; smaller bins reduce unrelated edge tests.
+constexpr u32 TileSize = 16;
 
 struct Constants {
   u32 width;
@@ -366,7 +368,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     if (pixel.x >= constants.width || pixel.y >= constants.height)
         return;
     const uint offset = pixel.y * constants.width + pixel.x;
-    const uint tile = (pixel.y / 32) * constants.tilesX + pixel.x / 32;
+    const uint tile = (pixel.y / 16) * constants.tilesX + pixel.x / 16;
     uint color = constants.useInitialColor != 0 ? colors[offset] : 0xff000000u;
     uint secondary = constants.useInitialSecondary != 0
             ? secondaryColors[offset] : 0u;
