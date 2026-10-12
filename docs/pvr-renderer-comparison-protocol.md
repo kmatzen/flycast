@@ -1757,3 +1757,39 @@ without claiming that the performance or hardware-validation goals are met.
 All twenty final rebuilt-app RTT cases also pass their stated checks in
 `/tmp/pvr-rtt-exact-final-20261012/report.json`, including zero color/full-VRAM
 differences; the six dither cases retain differential-only acceptance.
+
+### Exact-coverage live pacing: presentation remains a large bottleneck
+
+Rebuilt app at `751ddc00b`, Seaman USA boot/idle sequence, renderer 7,
+`FLYCAST_HYBRID_SOFT=1`, full framebuffer emulation enabled, real SDL2 audio,
+host output muted. Verification and late-swap flags were absent. Emulation,
+swap, and audio-delivery tracing were enabled. These were fresh processes,
+not paused or interactively driven; they are not complete playthroughs.
+
+| Rendering / VSync | 240-vblank windows | Last five emulation speeds | Final underruns / callbacks |
+| --- | ---: | --- | ---: |
+| Single-thread / on | 12 | 0.6669, 0.6674, 0.6675, 0.6673, 0.6672 | 746 / 2901 |
+| Threaded / on | 53 | 0.6675, 0.6668, 0.6695, 0.6658, 0.6666 | 4252 / 13424 |
+| Threaded / off | 21 | 0.9984, 0.9995, 0.9994, 1.0016, 0.9999 | 3 / 3754 |
+
+Logs are `/tmp/pvr-seaman-exact-normal-vsync.log`,
+`/tmp/pvr-seaman-exact-threaded-vsync.log`, and
+`/tmp/pvr-seaman-exact-threaded-nosync.log`. All processes stopped normally.
+All reported zero dropped input frames. The no-VSync run submitted 3,841,024
+audio frames; its periodic underrun count stayed at two after the early
+sequence, with the final third event recorded during shutdown. Its emulation
+speed range was 0.9861–1.0102. Reported 120-call mean swap times ranged
+0.820–1.379 ms, versus 9.106–15.428 ms with threaded ordinary VSync.
+The single-thread run briefly overlapped an idle installed Flycast app;
+the two threaded runs did not.
+
+Threading alone does not resolve the slowdown. Removing display waiting
+recovers approximately real-time emulation in this sequence without disabling
+framebuffer emulation, identifying presentation synchronization as a major
+next target. This diagnostic does not establish tear-free presentation,
+general game performance, or threaded framebuffer correctness. The upstream
+queue explicitly notes a possible framebuffer synchronization/blinking issue,
+and the full-VRAM differential verifier is disabled in threaded mode. Do not
+turn VSync off by default or weaken framebuffer semantics on this evidence.
+Next investigate display wait/queue scheduling while preserving framebuffer
+read ordering, rather than assuming shader throughput alone explains 0.66x.
