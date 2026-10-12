@@ -2338,3 +2338,30 @@ The first exploratory acknowledged run was slower still (roughly 50 ms
 intervals), reinforcing that this approach lacks adequate cadence.
 The next experiment should distinguish startup readiness from steady-state
 submission instead of waiting on every displayed image.
+
+The `--startup-ready` mode now retries/waits only for image ID 0, then returns
+to minimum-duration submission without waiting for each presented callback.
+The manual probe now submits 660 images; the comparison runner recognizes
+both historical 120-image and current 660-image captures, retains skipped
+attempts separately from missing image IDs, and reports every delivered
+interval above 20 ms with its adjacent image IDs. No startup interval is
+excluded. Use `--startup-ready` as the runner's final argument to compare
+against immediate presentation on the same binary.
+
+The short 120-image comparison in `/tmp/pvr-metal-startup-20261012/report.json`
+delivered every ID in both startup-ready runs, with approximately 16.666 ms
+medians but maxima of 66.664 and 49.998 ms. A subsequent 660-image comparison
+in `/tmp/pvr-metal-startup660-20261012/report.json` also delivered every ID in
+both startup-ready runs. They retried ID 0 once and twice, respectively. Their
+median and p95 intervals were approximately 16.666 ms. Both had approximately
+50 ms between images 0 and 1; the first also had a 33.332 ms gap between
+images 284 and 285. The immediate controls each lost ID 1.
+
+The extended comparison's unchanged executable SHA-256 is
+`8edb8a5a36eaf42b9c6b9ca8985e9f1c2586926a59e0a2560a5c321cd1bf2d6a`.
+All four runs used Metal API validation. This establishes lossless image-ID
+delivery in two short native-window runs, not uninterrupted 60 Hz or real-game
+performance. It supports testing startup readiness in the live presenter;
+frame ownership, UI composition, audio, and emulator pacing still require
+integrated verification. The comparison's overall gate remains failed because
+its immediate controls lose images.

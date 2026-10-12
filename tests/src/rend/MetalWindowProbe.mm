@@ -9,12 +9,13 @@
 #include <cstring>
 
 // Manual host-window probe, not a Dreamcast conformance or gameplay benchmark.
-static int runProbe(bool paced, bool acknowledged) API_AVAILABLE(macos(10.15.4));
-static int runProbe(bool paced, bool acknowledged)
+static int runProbe(bool paced, bool acknowledged, bool startupOnly) API_AVAILABLE(macos(10.15.4));
+static int runProbe(bool paced, bool acknowledged, bool startupOnly)
 {
+    constexpr unsigned frameCount = 660;
     @autoreleasepool {
         SDL_SetMainReady();
-        std::fprintf(stderr, "METAL_WINDOW_BEGIN mode=%s frames=120\n", acknowledged ? "acknowledged" : paced ? "minimum-duration" : "immediate");
+        std::fprintf(stderr, "METAL_WINDOW_BEGIN mode=%s frames=%u\n", startupOnly ? "startup-ready" : acknowledged ? "acknowledged" : paced ? "minimum-duration" : "immediate", frameCount);
         if (SDL_Init(SDL_INIT_VIDEO) != 0) return 1;
         SDL_Window *window = SDL_CreateWindow("Flycast native Metal presentation probe",
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480,
@@ -53,7 +54,7 @@ static int runProbe(bool paced, bool acknowledged)
         bool failed = false;
         unsigned submitted = 0;
         unsigned retries = 0;
-        for (unsigned frameId = 0; frameId < 120;) {
+        for (unsigned frameId = 0; frameId < frameCount;) {
             @autoreleasepool {
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) if (event.type == SDL_QUIT) failed = true;
@@ -92,7 +93,7 @@ static int runProbe(bool paced, bool acknowledged)
                 [command waitUntilCompleted];
                 if (command.status != MTLCommandBufferStatusCompleted) { failed = true; break; }
                 ++submitted;
-                if (acknowledged) {
+                if (acknowledged && (!startupOnly || frameId == 0)) {
                     for (unsigned wait = 0; wait < 200 && ack->load() == 0; ++wait) {
                         SDL_PumpEvents();
                         SDL_Delay(10);
@@ -113,7 +114,7 @@ static int runProbe(bool paced, bool acknowledged)
         std::fprintf(stderr, "METAL_WINDOW_END submitted=%u callbacks=%u skipped=%u failed=%u\n",
             submitted, presented->load(), skipped->load(), failed);
         const bool complete = !failed && presented->load() == submitted
-            && (acknowledged ? submitted - skipped->load() == 120 : submitted == 120 && skipped->load() == 0);
+            && (acknowledged ? submitted - skipped->load() == frameCount : submitted == frameCount && skipped->load() == 0);
         SDL_Metal_DestroyView(view);
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -123,11 +124,13 @@ static int runProbe(bool paced, bool acknowledged)
 
 int main(int argc, char **argv)
 {
-    if (argc > 2 || (argc == 2 && std::strcmp(argv[1], "--paced") != 0 && std::strcmp(argv[1], "--acknowledged") != 0)) {
-        std::fprintf(stderr, "Usage: flycast-metal-window-probe [--paced|--acknowledged]\n");
+    if (argc > 2 || (argc == 2 && std::strcmp(argv[1], "--paced") != 0 && std::strcmp(argv[1], "--acknowledged") != 0 && std::strcmp(argv[1], "--startup-ready") != 0)) {
+        std::fprintf(stderr, "Usage: flycast-metal-window-probe [--paced|--acknowledged|--startup-ready]\n");
         return 7;
     }
-    if (@available(macOS 10.15.4, *)) return runProbe(argc == 2, argc == 2 && std::strcmp(argv[1], "--acknowledged") == 0);
+    const bool startupOnly = argc == 2 && std::strcmp(argv[1], "--startup-ready") == 0;
+    if (@available(macOS 10.15.4, *)) return runProbe(argc == 2,
+        startupOnly || (argc == 2 && std::strcmp(argv[1], "--acknowledged") == 0), startupOnly);
     std::fprintf(stderr, "METAL_WINDOW requires macOS 10.15.4 presentation callbacks\n");
     return 6;
 }
