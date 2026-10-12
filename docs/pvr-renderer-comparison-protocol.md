@@ -210,6 +210,26 @@ Together the interventions narrow this comparison from 1,732 differences
 They establish sensitivity to dithering and texture filtering, but do not
 prove a particular rounding rule or which implementation matches hardware.
 
+### Hybrid framebuffer verification
+
+The normal build at `60fb394dc` was run with `FLYCAST_HYBRID_SOFT=1`,
+full framebuffer emulation, default texture filtering, single-threaded
+rendering, and muted audio. Frame-4 hybrid output matched the earlier software
+capture in every byte of physical VRAM and every framebuffer pixel. Processed
+VRAM inputs also matched byte-for-byte. The rendered files share SHA-256
+`075ce6bd0f823361921139f4d5e374900ebd4017aeb3228884785988684ecae2`.
+
+This was checked both with live differential verification and, separately,
+with verification disabled. The latter avoids attributing a software verifier
+write to the hybrid. Its trace confirms Metal execution for the frame, with
+four triangles, one texture, and no CPU translucent completion; direct
+presentation is ineligible because full framebuffer emulation is enabled.
+Artifacts and logs are in `/tmp/pvr-hybrid-fb.qeCM6m/`; the verifier-disabled
+captures use the `direct` prefix and the comparison is `comparison.json`.
+This establishes agreement through framebuffer output for this input, including
+the normal filtering and dithering path. It does not establish hardware truth
+or generalize to other scenes.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
