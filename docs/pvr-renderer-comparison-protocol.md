@@ -427,3 +427,23 @@ the additional captured fields for this run. It does not rule out uncaptured
 geometry/configuration/cache state and does not determine which renderer agrees
 with hardware. It is stronger input-equivalence evidence, not full replay or a
 hardware correctness result.
+
+Run the captured-input gate before interpreting a pixel diff:
+
+```sh
+node tools/compare-pvr-inputs.mjs /path/to/gl /path/to/sw
+node --test tools/compare-pvr-inputs.test.mjs
+```
+
+Prefixes identify the `.processed.vram`, `.processed.registers`,
+`.processed.context.json`, and contiguous `.input.context-N.ta` files.
+Exit status is 0 for matching captured evidence, 1 for differences, and 2
+for invalid/missing artifacts or arguments. JSON output includes binary-file
+SHA256 hashes and differing context field names. The tool validates fixed
+buffer sizes, required numeric context fields, fog/region array shapes, and
+TA context numbering and byte alignment. It does not compare rendered outputs
+or prove that a capture represents all renderer state. Context addresses and
+capture write-success records still require the accompanying log.
+
+The captured OpenGL/software pair above passes this gate; the retained report
+is `/tmp/pvr-context-capture.c8w16g/input-comparison.json`.
