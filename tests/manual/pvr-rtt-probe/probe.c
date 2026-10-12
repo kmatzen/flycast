@@ -14,6 +14,12 @@
 #ifndef PVR_PROBE_ALPHA_THRESHOLD
 #define PVR_PROBE_ALPHA_THRESHOLD 0
 #endif
+#ifndef PVR_PROBE_K
+#define PVR_PROBE_K 0
+#endif
+#if PVR_PROBE_K < 0 || PVR_PROBE_K > 255
+#error "Probe K must be a byte"
+#endif
 #if PVR_PROBE_ALPHA < 0 || PVR_PROBE_ALPHA > 255 || PVR_PROBE_ALPHA_THRESHOLD < 0 || PVR_PROBE_ALPHA_THRESHOLD > 255
 #error "Probe alpha and threshold must be bytes"
 #endif
@@ -42,11 +48,12 @@ int main(void)
     if (pvr_wait_ready() < 0 || pvr_wait_render_done() < 0)
         return 3;
 
-    /* Selected 16-bit format without dither, K=0 and explicit alpha threshold.
+    /* Selected 16-bit format without dither, explicit K and alpha threshold.
      * pvr_render_start at the pinned SDK revision
      * does not replace FB_CFG_2; dump its final value to verify that assumption. */
     const uint32_t previous_pack = PVR_GET(PVR_FB_CFG_2);
-    PVR_SET(PVR_FB_CFG_2, PVR_PROBE_PACK_MODE | ((uint32_t)PVR_PROBE_ALPHA_THRESHOLD << 16));
+    PVR_SET(PVR_FB_CFG_2, PVR_PROBE_PACK_MODE | ((uint32_t)PVR_PROBE_K << 8)
+            | ((uint32_t)PVR_PROBE_ALPHA_THRESHOLD << 16));
     dbgio_write_str("PVR_PROBE_STAGE begin_rtt\n");
     if (pvr_scene_begin_rtt(target, WIDTH, HEIGHT, STRIDE) < 0)
         return 4;
@@ -76,9 +83,9 @@ int main(void)
 
     dbgio_write_str("PVR_PROBE_STAGE readback\n");
     char line[192];
-    snprintf(line, sizeof(line), "PVR_RTT_PROBE schema=3 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u packmode=%u alpha=%02x threshold=%02x\n",
+    snprintf(line, sizeof(line), "PVR_RTT_PROBE schema=4 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u packmode=%u alpha=%02x threshold=%02x k=%02x\n",
            WIDTH, HEIGHT, STRIDE, GUARD, ALLOCATION_BYTES, PVR_PROBE_PACK_MODE,
-           PVR_PROBE_ALPHA, PVR_PROBE_ALPHA_THRESHOLD);
+           PVR_PROBE_ALPHA, PVR_PROBE_ALPHA_THRESHOLD, PVR_PROBE_K);
     dbgio_write_str(line);
     snprintf(line, sizeof(line), "PVR_RTT_REG pack=%08lx base=%08lx stride=%08lx clipx=%08lx clipy=%08lx\n",
            (unsigned long)PVR_GET(PVR_FB_CFG_2), (unsigned long)PVR_GET(PVR_RENDER_ADDR),

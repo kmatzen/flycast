@@ -1398,3 +1398,40 @@ summary includes the shutdown interval, so its underrun total should not be
 attributed wholly to gameplay. These are boot/idle sequences, not interactive
 playthroughs or proof of glitch-free audio. Late-swap tearing, broader scene
 coverage, hardware equivalence, and sustained gameplay remain unverified.
+
+### RTT K-value boundary and format isolation
+
+The Dreamcast/Dev.Box System Architecture (1999-09-03), `FB_W_CTRL` register
+description at 0x005F8048, specifies that KRGB0555 bit 15 is `fb_kval[7]`.
+The K field is bits 15–8 of the register; it does not supply the alpha channel
+of ARGB4444 or ARGB1555. The probe now accepts byte-valued `PVR_PROBE_K`
+(default zero) and records it in schema 4. The strict reader retains schemas
+1–3, verifies the requested K register bits, and incorporates K only in the
+KRGB0555 expected word. Six parser tests pass, including synthetic combinations
+of four formats, five K values, and two vertex-alpha values. Synthetic fixtures
+are reader tests, not rendered evidence.
+
+The live runner now executes fourteen cases: the previous seven plus KRGB0555
+with K=1,127,128,255 and alpha=0, and each other 16-bit format with K=255,
+alpha=0, and threshold=128. All fourteen pass in
+`/tmp/pvr-rtt-kvalue-20261012/report.json`. Every case reports matching color
+and all 8,388,608 VRAM bytes between software and Metal, expected interior
+words, unchanged guards/padding, and the requested final register values.
+
+Observed quad/background words (576/448 pixels respectively):
+
+| Format and inputs | Quad | Background |
+| --- | --- | --- |
+| KRGB0555, K=1 or 127, alpha=0 | 0x573d | 0x0000 |
+| KRGB0555, K=128 or 255, alpha=0 | 0xd73d | 0x8000 |
+| RGB565, K=255, alpha=0 | 0xae7d | 0x0000 |
+| ARGB4444, K=255, alpha=0 | 0x0ace | 0xf000 |
+| ARGB1555, K=255, alpha=0, threshold=128 | 0x573d | 0x8000 |
+
+This exercises K independently of vertex alpha through actual emulated RTT
+writes. No renderer policy changed. All results remain emulator-only; the
+shared framebuffer packers mean zero differential errors are not independent
+proof of the packer itself. Dither behavior and original-hardware agreement
+remain unverified. The register description establishes the K expectation
+precisely but does not itself specify a complete dither matrix, so no new
+dither golden is inferred from it.

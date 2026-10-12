@@ -17,6 +17,11 @@ const hashFile = path => createHash('sha256').update(readFileSync(path)).digest(
 const cases = [0, 1, 2, 3].map(mode => ({ name: `mode-${mode}`, mode, alpha: 255, threshold: 0 }));
 for (const alpha of [127, 128, 129])
   cases.push({ name: `alpha-${alpha}-threshold-128`, mode: 3, alpha, threshold: 128 });
+for (const k of [1, 127, 128, 255])
+  cases.push({ name: `krgb-k-${k}`, mode: 0, alpha: 0, threshold: 128, k });
+// K must not substitute for vertex alpha or affect RGB in other formats.
+for (const mode of [1, 2, 3])
+  cases.push({ name: `mode-${mode}-k-255-alpha-0`, mode, alpha: 0, threshold: 128, k: 255 });
 
 async function execute(command, args, env, logPath, stopAtEnd = false) {
   const fd = openSync(logPath, 'wx');
@@ -61,7 +66,7 @@ const report = { execution: 'emulator', hardwareValidated: false,
   flycast, flycastSha256: hashFile(flycast), sdkEnv,
   probeSourceSha256: hashFile(resolve(probeDir, 'probe.c')), cases: [] };
 for (const item of cases) {
-  const flags = `-DPVR_PROBE_PACK_MODE=${item.mode} -DPVR_PROBE_ALPHA=${item.alpha} -DPVR_PROBE_ALPHA_THRESHOLD=${item.threshold}`;
+  const flags = `-DPVR_PROBE_PACK_MODE=${item.mode} -DPVR_PROBE_ALPHA=${item.alpha} -DPVR_PROBE_ALPHA_THRESHOLD=${item.threshold} -DPVR_PROBE_K=${item.k ?? 0}`;
   await execute('/bin/bash', ['-c', 'source "$1" && make -B -C "$2" "CFLAGS=$3"',
     'pvr-probe-build', sdkEnv, probeDir, flags], process.env, resolve(output, `${item.name}.build.log`));
   const elf = resolve(output, `${item.name}.elf`);
@@ -81,7 +86,7 @@ for (const item of cases) {
   const colorVerified = /HYBRID verify pixels=307200 mismatches=0(?:\r?\n)/.test(log);
   const nonzeroMismatch = /HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(log);
   const passed = observed.packmode === item.mode && observed.alpha === item.alpha
-    && observed.threshold === item.threshold && observed.expectedConfiguration
+    && observed.threshold === item.threshold && observed.k === (item.k ?? 0) && observed.expectedConfiguration
     && observed.prefixGuardChangedBytes === 0 && observed.suffixGuardChangedBytes === 0
     && observed.paddingChangedBytes === 0 && observed.interiorPixelsDifferentFromRequestedColor === 0
     && vramVerified && colorVerified && !nonzeroMismatch;

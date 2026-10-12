@@ -78,3 +78,35 @@ test('schema 3 distinguishes threshold boundaries and rejects malformed alpha', 
     assert.throws(() => readProbe(lines.join('\n').replace(`alpha=${alpha}`, 'alpha=100')));
   }
 });
+
+test('schema 4 separates K from alpha and requires the programmed K register', () => {
+  for (const k of [0, 1, 127, 128, 255])
+    for (const alpha of [0, 255])
+      for (let mode = 0; mode < 4; ++mode) {
+        const hex = value => value.toString(16).padStart(2, '0');
+        const expected = [k < 128 ? 0x573d : 0xd73d, 0xae7d,
+          alpha === 0 ? 0x0ace : 0xface, alpha === 0 ? 0x573d : 0xd73d][mode];
+        const lines = fixture();
+        lines[0] = lines[0].replace('schema=1', 'schema=4')
+          + ` packmode=${mode} alpha=${hex(alpha)} threshold=80 k=${hex(k)}`;
+        lines[1] = lines[1].replace('pack=00000001',
+          `pack=${(0x800000 + k * 256 + mode).toString(16).padStart(8, '0')}`);
+        // Synthetic bytes test the reader, not the renderer or hardware.
+        const bytes = Buffer.alloc(2368, 0xa5);
+        for (let y = 8; y < 24; ++y)
+          for (let x = 8; x < 24; ++x)
+            bytes.writeUInt16LE(expected, 32 + (y * 36 + x) * 2);
+        for (let offset = 0; offset < bytes.length; offset += 32)
+          lines[2 + offset / 32] = `PVR_RTT_BYTES offset=${offset.toString(16).padStart(4, '0')} data=${bytes.subarray(offset, offset + 32).toString('hex')}`;
+        const log = lines.join('\n');
+        const result = readProbe(log);
+        assert.equal(result.k, k);
+        assert.equal(result.expectedInteriorWord, expected);
+        assert.equal(result.interiorPixelsDifferentFromRequestedColor, 0);
+        assert.equal(result.expectedConfiguration, true);
+        assert.equal(result.hardwareValidated, false);
+        assert.equal(readProbe(log.replace(/pack=[0-9a-f]{8}/, 'pack=00000000')).expectedConfiguration, false);
+        assert.throws(() => readProbe(log.replace(`k=${hex(k)}`, 'k=100')));
+        assert.throws(() => readProbe(log.replace(` k=${hex(k)}`, '')));
+      }
+});
