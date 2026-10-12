@@ -964,6 +964,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   u32 orderedAutosortTiles = 0;
   u32 orderedAutosortRejectReason = 0;
   std::vector<std::vector<u32>> orderedBins(bins.size());
+  std::vector<std::vector<u32>> globalSuccessors(frame.triangles->size());
+  std::vector<u32> globalIndegrees(frame.triangles->size());
+  std::vector<u8> globalActive(frame.triangles->size());
   for (size_t tile = 0; tile < bins.size(); ++tile) {
     bool tileOrdered = frame.modifierMask == nullptr;
     if (!tileOrdered)
@@ -1021,6 +1024,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
             maximum = std::max(maximum, value + error);
           }
         deferred.push_back({index, minimum, maximum});
+        globalActive[index] = 1;
       } else {
         orderedBins[tile].push_back(index);
       }
@@ -1079,6 +1083,10 @@ bool render(const Frame &frame, std::vector<u32> &colors,
           }
           successors[before].push_back(after);
           ++indegrees[after];
+          const u32 globalBefore = deferred[before].index;
+          const u32 globalAfter = deferred[after].index;
+          globalSuccessors[globalBefore].push_back(globalAfter);
+          ++globalIndegrees[globalAfter];
         }
       }
       std::vector<u32> resolved;
@@ -1110,6 +1118,28 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         orderedBins[tile].push_back(range.index);
     orderedAutosortTiles += tileOrdered;
     orderedAutosort &= tileOrdered;
+  }
+  bool globalAutosort = orderedAutosort;
+  std::vector<u32> globalOrder;
+  const size_t globalActiveCount = static_cast<size_t>(std::count(
+      globalActive.begin(), globalActive.end(), u8{1}));
+  globalOrder.reserve(globalActiveCount);
+  while (globalAutosort && globalOrder.size() != globalActiveCount) {
+    u32 selected = static_cast<u32>(frame.triangles->size());
+    for (u32 candidate = 0; candidate < frame.triangles->size(); ++candidate)
+      if (globalActive[candidate] != 0 && globalIndegrees[candidate] == 0 &&
+          std::find(globalOrder.begin(), globalOrder.end(), candidate) ==
+              globalOrder.end()) {
+        selected = candidate;
+        break;
+      }
+    if (selected == frame.triangles->size()) {
+      globalAutosort = false;
+      break;
+    }
+    globalOrder.push_back(selected);
+    for (u32 successor : globalSuccessors[selected])
+      --globalIndegrees[successor];
   }
   const auto &referenceBins = orderedAutosort ? orderedBins : bins;
   for (const auto &bin : referenceBins) {
@@ -1371,6 +1401,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     timing->totalTiles = static_cast<u32>(hardwareVisibilityTiles.size());
     timing->orderedAutosortFrames = orderedAutosort ? 1 : 0;
     timing->orderedAutosortTiles = orderedAutosortTiles;
+    timing->globalAutosortFrames = globalAutosort ? 1 : 0;
     timing->orderedAutosortRejectReason = orderedAutosortRejectReason;
     for (const Triangle &triangle : *frame.triangles) {
       const u32 listType = (triangle.state >> ListTypeShift) & 3;

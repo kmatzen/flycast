@@ -448,6 +448,7 @@ int main() {
                                     &partialOrderTiming) ||
         partialOrderTiming.orderedAutosortFrames != 1 ||
         partialOrderTiming.orderedAutosortTiles != 1 ||
+        partialOrderTiming.globalAutosortFrames != 1 ||
         !std::all_of(partialOrderColors.begin(), partialOrderColors.end(),
                      [&](u32 color) { return color == expected; }))
       return 1;

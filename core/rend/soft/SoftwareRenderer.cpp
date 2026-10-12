@@ -1070,6 +1070,7 @@ private:
 			totalTiming.totalTiles += timing.totalTiles;
 			totalTiming.orderedAutosortFrames += timing.orderedAutosortFrames;
 			totalTiming.orderedAutosortTiles += timing.orderedAutosortTiles;
+			totalTiming.globalAutosortFrames += timing.globalAutosortFrames;
 			totalTiming.orderedAutosortRejectReason |=
 				timing.orderedAutosortRejectReason;
 			totalTiming.opaqueTriangles += timing.opaqueTriangles;
@@ -1079,7 +1080,7 @@ private:
 		}
 			frameStore = std::move(committed);
 			if (trace)
-				std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f wait=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u/%zu tiles=%u/%u reject=%u lists=%u/%u/%u\n",
+				std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f wait=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u/%zu tiles=%u/%u global=%u/%zu reject=%u lists=%u/%u/%u\n",
 						rendContext->render_passes.size(), totalTriangles, totalTextures,
 						totalTiming.encodeMilliseconds, totalTiming.gpuMilliseconds,
 						totalTiming.gpuExecutionMilliseconds,
@@ -1087,6 +1088,7 @@ private:
 						totalTiming.hardwareVisibilityTiles, totalTiming.totalTiles,
 						totalTiming.orderedAutosortFrames, rendContext->render_passes.size(),
 						totalTiming.orderedAutosortTiles, totalTiming.totalTiles,
+						totalTiming.globalAutosortFrames, rendContext->render_passes.size(),
 						totalTiming.orderedAutosortRejectReason,
 					totalTiming.opaqueTriangles, totalTiming.punchThroughTriangles,
 					totalTiming.translucentTriangles);
@@ -1256,13 +1258,14 @@ private:
 					}
 				}
 		if (trace)
-			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f wait=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u tiles=%u/%u reject=%u lists=%u/%u/%u\n",
+			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f wait=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u tiles=%u/%u global=%u reject=%u lists=%u/%u/%u\n",
 					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,
 					timing.gpuMilliseconds, timing.gpuExecutionMilliseconds,
 					timing.readbackMilliseconds,
 					cpuTranslucentMilliseconds, timing.hardwareVisibilityTiles,
 					timing.totalTiles, timing.orderedAutosortFrames,
 					timing.orderedAutosortTiles, timing.totalTiles,
+					timing.globalAutosortFrames,
 					timing.orderedAutosortRejectReason, timing.opaqueTriangles,
 					timing.punchThroughTriangles, timing.translucentTriangles);
 		return true;
