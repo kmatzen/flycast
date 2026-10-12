@@ -1,10 +1,27 @@
 #include "rend/soft/PresentationFrame.h"
+#include "rend/soft/CadenceProbe.h"
 #include <gtest/gtest.h>
 #include <limits>
 #include <atomic>
 #include <thread>
 
 using namespace rend::soft;
+
+TEST(PresentationFrame, CadenceProbeIdsSurviveFramebufferConcatenation)
+{
+	for (unsigned concat = 0; concat < 8; ++concat)
+		for (unsigned id = 0; id < 2048; ++id)
+		{
+			const Color color {static_cast<u8>(((id & 31) << 3) | concat),
+					static_cast<u8>(((id >> 5) << 2) | (concat & 3)),
+					static_cast<u8>(128 | concat), 255};
+			EXPECT_EQ(decodeCadenceProbeId(color), id < 660 ? static_cast<int>(id) : -1);
+		}
+	EXPECT_EQ(decodeCadenceProbeId({0, 0, 0, 255}), -1);
+	EXPECT_EQ(decodeCadenceProbeId({0, 0, 128, 0}), -1);
+	EXPECT_EQ(decodeCadenceProbeId({1, 0, 128, 255}), -1);
+	EXPECT_EQ(decodeCadenceProbeId({0, 1, 128, 255}), -1);
+}
 
 TEST(PresentationFrame, DeliveryDistinguishesGapsRepeatsAndOutOfOrder)
 {

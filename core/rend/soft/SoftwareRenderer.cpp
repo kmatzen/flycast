@@ -3,6 +3,7 @@
 #include "HybridTileRenderer.h"
 #include "SoftwareRasterizer.h"
 #include "PresentationFrame.h"
+#include "CadenceProbe.h"
 #include "cfg/option.h"
 #include "hw/pvr/Renderer_if.h"
 #include "hw/pvr/ta.h"
@@ -198,6 +199,7 @@ public:
 		presentationSequence = 0;
 		presentationContentSequence = 0;
 		presentationReports = 0;
+		lastCadenceProbeId = -1;
 		rttRasterizer.reset();
 		displayRasterizer = nullptr;
 		rasterizer = nullptr;
@@ -702,6 +704,17 @@ public:
 			return;
 		presentationDelivery.complete(pendingPresentedFramebuffer->sequence);
 		presentationContentDelivery.complete(pendingPresentedFramebuffer->contentSequence);
+		if (std::getenv("FLYCAST_PVR_TRACE_CADENCE_IDS") != nullptr
+				&& pendingPresentedFramebuffer->width == 640 && pendingPresentedFramebuffer->height == 480)
+		{
+			const int id = decodeCadenceProbeId(pendingPresentedFramebuffer->pixels[240 * 640 + 320]);
+			if (id >= 0 && id != lastCadenceProbeId)
+			{
+				std::fprintf(stderr, "PVR_CADENCE_SWAP id=%d sequence=%llu\n", id,
+						static_cast<unsigned long long>(pendingPresentedFramebuffer->sequence));
+				lastCadenceProbeId = id;
+			}
+		}
 		pendingPresentedFramebuffer.reset();
 		if (++presentationReports == 120)
 		{
@@ -2547,6 +2560,7 @@ private:
 	unsigned presentationReports = 0; // UI-thread only.
 	bool emulationThreadRendering = false;
 	unsigned testProcessedFrames = 0;
+	int lastCadenceProbeId = -1;
 	std::unique_ptr<SoftwareRasterizer> rttRasterizer;
 	SoftwareRasterizer *rasterizer = nullptr;
 	SoftwareRasterizer *displayRasterizer = nullptr;
