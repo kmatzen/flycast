@@ -2000,6 +2000,9 @@ TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
 	// out-of-spec throughput stress measurement, not a frame-rate requirement.
 	constexpr u32 budgetLayers = 6;
 	constexpr double frameBudgetMilliseconds = 1000. / 60.;
+	const Color clear { 5, 9, 17, 255 };
+	SoftwareRasterizer reference(width, height);
+	reference.clear(clear);
 	Color texels[4] {
 		{ 255, 127, 63, 79 }, { 31, 239, 97, 131 },
 		{ 83, 47, 229, 181 }, { 211, 157, 23, 227 },
@@ -2026,6 +2029,25 @@ TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
 		const Vertex c { 0, static_cast<float>(height), depth, color, {}, -.1f, 1.1f };
 		const Vertex d { static_cast<float>(width), static_cast<float>(height),
 				depth, color, {}, 1.1f, 1.1f };
+		if (layer < budgetLayers)
+		{
+			PipelineState referenceState;
+			referenceState.depthMode = DepthMode::GreaterOrEqual;
+			referenceState.depthWrite = false;
+			referenceState.deferBlend = true;
+			referenceState.sequence = layer;
+			referenceState.texture = { texels, 2, 2 };
+			referenceState.bilinearFilter = true;
+			referenceState.shadingInstruction = 3;
+			referenceState.srcBlend = BlendFactor::SrcAlpha;
+			referenceState.dstBlend = BlendFactor::OneMinusSrcAlpha;
+			referenceState.fogMode = 0;
+			referenceState.fogTable = fogTable;
+			referenceState.fogRamColor = { 29, 101, 223, 255 };
+			referenceState.fogDensity = .75f;
+			reference.drawTriangle(a, b, c, referenceState);
+			reference.drawTriangle(b, d, c, referenceState);
+		}
 		for (auto command : { triangle(a, b, c, state), triangle(b, d, c, state) })
 		{
 			command.minX = command.minY = 0;
@@ -2037,7 +2059,7 @@ TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
 			commands.push_back(command);
 		}
 	}
-	const Color clear { 5, 9, 17, 255 };
+	reference.resolveDeferredFragments();
 	const std::vector<u32> initialColors(static_cast<size_t>(width) * height,
 			pack(clear));
 	auto configureFrame = [&](const std::vector<hybrid::Triangle>& frameCommands) {
@@ -2062,6 +2084,7 @@ TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
 	auto budgetFrame = configureFrame(budgetCommands);
 	hybrid::Timing budgetTiming;
 	ASSERT_TRUE(hybrid::render(budgetFrame, colors, depths, &budgetTiming));
+	expectEqual(reference, colors, depths);
 	EXPECT_EQ(budgetTiming.simpleTranslucentFrames, 1u);
 	EXPECT_GT(budgetTiming.gpuExecutionMilliseconds, 0.);
 	RecordProperty("dreamcast_budget_layers", budgetLayers);

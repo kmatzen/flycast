@@ -288,7 +288,11 @@ The six-layer benchmark now records 20 warmed synchronous `hybrid::render`
 calls, with median, nearest-rank p95, and maximum wall-clock duration, plus GPU
 p95. Timing ends after readback and before the test checks that the returned
 color and depth buffers match the warm-up output. This checks repeatability,
-not hardware accuracy. `FLYCAST_HYBRID_ENFORCE_60HZ=1` requires both GPU and
+not hardware accuracy. The warm-up output is also checked across the full
+640x480 buffers against software rendering of the same six layers, including
+bilinear texture modulation, lookup fog, deferred sorting, and alpha blending.
+Software reference generation and comparison are outside the timed calls.
+`FLYCAST_HYBRID_ENFORCE_60HZ=1` requires both GPU and
 whole-render-call p95 to stay within 16.67 ms, rather than checking a single GPU
 timestamp alone.
 
