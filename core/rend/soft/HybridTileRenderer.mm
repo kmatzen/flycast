@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 
 #include <array>
+#include <queue>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -1344,23 +1345,24 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       }
       std::vector<u32> resolved;
       resolved.reserve(deferred.size());
+      // Bins are populated in input-index order. The smallest ready local
+      // index preserves the old lowest-original-index-first ordering.
+      std::priority_queue<u32, std::vector<u32>, std::greater<u32>> ready;
+      for (u32 candidate = 0; candidate < deferred.size(); ++candidate)
+        if (indegrees[candidate] == 0)
+          ready.push(candidate);
       while (tileOrdered && resolved.size() != deferred.size()) {
-        u32 selected = static_cast<u32>(deferred.size());
-        for (u32 candidate = 0; candidate < deferred.size(); ++candidate)
-          if (indegrees[candidate] == 0 &&
-              std::find(resolved.begin(), resolved.end(), candidate) ==
-                  resolved.end() &&
-              (selected == deferred.size() ||
-               deferred[candidate].index < deferred[selected].index))
-            selected = candidate;
-        if (selected == deferred.size()) {
+        if (ready.empty()) {
           tileOrdered = false;
           orderedAutosortRejectReason |= 4;
           break;
         }
+        const u32 selected = ready.top();
+        ready.pop();
         resolved.push_back(selected);
         for (u32 successor : successors[selected])
-          --indegrees[successor];
+          if (--indegrees[successor] == 0)
+            ready.push(successor);
       }
       if (tileOrdered)
         for (u32 resolvedIndex : resolved)
@@ -1377,22 +1379,21 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   const size_t globalActiveCount = static_cast<size_t>(std::count(
       globalActive.begin(), globalActive.end(), u8{1}));
   globalOrder.reserve(globalActiveCount);
+  std::priority_queue<u32, std::vector<u32>, std::greater<u32>> globalReady;
+  for (u32 candidate = 0; candidate < frame.triangles->size(); ++candidate)
+    if (globalActive[candidate] != 0 && globalIndegrees[candidate] == 0)
+      globalReady.push(candidate);
   while (globalAutosort && globalOrder.size() != globalActiveCount) {
-    u32 selected = static_cast<u32>(frame.triangles->size());
-    for (u32 candidate = 0; candidate < frame.triangles->size(); ++candidate)
-      if (globalActive[candidate] != 0 && globalIndegrees[candidate] == 0 &&
-          std::find(globalOrder.begin(), globalOrder.end(), candidate) ==
-              globalOrder.end()) {
-        selected = candidate;
-        break;
-      }
-    if (selected == frame.triangles->size()) {
+    if (globalReady.empty()) {
       globalAutosort = false;
       break;
     }
+    const u32 selected = globalReady.top();
+    globalReady.pop();
     globalOrder.push_back(selected);
     for (u32 successor : globalSuccessors[selected])
-      --globalIndegrees[successor];
+      if (--globalIndegrees[successor] == 0)
+        globalReady.push(successor);
   }
   // Async submission returns before it can inspect the overflow flag. Use it
   // only with the proven one-fragment ordered kernel, which cannot overflow.

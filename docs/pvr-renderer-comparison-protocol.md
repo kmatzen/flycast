@@ -1275,3 +1275,25 @@ sample places the active CPU work in `hybrid::renderInternal`; sample and
 run logs are `/tmp/pvr-small-triangle-sample.txt` and
 `/tmp/pvr-small-triangle.log`. Do not treat this new benchmark as passing
 until the current run completes and its correctness/timing results are read.
+
+The small-triangle baseline completed with matching pixels/depth but failed
+the explicit 60-Hz gate: wall median 4018.49 ms, p95 4137.65 ms, and GPU
+p95 29.12 ms. Investigation found repeated global candidate scans with
+linear searches through the resolved prefix in translucent topological
+ordering. Both tile-local and global resolution now use minimum-index
+priority queues. Each node is queued when its indegree reaches zero,
+preserving the former lowest-input-index-first tie break and cycle failure
+behavior without repeatedly searching resolved nodes. Tile bins are built
+in increasing original index, so local index ordering is equivalent there.
+
+The same workload after this change retains matching pixels/depth and
+records wall median 22.92 ms, p95 24.65 ms, maximum 25.26 ms, and GPU p95
+18.32 ms (`/tmp/pvr-toposort.xml`). Wall p95 improves about 168-fold, but
+both the wall and GPU 16.67-ms gates still fail. No Dreamcast-spec performance
+completion is claimed. All 136 focused tests pass on native ARM64 and
+x86-64/Rosetta with timing gates off, and the application build succeeds.
+
+The rebuilt application also passes all seven automated RTT cases, each
+with complete readback and zero color/full-VRAM verifier differences;
+artifacts are `/tmp/pvr-rtt-toposort-20261012/`. This checks the ordering
+change through the production renderer as well as the focused tests.
