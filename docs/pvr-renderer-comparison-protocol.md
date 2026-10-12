@@ -1257,3 +1257,21 @@ runner never promotes emulator output to a hardware golden. Its first full
 run passed all seven cases; artifacts and the JSON report are under
 `/tmp/pvr-rtt-batch-20261012-a/`. Syntax checking also passes. This replaces
 manual per-case build/run handling, not the need for hardware validation.
+
+Added `HybridTileRenderer.BenchmarksDocumentedSmallTriangleMix`, motivated
+by Sega System Architecture §1.2's one-million-polygons/second statement
+for 100-pixel triangles with a 75% opaque / 25% translucent mix. The test
+uses 16,664 untextured triangles per 640x480 frame, 12,498 opaque and 4,166
+translucent, each with geometric area 100 pixels. It compares against the
+software rasterizer, then samples 20 synchronous hybrid calls and records
+wall/GPU timing. The opt-in 60-Hz gate checks both p95 values. This modeled
+workload does not claim to reproduce the undocumented details of Sega's
+measurement or include full-emulator overhead.
+
+The first launch rejected an empty texture atlas required by the hybrid
+API; the fixture now supplies a dummy texel. The corrected launch is still
+running as of this record, with no timing verdict yet. A one-second host
+sample places the active CPU work in `hybrid::renderInternal`; sample and
+run logs are `/tmp/pvr-small-triangle-sample.txt` and
+`/tmp/pvr-small-triangle.log`. Do not treat this new benchmark as passing
+until the current run completes and its correctness/timing results are read.

@@ -1999,6 +1999,82 @@ TEST(HybridTileRenderer, AsyncPresentationChainsFramesWithoutCpuUpload)
 				<< "second frame pixel=" << pixel;
 }
 
+TEST(HybridTileRenderer, BenchmarksDocumentedSmallTriangleMix)
+{
+	// Sega System Architecture section 1.2: 1M 100-pixel triangles/s,
+	// 75% opaque and 25% translucent. This is a renderer-boundary model of
+	// that mix, not a hardware timing replica or full-emulator benchmark.
+	constexpr u32 width = 640, height = 480, count = 16664;
+	constexpr u32 opaqueCount = count * 3 / 4;
+	const Color clear { 5, 9, 17, 255 };
+	SoftwareRasterizer reference(width, height);
+	reference.clear(clear);
+	std::vector<hybrid::Triangle> commands;
+	commands.reserve(count);
+	for (u32 i = 0; i < count; ++i)
+	{
+		const bool translucent = i >= opaqueCount;
+		const u32 cell = (i / 2) % (64 * 24);
+		const float x = (cell % 64) * 10.f, y = (cell / 64) * 20.f;
+		const float z = 1.f + (i / 3072) * .125f;
+		const Color color { static_cast<u8>(i * 19), static_cast<u8>(i * 37),
+				static_cast<u8>(i * 71), static_cast<u8>(translucent ? 128 : 255) };
+		const Vertex a { x, y, z, color }, b { x + 10, y, z, color };
+		const Vertex c { x, y + 20, z, color }, d { x + 10, y + 20, z, color };
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.depthWrite = !translucent;
+		state.deferBlend = translucent;
+		state.sequence = i;
+		state.srcBlend = translucent ? BlendFactor::SrcAlpha : BlendFactor::One;
+		state.dstBlend = translucent ? BlendFactor::OneMinusSrcAlpha : BlendFactor::Zero;
+		u32 gpuState = hybrid::makeState(6, !translucent, false, false, true, 0,
+				translucent ? 4 : 1, translucent ? 5 : 0);
+		if (translucent) gpuState |= hybrid::Autosort | (2u << hybrid::ListTypeShift);
+		if (i % 2 == 0) {
+			reference.drawTriangle(a, b, c, state);
+			commands.push_back(triangle(a, b, c, gpuState));
+		} else {
+			reference.drawTriangle(b, d, c, state);
+			commands.push_back(triangle(b, d, c, gpuState));
+		}
+	}
+	reference.resolveDeferredFragments();
+	const std::vector<u32> initial(width * height, pack(clear));
+	// The renderer API requires a nonempty atlas even for untextured draws.
+	const std::vector<u32> texture { 0xffffffffu };
+	hybrid::Frame frame { width, height, &commands, &texture, &initial };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	hybrid::Timing timing;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+	expectEqual(reference, colors, depths);
+	const auto expectedColors = colors;
+	const auto expectedDepths = depths;
+	std::array<double, 20> wall, gpu;
+	for (size_t i = 0; i < wall.size(); ++i) {
+		const auto start = std::chrono::steady_clock::now();
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+		wall[i] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		gpu[i] = timing.gpuExecutionMilliseconds;
+		ASSERT_EQ(colors, expectedColors);
+		ASSERT_EQ(depths, expectedDepths);
+	}
+	std::sort(wall.begin(), wall.end());
+	std::sort(gpu.begin(), gpu.end());
+	RecordProperty("triangles_per_frame", count);
+	RecordProperty("opaque_triangles", opaqueCount);
+	RecordProperty("translucent_triangles", count - opaqueCount);
+	RecordProperty("render_median_ms", (wall[9] + wall[10]) / 2);
+	RecordProperty("render_p95_ms", wall[18]);
+	RecordProperty("render_max_ms", wall.back());
+	RecordProperty("gpu_p95_ms", gpu[18]);
+	if (std::getenv("FLYCAST_HYBRID_ENFORCE_60HZ") != nullptr) {
+		EXPECT_LE(wall[18], 1000. / 60.);
+		EXPECT_LE(gpu[18], 1000. / 60.);
+	}
+}
+
 TEST(HybridTileRenderer, BenchmarksDreamcastFillRateAnd72LayerStress)
 {
 	constexpr u32 width = 640;
