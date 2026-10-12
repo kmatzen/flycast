@@ -535,6 +535,49 @@ TEST(HybridTileRenderer, MatchesOracleForTableFog)
 	}
 }
 
+TEST(HybridTileRenderer, MatchesOracleAtEveryFogExponentTransitionAndClamp)
+{
+	std::array<u32, 128> fogTable;
+	for (u32 i = 0; i < fogTable.size(); ++i)
+		fogTable[i] = (i << 8) | std::min(127u, i + 1);
+	const Color base { 210, 70, 25, 177 };
+	const Color fog { 15, 90, 220, 255 };
+	const std::vector<u32> texture { 0xffffffffu };
+	std::vector<float> depths { .25f, 1024.f };
+	for (int exponent = 0; exponent < 8; ++exponent)
+	{
+		const float transition = std::ldexp(1.f, exponent);
+		depths.push_back(std::nextafter(transition, 0.f));
+		depths.push_back(transition);
+		depths.push_back(std::nextafter(transition, INFINITY));
+	}
+
+	for (float depth : depths)
+	{
+		SoftwareRasterizer cpu(2, 2);
+		PipelineState state;
+		state.depthMode = DepthMode::Always;
+		state.fogMode = 0;
+		state.fogRamColor = fog;
+		state.fogDensity = 1.f;
+		state.fogTable = fogTable.data();
+		drawQuad(cpu, depth, base, state);
+
+		std::vector<hybrid::Triangle> commands;
+		u32 gpuState = hybrid::makeState(7, true, false, false, true, 0, 1, 0);
+		gpuState |= hybrid::LookupFog;
+		appendQuad(commands, depth, base, gpuState);
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		frame.fogTable = fogTable.data();
+		frame.fogColor = pack(fog);
+		frame.fogDensity = 1.f;
+		std::vector<u32> colors;
+		std::vector<float> renderedDepths;
+		ASSERT_TRUE(hybrid::render(frame, colors, renderedDepths)) << "depth=" << depth;
+		expectEqual(cpu, colors, renderedDepths);
+	}
+}
+
 TEST(HybridTileRenderer, MatchesOracleForMipSelectionAndTrilinearWeights)
 {
 	std::array<Color, 21> texels;

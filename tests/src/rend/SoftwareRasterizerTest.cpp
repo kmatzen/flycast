@@ -685,6 +685,59 @@ TEST(SoftwareRasterizer, SelectsFogTableAddressFromIeeeExponentAndMantissa)
 	EXPECT_LT(coefficient, 16.f / 255.f);
 }
 
+TEST(SoftwareRasterizer, MatchesPvrFogAddressBoundariesAcrossAllExponentBands)
+{
+	u32 table[128] {};
+	for (u32 index = 0; index < 128; ++index)
+	{
+		u8 *entry = reinterpret_cast<u8 *>(&table[index]);
+		entry[1] = static_cast<u8>(index);
+		entry[0] = static_cast<u8>(std::min(127u, index + 1));
+	}
+
+	// The PVR clamps 1/W to [1, 255.9999]. Each exact table address is
+	// 2^exponent * (16 + mantissa) / 16, with seven exponent/mantissa bits.
+	EXPECT_FLOAT_EQ(SoftwareRasterizer::fogCoefficient(.25f, 1.f, table), 0.f);
+	for (u32 exponent = 0; exponent < 8; ++exponent)
+	{
+		for (u32 mantissa = 0; mantissa < 16; ++mantissa)
+		{
+			const u32 index = exponent * 16 + mantissa;
+			const float z = std::ldexp((16.f + mantissa) / 16.f,
+					static_cast<int>(exponent));
+			EXPECT_FLOAT_EQ(SoftwareRasterizer::fogCoefficient(z, 1.f, table),
+					index / 255.f) << "index=" << index;
+		}
+	}
+	EXPECT_FLOAT_EQ(SoftwareRasterizer::fogCoefficient(1024.f, 1.f, table),
+			127.f / 255.f);
+}
+
+TEST(SoftwareRasterizer, InterpolatesWithinEveryPvrFogMantissaCell)
+{
+	u32 table[128] {};
+	for (u32 index = 0; index < 128; ++index)
+	{
+		u8 *entry = reinterpret_cast<u8 *>(&table[index]);
+		entry[1] = static_cast<u8>(index);
+		entry[0] = static_cast<u8>(std::min(127u, index + 1));
+	}
+
+	for (u32 exponent = 0; exponent < 8; ++exponent)
+	{
+		for (u32 mantissa = 0; mantissa < 16; ++mantissa)
+		{
+			const u32 index = exponent * 16 + mantissa;
+			if (index == 127)
+				continue;
+			const float midpoint = std::ldexp((16.5f + mantissa) / 16.f,
+					static_cast<int>(exponent));
+			EXPECT_NEAR(SoftwareRasterizer::fogCoefficient(midpoint, 1.f, table),
+					(index + .5f) / 255.f, 1e-6f) << "index=" << index;
+		}
+	}
+}
+
 TEST(SoftwareRasterizer, AppliesColorClampBeforeFog)
 {
 	SoftwareRasterizer rasterizer(1, 1);
