@@ -27,10 +27,14 @@ for (const frame of (injectError ? [64] : [480, 720])) {
     FLYCAST_PVR_DECOUPLED_PRESENT: '1', FLYCAST_PVR_TRACE_DELIVERY: '1',
     FLYCAST_PVR_TEST_REINIT_FRAME: String(frame),
   });
-  if (paused) env.FLYCAST_PVR_TEST_PAUSED_REINIT = '1';
+  if (paused) {
+    env.FLYCAST_PVR_TEST_PAUSED_REINIT = '1';
+    env.FLYCAST_PVR_TEST_UI_COMPOSITION = '1';
+  }
   if (injectError) {
     delete env.FLYCAST_PVR_TEST_REINIT_FRAME;
     env.FLYCAST_PVR_TEST_RENDER_ERROR = '1';
+    env.FLYCAST_PVR_TEST_UI_COMPOSITION = '1';
   }
   const log = await new Promise((accept, reject) => {
     const child = spawn(app, ['-config', 'audio:backend=null', '-config', 'config:pvr.rend=7',
@@ -75,6 +79,9 @@ for (const frame of (injectError ? [64] : [480, 720])) {
       : count(after) >= 40 && log.includes(`PVR_LIFECYCLE reinit_begin frame=${frame} running=1`))
     && finalReports.length === 2
     && (!injectError || /^PVR_DELIVERY_FINAL published=0 swapped_unique=0 /.test(finalReports[1]))
+    && (!injectError || /PVR_UI_COMPOSITION match=1 bytes=[1-9]/.test(after))
+    && (!paused || /PVR_UI_COMPOSITION match=1 bytes=[1-9]/.test(log))
+    && !log.includes('PVR_UI_COMPOSITION match=0')
     && (!paused || log.includes('PVR_LIFECYCLE paused_reinit running=0 retained=1 drawn=1'))
     && !/HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(log)
     && /HYBRID verify pixels=307200 mismatches=0/.test(injectError ? before : after);

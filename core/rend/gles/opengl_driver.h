@@ -19,6 +19,7 @@
 #pragma once
 #include "ui/imgui_driver.h"
 #include <unordered_map>
+#include <vector>
 
 class OpenGLDriver final : public ImGuiDriver
 {
@@ -48,5 +49,7 @@ public:
 
 private:
 	bool frameRendered = false;
+	bool softwareBackgroundDrawn = false;
+	std::vector<u8> testComposedFrame;
 	std::unordered_map<std::string, ImTextureID> textures;
 };

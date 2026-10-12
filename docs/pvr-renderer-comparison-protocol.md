@@ -2126,3 +2126,31 @@ with zero mismatches. That run verifies software/Metal agreement, not pacing.
 All three processes stopped normally. This probe makes the remaining
 presentation limitation reproducible without relying on a complex game scene;
 the opt-in scheduling path remains experimental.
+
+### Software presentation UI composition (2026-10-12)
+
+Inspection for a native Metal presenter exposed an existing ordering bug:
+`OpenGLDriver::renderDrawData` drew the retained software image and ImGui,
+then `present` drew the software image again. That second draw clears the
+window, overwriting the composed UI. The driver now draws software backgrounds
+before ImGui and records that fact until swap, avoiding the second draw.
+Gameplay frames without ImGui still draw in `present`.
+
+`FLYCAST_PVR_TEST_UI_COMPOSITION` is an opt-in readback regression check. It
+adds a one-pixel overlay marker after UI drawing, captures the composed window,
+and compares it with another readback immediately before swap. The paused
+lifecycle hook submits an empty ImGui draw list over the retained game image;
+the marker makes this test sensitive to background clearing even without
+interactive menu navigation. The error-recovery case checks actual UI drawing.
+The readback overhead is deliberately excluded from normal operation.
+
+Both Seaman paused-recreation checkpoints passed on the final executable in
+`/tmp/pvr-ui-paused-20261012/report.json`, SHA-256
+`c6bb7f5771427890eaa29d70d4687cd5b21cb437096c1c98f271ffb77cef5f15`.
+They verified 77/203 full-VRAM snapshots before recreation and 40 afterward,
+with zero CPU/Metal mismatches, and compared 4,915,200 composed-window bytes.
+The earlier error-menu check passed in `/tmp/pvr-ui-composition-20261012`;
+that predates the marker extension and is not a final-binary result. The 147
+renderer unit tests also passed on ARM64. These checks establish composition
+preservation in the tested paths, not physical scanout, interactive menu/resize
+coverage, or improved cadence. Native Metal presentation remains unimplemented.

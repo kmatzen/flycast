@@ -22,6 +22,8 @@
 #include "glcache.h"
 #include "gles.h"
 #include "hw/pvr/Renderer_if.h"
+#include <cstdlib>
+#include <cstdio>
 
 #ifndef GL_CLAMP_TO_BORDER
 #define GL_CLAMP_TO_BORDER 0x812D
@@ -63,8 +65,34 @@ void OpenGLDriver::renderDrawData(ImDrawData* drawData, bool gui_open)
 		glClear(GL_COLOR_BUFFER_BIT);
 		if (renderer != nullptr)
 			renderer->RenderLastFrame();
+		softwareBackgroundDrawn = renderer != nullptr && isSoftware(config::RendererType);
+	}
+	else if (renderer != nullptr && isSoftware(config::RendererType) && !softwareBackgroundDrawn)
+	{
+		renderer->RenderLastFrame();
+		softwareBackgroundDrawn = true;
 	}
 	ImGui_ImplOpenGL3_RenderDrawData(drawData);
+	if (gui_open && softwareBackgroundDrawn && std::getenv("FLYCAST_PVR_TEST_UI_COMPOSITION") != nullptr)
+	{
+		// A diagnostic overlay pixel makes a later background redraw observable
+		// even when this test submits an empty ImGui command list.
+		GLint scissor[4];
+		GLfloat clearColor[4];
+		const bool scissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+		glGetIntegerv(GL_SCISSOR_BOX, scissor);
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
+		glcache.Enable(GL_SCISSOR_TEST);
+		glScissor(0, 0, 1, 1);
+		glcache.ClearColor(1, 0, 1, 1);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glcache.ClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+		glScissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+		if (!scissorEnabled) glcache.Disable(GL_SCISSOR_TEST);
+		testComposedFrame.resize(size_t(settings.display.width) * settings.display.height * 4);
+		glReadPixels(0, 0, settings.display.width, settings.display.height, GL_RGBA, GL_UNSIGNED_BYTE,
+				testComposedFrame.data());
+	}
 	if (gui_open)
 		frameRendered = true;
 }
@@ -72,16 +100,28 @@ void OpenGLDriver::renderDrawData(ImDrawData* drawData, bool gui_open)
 void OpenGLDriver::present()
 {
 	// The software renderer produces pixels off the UI thread. Draw its retained
-	// frame here, with the window's GL context current, immediately before swap.
-	if (frameRendered && renderer != nullptr && isSoftware(config::RendererType))
+	// frame here only if it wasn't already drawn underneath ImGui. Redrawing
+	// after UI composition clears the window and erases menus and overlays.
+	if (frameRendered && renderer != nullptr && isSoftware(config::RendererType) && !softwareBackgroundDrawn)
 		renderer->RenderLastFrame();
 	if (frameRendered)
 	{
+		if (!testComposedFrame.empty())
+		{
+			std::vector<u8> beforeSwap(testComposedFrame.size());
+			glReadPixels(0, 0, settings.display.width, settings.display.height, GL_RGBA, GL_UNSIGNED_BYTE,
+					beforeSwap.data());
+			const bool matches = beforeSwap == testComposedFrame;
+			std::fprintf(stderr, "PVR_UI_COMPOSITION match=%u bytes=%zu\n", matches, beforeSwap.size());
+			testComposedFrame.clear();
+			if (!matches) throw RendererException("UI composition overwritten before swap");
+		}
 		GLGraphicsContext::Instance()->swap();
 		if (renderer != nullptr)
 			renderer->PresentationCompleted();
 	}
 	frameRendered = false;
+	softwareBackgroundDrawn = false;
 }
 
 ImTextureID OpenGLDriver::updateTexture(const std::string& name, const u8 *data, int width, int height, bool nearestSampling)

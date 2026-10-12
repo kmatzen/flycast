@@ -188,6 +188,11 @@ void mainui_loop(bool forceStart)
 				const bool drawn = renderer != nullptr && imguiDriver != nullptr && renderer->RenderLastFrame();
 				if (drawn)
 				{
+					if (std::getenv("FLYCAST_PVR_TEST_UI_COMPOSITION") != nullptr)
+					{
+						ImDrawData testDrawData;
+						imguiDriver->renderDrawData(&testDrawData, true);
+					}
 					imguiDriver->setFrameRendered();
 					imguiDriver->present();
 				}
