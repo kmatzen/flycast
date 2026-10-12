@@ -1016,3 +1016,20 @@ completed compiler work and leaving the system installation unchanged.
 The resumed process is compiling newlib math objects; full toolchain, SDK,
 and probe completion remain pending. This is build progress, not renderer
 validation or hardware evidence.
+
+Newlib subsequently completed installation and the build advanced to GCC
+pass 2. With the pinned SDK environment sourced in a fresh shell,
+`make -C tests/manual/pvr-rtt-probe probe.o` completed successfully using
+`kos-cc`. This validates compilation against those headers only; no linked
+probe or runtime result exists yet.
+
+For the forthcoming emulator run, Flycast's existing SCIF console can
+capture probe text without changes to SH4 code: set transient
+`config:Debug.SerialConsoleEnabled=yes` and
+`config:Debug.SerialPTY=false`, and redirect stdout to a fresh log. The
+SCIF pipe writes bytes to stdout when no PTY is selected. The pinned KOS
+initialization registers its SCIF debug handler after DC-load detection,
+and Flycast accepts ELF content directly. This source inspection identifies
+the intended transport; successful receipt of the complete probe record
+still needs runtime verification. Emulator output must remain labeled as
+emulator evidence, never hardware ground truth.
