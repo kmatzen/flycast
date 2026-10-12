@@ -1877,3 +1877,63 @@ consumer thread; cross-thread publication still needs synchronization. The
 threaded framebuffer-read/VRAM ordering concern is not resolved by owning the
 output after the read, nor are borrowed GPU surfaces made immutable by this
 change. No performance improvement or tear-free scheduling is claimed.
+
+### Opt-in emulation-thread rendering with independent presentation
+
+`FLYCAST_PVR_DECOUPLED_PRESENT=1`, when initialized on desktop macOS with
+renderer 7, threaded rendering, and full framebuffer emulation enabled,
+executes PVR Render and RenderFramebuffer messages synchronously on the
+emulation thread. Present messages remain on the existing bounded UI queue.
+The CPU cannot advance past an incomplete framebuffer read or render write,
+while the UI can wait for ordinary VSync independently. SH4 rounding mode is
+restored after rendering, including on exceptions. The render-completion
+event remains in place; its measured wait becomes negligible because the
+work has already completed, not because rendering is free.
+
+Completed display images are published through an atomic shared-pointer
+mailbox. The UI retains the image selected by Present through its GL upload;
+it does not inspect mutable rasterizer buffers or the Metal presentation
+pool. The last-frame-clear flag is atomic. A concurrent publication test
+checks pixel/metadata consistency and retention across 2,000 replacements
+and mailbox clearing. All 145 renderer tests pass on ARM64 and Rosetta in
+`/tmp/pvr-decoupled-{native,rosetta}.log`.
+
+The first real-audio Seaman run, with ordinary swap interval 1 and full
+framebuffer emulation, recorded 23 emulation windows at 0.9955–1.0097x.
+It submitted 4,165,632 audio input frames over 4,068 callbacks with zero
+underruns, silence output frames, or dropped input frames, including normal
+shutdown (`/tmp/pvr-decoupled-vsync.log`). This is a substantial improvement
+over the preceding ~0.67x ordinary-VSync runs. The host stayed muted and no
+gameplay input was supplied. A separate null-audio differential run compared
+558 color frames and full-VRAM snapshots with zero mismatches
+(`/tmp/pvr-decoupled-verify.log`). Full-VRAM verification is permitted here
+because the emulation thread itself performs the render and cannot modify
+VRAM concurrently with the comparison.
+
+Those two runs preceded the final UI snapshot-pinning adjustment. The first
+RTT run also overlapped that rebuild and is exploratory, not final-build
+provenance. The runner now accepts `--decoupled`, records the scheduling mode,
+and rejects executable changes during a run. Do not confuse its usual
+single-thread default with validation of this opt-in mode.
+
+The final pinned-snapshot build passes all twenty rebuilt RTT probes in
+`/tmp/pvr-rtt-decoupled-final-20261012/report.json`, with the six dither cases
+retaining differential-only acceptance. Its independent real-audio run
+(`/tmp/pvr-decoupled-final-vsync.log`) records 22 emulation windows at
+0.9942–1.0104x with swap interval 1. Periodic audio reports remain at zero
+underruns; the final counter records three underruns/3,072 silent output
+frames over 3,912 callbacks, with 4,002,816 submitted input frames and zero
+drops. The difference appears between the last periodic report and normal
+shutdown; it must not be reported as an entirely underrun-free run. This
+reproduces the pacing improvement on the final build without claiming that
+all audio-delivery or presentation requirements are solved.
+
+This remains an experiment, not a new default. Changing threaded rendering
+or framebuffer emulation underneath the initialized mode is rejected rather
+than silently switching ownership. Latest-image publication may omit display
+images when the UI falls behind; no PVR render or VRAM write is skipped by
+this handoff. Unique-frame delivery, pause/resume, resize, settings changes,
+network rollback, longer play, and other games still need validation. No
+visual tear-free claim or full hardware-conformance claim follows from the
+audio counters or CPU/Metal agreement. The opt-in path is not enabled for
+libretro or non-macOS platforms.

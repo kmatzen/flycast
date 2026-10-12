@@ -3,6 +3,7 @@
 #include "ta_ctx.h"
 #include "emulator.h"
 #include <vector>
+#include <atomic>
 
 extern u32 FrameCount;
 
@@ -75,12 +76,15 @@ struct Renderer
 	virtual bool GetLastFrame(std::vector<u8>& data, int& width, int& height) { return false; }
 
 	virtual bool Present() { return true; }
+	// Only renderers with an independently owned presentation handoff may opt
+	// into executing PVR work on the emulation thread while the UI swaps.
+	virtual bool RendersOnEmulationThread() const { return false; }
 
 	virtual BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw, int area = 0) { return nullptr; }
 
 protected:
 	bool resetTextureCache = false;
-	bool clearLastFrame = false;
+	std::atomic<bool> clearLastFrame { false };
 	bool updatePalette = true;
 	bool updateFogTable = true;
 

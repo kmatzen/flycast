@@ -131,6 +131,10 @@ class SoftwareRenderer final : public Renderer
 public:
 	bool Init() override
 	{
+#if defined(TARGET_MAC) && !defined(LIBRETRO)
+		emulationThreadRendering = config::ThreadedRendering && config::EmulateFramebuffer
+				&& std::getenv("FLYCAST_PVR_DECOUPLED_PRESENT") != nullptr;
+#endif
 		BaseTextureCacheData::SetDirectXColorOrder(false);
 #ifdef USE_OPENGL
 		// The software rasterizer still uses OpenGL to present its completed
@@ -185,7 +189,8 @@ public:
 #endif
 		textureCache.Clear();
 		screenRasterizer.reset();
-		framebufferPresentation.reset();
+		framebufferPresentation.clear();
+		lastPresentedFramebuffer.reset();
 		rttRasterizer.reset();
 		displayRasterizer = nullptr;
 		rasterizer = nullptr;
@@ -202,6 +207,7 @@ public:
 
 	void Process(TA_context *ctx) override
 	{
+		checkPresentationMode();
 		rendContext = &ctx->rend;
 		// Texture pointers are attached to polygon parameters during parsing.
 		// Resetting the cache afterwards would leave those pointers dangling.
@@ -233,7 +239,7 @@ public:
 		{
 			displayRasterizer = rasterizer;
 			if (!config::EmulateFramebuffer)
-				framebufferPresentation.reset();
+				framebufferPresentation.clear();
 		}
 		std::vector<Color> previousFrameStore;
 		if (!rendContext->isRTT)
@@ -273,7 +279,7 @@ public:
 			tileCount = std::max(tileCount, passRegions.back().size());
 		}
 		const bool verifyHybrid = std::getenv("FLYCAST_HYBRID_VERIFY") != nullptr;
-		const bool verifyVram = verifyHybrid && !config::ThreadedRendering
+		const bool verifyVram = verifyHybrid && (!config::ThreadedRendering || emulationThreadRendering)
 				&& std::getenv("FLYCAST_HYBRID_VERIFY_VRAM") != nullptr
 				&& (rendContext->isRTT || config::EmulateFramebuffer);
 		std::vector<Color> hybridInitial;
@@ -594,6 +600,7 @@ public:
 
 	void RenderFramebuffer(const FramebufferInfo& info) override
 	{
+		checkPresentationMode();
 		rawFrameStore.clear();
 		presentationBuffer.clear();
 		presentationWidth = presentationHeight = 0;
@@ -629,9 +636,10 @@ public:
 						static_cast<u8>(value >> 16), static_cast<u8>(value >> 24) };
 				}
 		}
-		framebufferPresentation = PresentationFrame::create(width, height,
+		auto frame = PresentationFrame::create(width, height,
 				getDCFramebufferAspectRatio(), border, std::move(pixels));
-		frameReady = framebufferPresentation != nullptr;
+		frameReady = frame != nullptr;
+		framebufferPresentation.publish(std::move(frame));
 		clearLastFrame = false;
 		frameAspectRatio = getDCFramebufferAspectRatio();
 		rendContext = nullptr;
@@ -639,13 +647,26 @@ public:
 
 	bool RenderLastFrame() override
 	{
-		if ((!framebufferPresentation && !displayRasterizer) || clearLastFrame)
+		if (clearLastFrame)
 			return false;
 		return drawFrame();
 	}
 
+	bool RendersOnEmulationThread() const override { return emulationThreadRendering; }
+
 	bool Present() override
 	{
+		if (emulationThreadRendering)
+		{
+			auto frame = framebufferPresentation.acquire();
+			if (!frame || frame == lastPresentedFramebuffer || clearLastFrame)
+				return false;
+			lastPresentedFramebuffer = std::move(frame);
+	#ifndef LIBRETRO
+			imguiDriver->setFrameRendered();
+	#endif
+			return true;
+		}
 		hybrid::PresentationSurface completed;
 		if (hybrid::takeLatestPresentation(completed))
 			hybridPresentation = completed;
@@ -663,14 +684,17 @@ public:
 		const bool traceHybrid = std::getenv("FLYCAST_HYBRID_TRACE") != nullptr
 				|| std::getenv("FLYCAST_HYBRID_TIMING") != nullptr;
 		const auto presentWallStart = std::chrono::steady_clock::now();
-		const auto frame = framebufferPresentation;
-		if (!frame && !displayRasterizer)
+		// In decoupled mode draw exactly the snapshot accepted by Present(),
+		// even if the producer publishes another image before the GL upload.
+		const auto frame = emulationThreadRendering ? lastPresentedFramebuffer
+				: framebufferPresentation.acquire();
+		if (!frame && (emulationThreadRendering || !displayRasterizer))
 			return false;
 	#ifdef USE_OPENGL
 	#ifndef TARGET_IPHONE
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	#endif
-		const bool prepared = !presentationBuffer.empty();
+		const bool prepared = !frame && !presentationBuffer.empty();
 		const auto& pixels = frame ? frame->pixels : prepared
 				? presentationBuffer : displayRasterizer->colorBuffer();
 		const u32 pixelWidth = frame ? frame->width : prepared ? presentationWidth : displayRasterizer->width();
@@ -775,10 +799,10 @@ public:
 
 	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override
 	{
-		const auto frame = framebufferPresentation;
-		if ((!frame && !displayRasterizer) || clearLastFrame)
+		const auto frame = framebufferPresentation.acquire();
+		if ((!frame && (emulationThreadRendering || !displayRasterizer)) || clearLastFrame)
 			return false;
-		const bool prepared = !presentationBuffer.empty();
+		const bool prepared = !frame && !presentationBuffer.empty();
 		const int sourceWidth = frame ? frame->width : prepared ? presentationWidth : displayRasterizer->width();
 		const int sourceHeight = frame ? frame->height : prepared ? presentationHeight : displayRasterizer->height();
 		const int orientedWidth = config::Rotate90 ? sourceHeight : sourceWidth;
@@ -825,6 +849,12 @@ public:
 	}
 
 private:
+	void checkPresentationMode() const
+	{
+		if (emulationThreadRendering && (!config::ThreadedRendering || !config::EmulateFramebuffer))
+			throw FlycastException("Decoupled presentation requires threaded rendering and full framebuffer emulation; restart the renderer after changing these settings.");
+	}
+
 	struct RegionInfo
 	{
 		s32 x0;
@@ -2429,7 +2459,9 @@ private:
 	// destinations. Keeping separate CPU surfaces also preserves the previous
 	// display frame when an intervening RTT render uses identical dimensions.
 	std::unique_ptr<SoftwareRasterizer> screenRasterizer;
-	std::shared_ptr<const PresentationFrame> framebufferPresentation;
+	PresentationMailbox framebufferPresentation;
+	std::shared_ptr<const PresentationFrame> lastPresentedFramebuffer;
+	bool emulationThreadRendering = false;
 	std::unique_ptr<SoftwareRasterizer> rttRasterizer;
 	SoftwareRasterizer *rasterizer = nullptr;
 	SoftwareRasterizer *displayRasterizer = nullptr;

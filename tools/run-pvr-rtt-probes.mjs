@@ -6,9 +6,10 @@ import { createHash } from 'node:crypto';
 import { readProbe } from './read-pvr-rtt-probe.mjs';
 
 // Emulator-only regression runner. No output from this tool is a hardware golden.
-const [flycastArg, sdkEnvArg, outputArg] = process.argv.slice(2);
-if (process.argv.length !== 5)
-  throw Error('Usage: node tools/run-pvr-rtt-probes.mjs /path/to/Flycast /path/to/KOS/environ.sh /new/output/directory');
+const [flycastArg, sdkEnvArg, outputArg, modeArg] = process.argv.slice(2);
+if (process.argv.length < 5 || process.argv.length > 6 || (modeArg && modeArg !== '--decoupled'))
+  throw Error('Usage: node tools/run-pvr-rtt-probes.mjs /path/to/Flycast /path/to/KOS/environ.sh /new/output/directory [--decoupled]');
+const decoupled = modeArg === '--decoupled';
 const flycast = resolve(flycastArg), sdkEnv = resolve(sdkEnvArg), output = resolve(outputArg);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const probeDir = resolve(root, 'tests/manual/pvr-rtt-probe');
@@ -68,8 +69,11 @@ async function execute(command, args, env, logPath, stopAtEnd = false) {
 
 const report = { execution: 'emulator', hardwareValidated: false,
   flycast, flycastSha256: hashFile(flycast), sdkEnv,
+  scheduling: decoupled ? 'emulation-thread rendering with decoupled presentation' : 'single-thread',
   probeSourceSha256: hashFile(resolve(probeDir, 'probe.c')), cases: [] };
 for (const item of cases) {
+  if (hashFile(flycast) !== report.flycastSha256)
+    throw Error('Flycast executable changed during the probe run; restart in a new output directory');
   const flags = `-DPVR_PROBE_PACK_MODE=${item.mode} -DPVR_PROBE_ALPHA=${item.alpha} -DPVR_PROBE_ALPHA_THRESHOLD=${item.threshold} -DPVR_PROBE_K=${item.k ?? 0} -DPVR_PROBE_DITHER=${item.dither ?? 0}`;
   await execute('/bin/bash', ['-c', 'source "$1" && make -B -C "$2" "CFLAGS=$3"',
     'pvr-probe-build', sdkEnv, probeDir, flags], process.env, resolve(output, `${item.name}.build.log`));
@@ -80,11 +84,14 @@ for (const item of cases) {
   for (const key of Object.keys(env))
     if (key.startsWith('FLYCAST_HYBRID_') || key.startsWith('FLYCAST_PVR_')) delete env[key];
   Object.assign(env, { FLYCAST_HYBRID_SOFT: '1', FLYCAST_HYBRID_VERIFY: '1', FLYCAST_HYBRID_VERIFY_VRAM: '1' });
+  if (decoupled) env.FLYCAST_PVR_DECOUPLED_PRESENT = '1';
   const args = ['-config', 'audio:backend=null', '-config', 'config:pvr.rend=7',
-    '-config', 'config:rend.ThreadedRendering=no', '-config', 'config:rend.EmulateFramebuffer=yes',
+    '-config', `config:rend.ThreadedRendering=${decoupled ? 'yes' : 'no'}`, '-config', 'config:rend.EmulateFramebuffer=yes',
     '-config', 'config:rend.RenderToTextureBuffer=yes', '-config', 'config:Debug.SerialConsoleEnabled=yes',
     '-config', 'config:Debug.SerialPTY=false', elf];
   const log = await execute(flycast, args, env, resolve(output, `${item.name}.run.log`), true);
+  if (hashFile(flycast) !== report.flycastSha256)
+    throw Error('Flycast executable changed during the probe run; restart in a new output directory');
   const observed = readProbe(log);
   const vramVerified = /HYBRID verify_vram bytes=8388608 mismatches=0 rtt=1(?:\r?\n)/.test(log);
   const colorVerified = /HYBRID verify pixels=307200 mismatches=0(?:\r?\n)/.test(log);

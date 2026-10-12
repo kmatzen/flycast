@@ -68,6 +68,21 @@ public:
 	void enqueue(MessageType type, FramebufferInfo config = FramebufferInfo())
 	{
 		Message msg { type, config };
+		if ((type == Render || type == RenderFramebuffer) && renderer != nullptr
+				&& renderer->RendersOnEmulationThread())
+		{
+			// Preserve synchronous PVR/VRAM ordering, but leave display Presents
+			// on the UI queue. Restore the SH4 rounding mode even on failure.
+			setDefaultRoundingMode();
+			try {
+				execute(msg);
+			} catch (...) {
+				Sh4cntx.restoreHostRoundingMode();
+				throw;
+			}
+			Sh4cntx.restoreHostRoundingMode();
+			return;
+		}
 		if (config::ThreadedRendering)
 		{
 			// FIXME need some synchronization to avoid blinking in densha de go

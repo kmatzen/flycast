@@ -1,6 +1,8 @@
 #include "rend/soft/PresentationFrame.h"
 #include <gtest/gtest.h>
 #include <limits>
+#include <atomic>
+#include <thread>
 
 using namespace rend::soft;
 
@@ -35,4 +37,41 @@ TEST(PresentationFrame, RejectsMalformedImages)
 	for (float aspect : {0.f, -1.f, std::numeric_limits<float>::infinity(),
 			std::numeric_limits<float>::quiet_NaN()})
 		EXPECT_FALSE(PresentationFrame::create(1, 1, aspect, {}, std::vector<Color>(1)));
+}
+
+TEST(PresentationFrame, ConcurrentPublicationRetainsCompleteSnapshots)
+{
+	PresentationMailbox mailbox;
+	auto first = PresentationFrame::create(2, 3, 1.f, {17, 0, 0, 255},
+			std::vector<Color>(6, {17, 0, 0, 255}));
+	mailbox.publish(first);
+	auto retained = mailbox.acquire();
+	std::atomic<bool> finished {false};
+	std::thread producer([&] {
+		for (unsigned i = 0; i < 2000; ++i)
+		{
+			const u32 width = i % 7 + 1;
+			const u32 height = i % 5 + 1;
+			const Color color {static_cast<u8>(i), static_cast<u8>(i >> 8), 3, 255};
+			mailbox.publish(PresentationFrame::create(width, height, float(width) / height,
+					color, std::vector<Color>(width * height, color)));
+		}
+		finished = true;
+	});
+	do {
+		const auto snapshot = mailbox.acquire();
+		EXPECT_TRUE(snapshot);
+		if (snapshot)
+		{
+			EXPECT_EQ(snapshot->pixels.size(), size_t(snapshot->width) * snapshot->height);
+			for (const auto& pixel : snapshot->pixels)
+				EXPECT_EQ(pixel, snapshot->border);
+		}
+	} while (!finished);
+	producer.join();
+	EXPECT_NE(mailbox.acquire(), retained);
+	mailbox.clear();
+	EXPECT_FALSE(mailbox.acquire());
+	EXPECT_EQ(retained, first);
+	EXPECT_EQ(retained->pixels.front(), (Color {17, 0, 0, 255}));
 }

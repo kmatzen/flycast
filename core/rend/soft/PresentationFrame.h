@@ -35,4 +35,22 @@ private:
 		  pixels(std::move(pixels)) {}
 };
 
+// Latest completed image only: replacing a queued image never invalidates a
+// consumer's retained snapshot. No renderer state is shared through this slot.
+class PresentationMailbox
+{
+public:
+	void publish(std::shared_ptr<const PresentationFrame> frame)
+	{
+		std::atomic_store(&latest, std::move(frame));
+	}
+	std::shared_ptr<const PresentationFrame> acquire() const
+	{
+		return std::atomic_load(&latest);
+	}
+	void clear() { publish({}); }
+private:
+	std::shared_ptr<const PresentationFrame> latest;
+};
+
 } // namespace rend::soft
