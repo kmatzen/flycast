@@ -123,6 +123,8 @@ struct Timing {
   double readbackMilliseconds = 0.;
   u32 hardwareVisibilityTiles = 0;
   u32 totalTiles = 0;
+  u32 orderedAutosortFrames = 0;
+  u32 orderedAutosortRejectReason = 0;
   u32 opaqueTriangles = 0;
   u32 punchThroughTriangles = 0;
   u32 translucentTriangles = 0;

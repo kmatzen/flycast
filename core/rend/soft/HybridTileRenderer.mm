@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -334,6 +335,7 @@ inline float2 projectedUV(const device Triangle& t, int sx, int sy)
             + t.v[2] * t.z[2] * s2) * inverseQ);
 }
 
+template <uint MaxSortedFragments, bool OrderedAutosort>
 kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uint *tileOffsets [[buffer(1)]],
         const device uint *tileReferences [[buffer(2)]],
@@ -437,7 +439,6 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 opaqueFinalDepth = depthZ;
         }
     }
-    constexpr uint MaxSortedFragments = 64;
     uint sortedColors[MaxSortedFragments];
     float sortedDepths[MaxSortedFragments];
     uint sortedIndices[MaxSortedFragments];
@@ -655,7 +656,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             }
             source = dithered;
         }
-        if ((t.state & (1u << 22)) != 0) {
+        if ((t.state & (1u << 22)) != 0 && !OrderedAutosort) {
             if (sortedCount == MaxSortedFragments) {
                 atomic_store_explicit(overflow, 1u, memory_order_relaxed);
                 continue;
@@ -718,6 +719,11 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     secondaryColors[offset] = secondary;
     depths[offset] = depth;
 }
+
+template [[host_name("rasterTiles")]] kernel
+    decltype(rasterTiles<64, false>) rasterTiles<64, false>;
+template [[host_name("rasterTilesOrderedAutosort")]] kernel
+    decltype(rasterTiles<1, true>) rasterTiles<1, true>;
 )METAL";
 
 class MetalState {
@@ -740,11 +746,21 @@ public:
     id<MTLLibrary> library = [device newLibraryWithSource:source
                                                   options:options
                                                     error:&error];
-    if (library == nil)
+    if (library == nil) {
+      std::fprintf(stderr, "Hybrid Metal library: %s\n",
+                   error.localizedDescription.UTF8String);
       return;
+    }
     id<MTLFunction> function = [library newFunctionWithName:@"rasterTiles"];
     pipeline = [device newComputePipelineStateWithFunction:function
                                                      error:&error];
+    id<MTLFunction> orderedAutosortFunction =
+        [library newFunctionWithName:@"rasterTilesOrderedAutosort"];
+    orderedAutosortPipeline = [device
+        newComputePipelineStateWithFunction:orderedAutosortFunction error:&error];
+    if (pipeline == nil || orderedAutosortPipeline == nil)
+      std::fprintf(stderr, "Hybrid Metal compute pipeline: %s\n",
+                   error.localizedDescription.UTF8String);
     MTLRenderPipelineDescriptor *visibilityDescriptor =
         [[MTLRenderPipelineDescriptor alloc] init];
     visibilityDescriptor.vertexFunction =
@@ -754,7 +770,8 @@ public:
     visibilityDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
     visibilityPipeline = [device
         newRenderPipelineStateWithDescriptor:visibilityDescriptor error:&error];
-    if (pipeline != nil && visibilityPipeline != nil)
+    if (pipeline != nil && orderedAutosortPipeline != nil &&
+        visibilityPipeline != nil)
       queue = [device newCommandQueue];
   }
 
@@ -763,6 +780,7 @@ public:
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> pipeline = nil;
+  id<MTLComputePipelineState> orderedAutosortPipeline = nil;
   id<MTLRenderPipelineState> visibilityPipeline = nil;
 };
 
@@ -867,7 +885,89 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   }
   std::vector<u32> tileOffsets(1, 0);
   std::vector<u32> tileReferences;
-  for (const auto &bin : bins) {
+  // Autosort depth is affine over a covered triangle. Its extrema over a tile's
+  // sample rectangle are therefore at the rectangle corners; an outward error
+  // margin makes these conservative bounds for the float shader arithmetic.
+  // Strictly disjoint bounds prove one exact far-to-near order for the tile.
+  bool orderedAutosort = frame.modifierMask == nullptr;
+  u32 orderedAutosortRejectReason = orderedAutosort ? 0 : 1;
+  std::vector<std::vector<u32>> orderedBins(bins.size());
+  for (size_t tile = 0; tile < bins.size() && orderedAutosort; ++tile) {
+    struct DeferredRange {
+      u32 index;
+      double minimum;
+      double maximum;
+    };
+    std::vector<DeferredRange> deferred;
+    const u32 tileX = static_cast<u32>(tile) % tilesX;
+    const u32 tileY = static_cast<u32>(tile) / tilesX;
+    const u32 firstX = tileX * TileSize;
+    const u32 firstY = tileY * TileSize;
+    const u32 lastX = std::min(frame.width, firstX + TileSize) - 1;
+    const u32 lastY = std::min(frame.height, firstY + TileSize) - 1;
+    for (u32 index : bins[tile]) {
+      const Triangle &triangle = (*frame.triangles)[index];
+      if ((triangle.state & Autosort) != 0) {
+        if (triangle.area1Index != std::numeric_limits<u32>::max()) {
+          orderedAutosort = false;
+          orderedAutosortRejectReason = 2;
+          break;
+        }
+        const double area = static_cast<double>(
+            (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
+                (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -
+            (static_cast<s64>(triangle.y[1]) - triangle.y[0]) *
+                (static_cast<s64>(triangle.x[2]) - triangle.x[0]));
+        double minimum = std::numeric_limits<double>::infinity();
+        double maximum = -std::numeric_limits<double>::infinity();
+        for (u32 y : {firstY, lastY})
+          for (u32 x : {firstX, lastX}) {
+            const s64 sx = static_cast<s64>(x) * 16 + triangle.fpuSampleOffset;
+            const s64 sy = static_cast<s64>(y) * 16 + triangle.fpuSampleOffset;
+            auto edgeAt = [&](u32 a, u32 b) {
+              return static_cast<double>(
+                  (static_cast<s64>(triangle.x[b]) - triangle.x[a]) *
+                      (sy - triangle.y[a]) -
+                  (static_cast<s64>(triangle.y[b]) - triangle.y[a]) *
+                      (sx - triangle.x[a]));
+            };
+            const double weights[3] = {
+                edgeAt(1, 2) / area, edgeAt(2, 0) / area,
+                edgeAt(0, 1) / area};
+            const double terms[3] = {triangle.z[0] * weights[0],
+                                     triangle.z[1] * weights[1],
+                                     triangle.z[2] * weights[2]};
+            const double value = terms[0] + terms[1] + terms[2];
+            const double magnitude = std::abs(terms[0]) + std::abs(terms[1]) +
+                                     std::abs(terms[2]) + std::abs(value);
+            const double error = 32. * std::numeric_limits<float>::epsilon() *
+                                 std::max(magnitude, 1e-30);
+            minimum = std::min(minimum, value - error);
+            maximum = std::max(maximum, value + error);
+          }
+        deferred.push_back({index, minimum, maximum});
+      } else {
+        orderedBins[tile].push_back(index);
+      }
+    }
+    std::sort(deferred.begin(), deferred.end(), [](const DeferredRange &left,
+                                                   const DeferredRange &right) {
+      return left.minimum < right.minimum;
+    });
+    double previousMaximum = -std::numeric_limits<double>::infinity();
+    for (const DeferredRange &range : deferred) {
+      if (range.minimum <= previousMaximum) {
+        orderedAutosort = false;
+        orderedAutosortRejectReason = 3;
+        break;
+      }
+      previousMaximum = range.maximum;
+    }
+    for (const DeferredRange &range : deferred)
+      orderedBins[tile].push_back(range.index);
+  }
+  const auto &referenceBins = orderedAutosort ? orderedBins : bins;
+  for (const auto &bin : referenceBins) {
     tileReferences.insert(tileReferences.end(), bin.begin(), bin.end());
     tileOffsets.push_back(static_cast<u32>(tileReferences.size()));
   }
@@ -1076,7 +1176,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     [visibilityEncoder endEncoding];
   }
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  [encoder setComputePipelineState:metal.pipeline];
+  [encoder setComputePipelineState:orderedAutosort
+      ? metal.orderedAutosortPipeline : metal.pipeline];
   [encoder setBuffer:triangleBuffer offset:0 atIndex:0];
   [encoder setBuffer:offsetBuffer offset:0 atIndex:1];
   [encoder setBuffer:referenceBuffer offset:0 atIndex:2];
@@ -1129,6 +1230,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     timing->hardwareVisibilityTiles = static_cast<u32>(std::count(
         hardwareVisibilityTiles.begin(), hardwareVisibilityTiles.end(), u8{1}));
     timing->totalTiles = static_cast<u32>(hardwareVisibilityTiles.size());
+    timing->orderedAutosortFrames = orderedAutosort ? 1 : 0;
+    timing->orderedAutosortRejectReason = orderedAutosortRejectReason;
     for (const Triangle &triangle : *frame.triangles) {
       const u32 listType = (triangle.state >> ListTypeShift) & 3;
       timing->opaqueTriangles += listType == 0;
