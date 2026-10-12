@@ -267,6 +267,17 @@ void ReadRTTBuffer()
 						w, h, linestride, static_cast<unsigned>(fb_packmode),
 						static_cast<unsigned>(gl.rendContext->fb_W_CTRL.fb_dither),
 						x, y, sample[0], sample[1], sample[2], sample[3]);
+#if !defined(GLES2)
+				if (gl.gl_major >= 3)
+				{
+					GLint red = 0, green = 0, blue = 0, alpha = 0;
+					glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &red);
+					glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, &green);
+					glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, &blue);
+					glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alpha);
+					std::fprintf(stderr, "PVR_GL_RTT_ATTACHMENT rgba_bits=%d/%d/%d/%d\n", red, green, blue, alpha);
+				}
+#endif
 			}
 
 			WriteTextureToVRam(w, h, p, dst, gl.rendContext->fb_W_CTRL, linestride, gl.rendContext->fbClip);

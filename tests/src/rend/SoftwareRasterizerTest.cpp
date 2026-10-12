@@ -89,6 +89,33 @@ TEST(SoftwareRasterizer, ProductionFramebufferPackersEmitExactStoredBytes)
 			(std::vector<u8> { 0xef, 0xcd, 0xab, 0x42 }));
 }
 
+TEST(SoftwareRasterizer, Rgb565ReadbackExpansionRequiresTruncationToPreserveStoredWords)
+{
+	// This tests conversion stability, not Dreamcast hardware behavior.
+	// Model nearest normalized RGBA8 readback from an RGB565 attachment.
+	FB_W_CTRL_type control {};
+	for (u32 word = 0; word <= 0xffff; ++word)
+	{
+		const u8 rgba[] {
+			static_cast<u8>((((word >> 11) & 31) * 255 + 15) / 31),
+			static_cast<u8>((((word >> 5) & 63) * 255 + 31) / 63),
+			static_cast<u8>(((word & 31) * 255 + 15) / 31), 255 };
+		FramebufferPackSink sink;
+		FBLineWriter565<0, 1, 2, 3, FramebufferPackSink, false> writer(control, sink);
+		const u8 *cursor = rgba;
+		writer.write(0, 1, cursor, 0);
+		ASSERT_EQ(sink.bytes.size(), 2u);
+		ASSERT_EQ(static_cast<u32>(sink.bytes[0] | (sink.bytes[1] << 8)), word);
+	}
+	// Captured OpenGL probe readback: a second rounding changes all channels.
+	const u8 captured[] { 0xad, 0xce, 0xef, 0xff };
+	const u8 *cursor = captured;
+	FramebufferPackSink sink;
+	FBLineWriter565<0, 1, 2, 3, FramebufferPackSink, true> rounded(control, sink);
+	rounded.write(0, 1, cursor, 0);
+	EXPECT_EQ(sink.bytes, (std::vector<u8> { 0x9e, 0xb6 }));
+}
+
 TEST(SoftwareRasterizer, WrapsTextureWritesAndRowAdvancesWithinVram)
 {
 	alignas(u16) u8 memory[8] {};

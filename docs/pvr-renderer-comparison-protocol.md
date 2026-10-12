@@ -1126,3 +1126,13 @@ The actual host attachment bit depths have not yet been queried, so that
 first-stage attribution remains an inference. The diagnostic build passed;
 no existing-renderer quantization policy was changed and no hardware
 correctness claim follows from this observation.
+
+The attachment-precision diagnostic resolves the remaining first-stage
+uncertainty on this M1: `rtt-opengl-attachment-run.log` reports
+`PVR_GL_RTT_ATTACHMENT rgba_bits=5/6/5/0` together with the same `adceefff`
+sample. Thus the host target is already RGB565 before RGBA8 readback and
+rounded CPU packing. The opt-in query is restricted to GL/GLES 3+ builds
+and changes no pixels. A focused production-packer test checks that all
+65,536 RGB565 words survive nearest normalized 8-bit expansion followed
+by truncation, and separately records the captured sample's rounded
+`0xb69e` result. This tests a conversion invariant, not PVR conformance.
