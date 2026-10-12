@@ -11,6 +11,10 @@
 #include "hw/sh4/sh4_sched.h"
 #include "profiler/fc_profiler.h"
 #include "network/ggpo.h"
+#include "pvr_mem.h"
+#include <xxhash.h>
+#include <cstdio>
+#include <cstdlib>
 
 #include <mutex>
 #include <deque>
@@ -199,6 +203,37 @@ private:
 		TA_context *taContext = DequeueRender();
 		if (taContext == nullptr)
 			return;
+
+		// Diagnostic only: hash raw inputs before backend-specific processing.
+		// Require single-threaded execution so live register/VRAM reads cannot
+		// race emulation. These hashes do not cover retained renderer state.
+		if (std::getenv("FLYCAST_PVR_INPUT_FINGERPRINT") != nullptr)
+		{
+			if (config::ThreadedRendering)
+			{
+				static bool warned = false;
+				if (!warned)
+					std::fprintf(stderr, "PVR_INPUT disabled: requires ThreadedRendering=no\n");
+				warned = true;
+			}
+			else
+			{
+				const auto vramHash = XXH64(&vram[0], VRAM_SIZE, 0);
+				const auto registerHash = XXH64(pvr_regs, sizeof(pvr_regs), 0);
+				u32 contextIndex = 0;
+				for (TA_context *context = taContext; context != nullptr;
+						context = context->nextContext, ++contextIndex)
+				{
+					const size_t bytes = context->getTADataEnd() - context->getTADataBegin();
+					std::fprintf(stderr,
+							"PVR_INPUT frame=%u context=%u address=%08x bytes=%zu ta=%016llx vram=%016llx regs=%016llx\n",
+							FrameCount, contextIndex, context->Address, bytes,
+							static_cast<unsigned long long>(XXH64(context->getTADataBegin(), bytes, 0)),
+							static_cast<unsigned long long>(vramHash),
+							static_cast<unsigned long long>(registerHash));
+				}
+			}
+		}
 
 		// tile clipping is used to calculate framebuffer size in RTT below
 		setTileClipping(taContext->rend);

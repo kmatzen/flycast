@@ -56,6 +56,20 @@ it cannot isolate the stage that caused it.
 
 ## Next capture work
 
+`FLYCAST_PVR_INPUT_FINGERPRINT=1` enables a preliminary input diagnostic in
+the common render queue, before `Renderer::Process`. It requires
+`ThreadedRendering=no`; otherwise it prints a diagnostic and declines to hash
+live memory. Each `PVR_INPUT` line records the frame, linked TA context index,
+address, command byte count, and separate XXH64 hashes of raw TA bytes, full
+VRAM, and the live PVR register bank. It adds no hashing when disabled.
+
+These are diagnostic fingerprints, not cryptographic identities or complete
+replay snapshots. Register timing and unrelated VRAM can cause differences;
+equal hashes do not cover snapshotted context fields, settings, decoded cache
+contents, or retained accumulation/presentation buffers. Use them to screen
+candidate captures and investigate mismatches before claiming matched inputs.
+Hashing full VRAM also adds CPU work, so disable it for performance runs.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
