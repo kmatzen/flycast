@@ -3,6 +3,40 @@
 #include "backends/imgui_impl_metal.h"
 #include <gtest/gtest.h>
 #include <vector>
+#include "rend/soft/MetalPresentationFrame.h"
+
+TEST(MetalUi, ConvertedFramebufferUploadPreservesBytesAndOwnership)
+{
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        ASSERT_NE(device, nil);
+        using namespace rend::soft;
+        // Odd widths exercise row pitch; all channels differ to catch RGBA/BGRA
+        // confusion, row reversal, and accidental color-space conversion.
+        for (u32 width : {3u, 17u, 640u}) {
+            const u32 height = 7;
+            std::vector<Color> source(width * height);
+            for (size_t i = 0; i < source.size(); ++i)
+                source[i] = {u8(i), u8(i >> 3), u8(255 - i), u8(i * 7)};
+            auto frame = PresentationFrame::create(width, height, float(width) / height, {}, source);
+            ASSERT_TRUE(frame);
+            EXPECT_EQ(uploadMetalPresentationFrame(nil, *frame), nil);
+            id<MTLTexture> first = uploadMetalPresentationFrame(device, *frame);
+            ASSERT_NE(first, nil);
+            auto replacement = PresentationFrame::create(width, height, 1.f, {},
+                std::vector<Color>(source.size(), {0, 0, 0, 255}));
+            id<MTLTexture> second = uploadMetalPresentationFrame(device, *replacement);
+            ASSERT_NE(second, nil);
+            EXPECT_NE(first, second);
+            frame.reset();
+            replacement.reset();
+            std::vector<Color> readback(source.size());
+            [first getBytes:readback.data() bytesPerRow:width * sizeof(Color)
+                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            EXPECT_EQ(readback, source);
+        }
+    }
+}
 
 // Host UI composition only: this does not validate Dreamcast pixel rules,
 // drawable scheduling, physical scanout, or the emulator window lifecycle.
@@ -30,11 +64,19 @@ TEST(MetalUi, OffscreenCompositionSurvivesResizeAndBackendRecreation)
                 pass.colorAttachments[0].texture = target;
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-                pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 1, 1);
+                pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
+                auto frame = rend::soft::PresentationFrame::create(size, size, 1.f, {},
+                    std::vector<rend::soft::Color>(size * size, {0, 0, 255, 255}));
+                ASSERT_TRUE(frame);
+                id<MTLTexture> background = rend::soft::uploadMetalPresentationFrame(device, *frame);
+                ASSERT_NE(background, nil);
                 ImGui::GetIO().DisplaySize = ImVec2(size, size);
                 ImGui::GetIO().DeltaTime = 1.f / 60.f;
                 ImGui_ImplMetal_NewFrame(pass);
                 ImGui::NewFrame();
+                ImGui::GetBackgroundDrawList()->AddImage(
+                    ImTextureRef((ImTextureID)(uintptr_t)(__bridge void*)background),
+                    ImVec2(0, 0), ImVec2(size, size));
                 ImGui::GetForegroundDrawList()->AddRectFilled(ImVec2(8, 8), ImVec2(24, 24), IM_COL32(255, 0, 0, 255));
                 ImGui::GetForegroundDrawList()->AddText(ImVec2(2, 32), IM_COL32_WHITE, "PVR UI");
                 ImGui::Render();

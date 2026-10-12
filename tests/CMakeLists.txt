@@ -65,6 +65,7 @@ if(APPLE AND NOT IOS)
   if(NOT LIBRETRO)
     add_executable(flycast-metal-ui-tests EXCLUDE_FROM_ALL
             src/rend/MetalUiTest.mm
+            ../core/rend/soft/MetalPresentationFrame.mm
             ../core/deps/imgui/backends/imgui_impl_metal.mm
             ../core/deps/imgui/imgui.cpp
             ../core/deps/imgui/imgui_draw.cpp
@@ -72,9 +73,9 @@ if(APPLE AND NOT IOS)
             ../core/deps/imgui/misc/freetype/imgui_freetype.cpp
             ../core/deps/imgui/imgui_tables.cpp
             ../core/deps/imgui/imgui_widgets.cpp)
-    target_include_directories(flycast-metal-ui-tests PRIVATE ../core/deps/imgui)
+    target_include_directories(flycast-metal-ui-tests PRIVATE ../core/deps/imgui ../core ../core/deps ../core/deps/glm)
     target_compile_options(flycast-metal-ui-tests PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-    target_link_libraries(flycast-metal-ui-tests PRIVATE GTest::gtest_main freetype
+    target_link_libraries(flycast-metal-ui-tests PRIVATE GTest::gtest_main freetype nowide::nowide
             "-framework Metal" "-framework Foundation" "-framework QuartzCore")
   endif()
     target_sources(flycast-renderer-tests PRIVATE

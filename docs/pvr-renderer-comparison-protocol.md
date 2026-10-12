@@ -2216,3 +2216,23 @@ Other hosts need their own architecture-compatible FreeType dependencies;
 that temporary path is not part of tracked build configuration. Existing
 deployment-target warnings from those host libraries remain and this run does
 not establish compatibility with older macOS versions.
+
+The next native-presentation component is
+`core/rend/soft/MetalPresentationFrame.mm`: a UI-thread upload of the immutable,
+fully converted `PresentationFrame` into an RGBA8-unorm Metal texture. It
+does not sample VRAM, reinterpret RGB565, apply gamma conversion, or use the
+earlier hybrid accumulation surface. Each upload creates a separate texture;
+the future presenter must retain it until its command buffer completes.
+Texture pooling and native drawable scheduling are not implemented here.
+
+The offscreen test additionally uploads odd-width and 640-pixel-wide patterns
+whose RGBA channels differ, replaces and destroys the CPU packets, and checks
+every byte of the first retained GPU texture. The UI composition cases now
+draw an uploaded blue framebuffer over a green clear color before drawing
+the red overlay and text. This tests the upload/composition interface, not
+just ImGui over a render-pass clear. The helper is currently built by the
+isolated test target only; the emulator's live presentation path is unchanged.
+Both tests pass on ARM64 with Metal API validation enabled and on x86-64
+under Rosetta. Raw logs are `/tmp/pvr-metal-frame-native.log` and
+`/tmp/pvr-metal-frame-rosetta.log`. These results establish the tested upload
+and composition behavior, not sustained frame rates or drawable delivery.
