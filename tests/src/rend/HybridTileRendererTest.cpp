@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -201,6 +202,44 @@ TEST(HybridTileRenderer, HardwareVisibilityShadesOnlyOpaqueIspWinner)
 	expectEqual(cpu, colors, depths);
 	EXPECT_EQ(timing.totalTiles, 1u);
 	EXPECT_EQ(timing.hardwareVisibilityTiles, 1u);
+}
+
+TEST(HybridTileRenderer, OpaqueVisibilityPreservesTiesNearTiesAndSlopedDepth)
+{
+	const std::array<float, 8> values {0.f, .25f, .5f,
+		std::nextafter(1.f, 0.f), 1.f, std::nextafter(1.f, 2.f), 2.f, 8.f};
+	for (u32 scene = 0; scene < 64; ++scene) {
+		SCOPED_TRACE(scene);
+		const float initialDepth = values[scene % values.size()];
+		SoftwareRasterizer cpu(8, 8);
+		cpu.clear({}, initialDepth);
+		std::vector<hybrid::Triangle> commands;
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.fpuPixelCenter = scene % 2 != 0;
+		for (u32 layer = 0; layer < 12; ++layer) {
+			const Color color {static_cast<u8>(layer * 21), static_cast<u8>(scene * 13),
+				static_cast<u8>(layer * 37), 255};
+			const u32 index = (scene * 3 + layer * 5) % values.size();
+			const float z0 = values[index];
+			const float z1 = scene % 3 == 0 ? z0 : values[(index + 1) % values.size()];
+			const float z2 = scene % 3 == 0 ? z0 : values[(index + 3) % values.size()];
+			const Vertex a {0, 0, z0, color}, b {16, 0, z1, color}, c {0, 16, z2, color};
+			cpu.drawTriangle(a, b, c, state);
+			auto command = triangle(a, b, c, hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+			command.maxX = command.maxY = 7;
+			command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
+			commands.push_back(command);
+		}
+		const std::vector<u32> texture {0xffffffffu}, initial(64, pack(Color {}));
+		const std::vector<float> initialDepths(64, initialDepth);
+		// Initial depth forces compute visibility rather than host rasterization.
+		hybrid::Frame frame {8, 8, &commands, &texture, &initial, &initialDepths};
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths));
+		expectEqual(cpu, colors, depths);
+	}
 }
 
 TEST(HybridTileRenderer, OpaqueWinnerShadingPreservesMixedListOrderAndNoWinner)

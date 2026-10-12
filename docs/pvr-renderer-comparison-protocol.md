@@ -1628,3 +1628,53 @@ The rebuilt app completes all twenty RTT cases in
 `/tmp/pvr-rtt-prefix-20261012/report.json`, with zero color/full-VRAM
 software–Metal differences. Dither checks retain their differential-only
 scope, and original-hardware validation remains absent.
+
+### Reverse eligible opaque visibility and reject conservatively hidden candidates
+
+Compute visibility can now traverse an opaque prefix backward when every
+primitive uses GreaterOrEqual depth with depth writes, nonnegative finite
+vertex depths, no alternate modifier-area parameter, and supported sample
+offsets. Mixed lists and other depth modes retain forward traversal. The first
+accepted reverse candidate uses the normal comparison against initial depth;
+subsequent candidates must be strictly greater, preserving the original
+last-submitted winner on equal computed depth. The hardware visibility path
+is unchanged.
+
+Before edge calculations, a reverse candidate can be skipped only when its
+conservative depth ceiling is strictly less than the current winner's depth.
+For covered geometry the exact nonnegative barycentric weights sum to one,
+so vertex maximum depth bounds interpolation. The shader adds a 32-float-epsilon
+margin scaled by `max(maximum, 1e-30)` for integer-to-float conversion,
+division, products and sums. The CPU limits fixed coordinates to ±2^26 and
+frame dimensions to 2^22, with sample offsets 0 or 8, ensuring edge products
+and differences fit signed 64-bit arithmetic for this proof. Inputs outside
+these optimization conditions use the original traversal, not rejection.
+An overflowing positive float ceiling becomes infinity and cannot prune.
+
+`OpaqueVisibilityPreservesTiesNearTiesAndSlopedDepth` tests 64 deterministic
+scenes with twelve layers, both sample offsets, varying initial depths, equal
+depths, one-float-step neighbors around 1, and sloped depth planes. Initial
+depth buffers force compute visibility. It passes against software with the
+optimization enabled and with `FLYCAST_HYBRID_DISABLE_REVERSE_OPAQUE=1`.
+All 141 focused tests pass on ARM64 and Rosetta, and the app builds.
+
+Three same-binary paired small-triangle runs show lower p95 times, but not
+reliable frame-budget compliance:
+
+| Pair | Forward wall/GPU p95 | Reverse wall/GPU p95 |
+| --- | --- | --- |
+| 0 | 21.684 / 16.387 ms | 17.418 / 11.894 ms |
+| 1 | 19.043 / 14.475 ms | 16.663 / 12.201 ms |
+| 2 | 20.711 / 15.568 ms | 18.187 / 12.927 ms |
+
+Artifacts: `/tmp/pvr-reverse-{off,on}-{0,1,2}.xml`. These twenty-sample runs
+show approximately 12–20% lower wall p95 on this workload; only pair 1's
+optimized result fits 16.667 ms, with negligible margin. A final gated run
+after adding the coordinate guard (`/tmp/pvr-reverse-final.xml`) still fails
+small-triangle wall p95 at 19.094 ms (GPU 14.114 ms). Six-layer wall/GPU p95
+15.536/11.414 ms passes. This is a reduction in proven-unnecessary work,
+not a claim of completed Dreamcast-spec performance.
+All twenty rebuilt-app RTT probes complete in
+`/tmp/pvr-rtt-reverse-20261012/report.json`, with zero color/full-VRAM
+software–Metal differences. Dither results remain differential-only, and
+no original-hardware validation is implied.

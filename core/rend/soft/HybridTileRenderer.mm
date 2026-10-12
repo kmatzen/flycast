@@ -373,6 +373,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uchar *hardwareVisibilityTiles [[buffer(15)]],
         const device uchar *commitMask [[buffer(16)]],
         const device uint *opaquePrefixEnds [[buffer(17)]],
+        const device uchar *reverseOpaqueBins [[buffer(18)]],
         texture2d<uint, access::read> visibility [[texture(0)]],
         uint2 pixel [[thread_position_in_grid]])
 {
@@ -419,8 +420,11 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 }
             }
         }
+        const bool reverseOpaque = reverseOpaqueBins[tile] != 0;
+        const uint opaqueEnd = reverseOpaque ? opaquePrefixEnds[tile] : tileOffsets[tile + 1];
         if (!hardwareTile)
-        for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
+        for (uint position = tileOffsets[tile]; position < opaqueEnd; ++position) {
+            const uint i = reverseOpaque ? opaqueEnd - 1 - (position - tileOffsets[tile]) : position;
             const uint triangleIndex = tileReferences[i];
             const device Triangle& base = triangles[triangleIndex];
             if (((base.state >> 28) & 3) != 0)
@@ -439,6 +443,15 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                     && int(pixel.x) < t.excludeX1 && int(pixel.y) >= t.excludeY0
                     && int(pixel.y) < t.excludeY1)
                 continue;
+            if (reverseOpaque) {
+                // Covered barycentric weights are nonnegative and sum to one.
+                // Inflate the vertex maximum for float edge conversion,
+                // division, products and sums; do not reject near-depth ties.
+                const float maximum = max(t.z[0], max(t.z[1], t.z[2]));
+                const float upper = maximum + max(maximum, 1e-30f) * (32.0f * 0x1p-23f);
+                if (upper < opaqueFinalDepth)
+                    continue;
+            }
             const int sx = int(pixel.x) * 16 + t.fpuSampleOffset;
             const int sy = int(pixel.y) * 16 + t.fpuSampleOffset;
             const long w0 = edge(t.x[1], t.y[1], t.x[2], t.y[2], sx, sy);
@@ -454,7 +467,9 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             const float s1 = float(w1) / float(area);
             const float s2 = float(w2) / float(area);
             const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
-            if (!depthTest(t.state, depthZ, opaqueFinalDepth))
+            if (reverseOpaque && opaqueWinnerTriangle != 0xffffffffu
+                    ? !(depthZ > opaqueFinalDepth)
+                    : !depthTest(t.state, depthZ, opaqueFinalDepth))
                 continue;
             opaqueWinnerTriangle = triangleIndex;
             if ((t.state & (1u << 3)) != 0)
@@ -836,6 +851,7 @@ public:
     VisibilityPrimitives,
     CommitMask,
     OpaquePrefixEnds,
+    ReverseOpaqueBins,
     BufferSlotCount,
   };
 
@@ -1449,8 +1465,10 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   const bool simpleTranslucent = globalAutosort && globalActiveCount != 0;
   const auto &referenceBins = orderedAutosort ? orderedBins : bins;
   std::vector<u32> opaquePrefixEnds;
+  std::vector<u8> reverseOpaqueBins;
   opaquePrefixEnds.reserve(referenceBins.size());
   const bool skipOpaquePrefix = std::getenv("FLYCAST_HYBRID_DISABLE_OPAQUE_PREFIX_SKIP") == nullptr;
+  const bool reverseOpaque = std::getenv("FLYCAST_HYBRID_DISABLE_REVERSE_OPAQUE") == nullptr;
   for (const auto &bin : referenceBins) {
     size_t prefix = 0;
     while (prefix < bin.size() &&
@@ -1462,6 +1480,21 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
         prefix = 0;
         break;
       }
+    // Bound integer edge products so the barycentric upper-bound proof cannot
+    // depend on signed overflow. Other geometry keeps the original traversal.
+    bool reversible = reverseOpaque && skipOpaquePrefix && prefix != 0
+        && frame.width <= (1u << 22) && frame.height <= (1u << 22);
+    for (size_t i = 0; i < prefix && reversible; ++i) {
+      const Triangle &triangle = (*frame.triangles)[bin[i]];
+      reversible = (triangle.state & (DepthModeMask | DepthWrite)) == (6 | DepthWrite)
+          && triangle.area1Index == std::numeric_limits<u32>::max()
+          && triangle.z[0] >= 0.f && triangle.z[1] >= 0.f && triangle.z[2] >= 0.f
+          && (triangle.fpuSampleOffset == 0 || triangle.fpuSampleOffset == 8);
+      for (u32 vertex = 0; vertex < 3 && reversible; ++vertex)
+        reversible = triangle.x[vertex] >= -(1 << 26) && triangle.x[vertex] <= (1 << 26)
+            && triangle.y[vertex] >= -(1 << 26) && triangle.y[vertex] <= (1 << 26);
+    }
+    reverseOpaqueBins.push_back(reversible);
     opaquePrefixEnds.push_back(static_cast<u32>(tileReferences.size() + (skipOpaquePrefix ? prefix : 0)));
     tileReferences.insert(tileReferences.end(), bin.begin(), bin.end());
     tileOffsets.push_back(static_cast<u32>(tileReferences.size()));
@@ -1561,6 +1594,8 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       metal.upload(MetalState::TileReferences, tileReferences);
   id<MTLBuffer> opaquePrefixBuffer =
       metal.upload(MetalState::OpaquePrefixEnds, opaquePrefixEnds);
+  id<MTLBuffer> reverseOpaqueBuffer =
+      metal.upload(MetalState::ReverseOpaqueBins, reverseOpaqueBins);
   id<MTLBuffer> textureBuffer =
       metal.upload(MetalState::Texture, *frame.texture);
   const std::array<u32, 128> emptyFog {};
@@ -1603,7 +1638,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       : nil;
   id<MTLTexture> visibilityTexture =
       metal.visibilityTexture(frame.width, frame.height);
-  if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil || opaquePrefixBuffer == nil ||
+  if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil || opaquePrefixBuffer == nil || reverseOpaqueBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
       overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
       depthClearBuffer == nil || opaqueMaskBuffer == nil ||
@@ -1717,6 +1752,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:hardwareVisibilityTileBuffer offset:0 atIndex:15];
   [encoder setBuffer:commitMaskBuffer offset:0 atIndex:16];
   [encoder setBuffer:opaquePrefixBuffer offset:0 atIndex:17];
+  [encoder setBuffer:reverseOpaqueBuffer offset:0 atIndex:18];
   [encoder setTexture:visibilityTexture atIndex:0];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
