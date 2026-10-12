@@ -7,7 +7,11 @@ import { pathToFileURL } from 'node:url';
 export function readProbe(log) {
   const lines = log.split(/\r?\n/).filter(line => line.startsWith('PVR_RTT_'));
   const header = 'PVR_RTT_PROBE schema=1 execution=unclassified width=32 height=32 stride=36 guard=32 bytes=2368';
-  if (lines.shift() !== header) throw Error('Missing or unsupported probe header');
+  const first = lines.shift();
+  const version2 = /^PVR_RTT_PROBE schema=2 execution=unclassified width=32 height=32 stride=36 guard=32 bytes=2368 packmode=([0-3])$/.exec(first ?? '');
+  if (first !== header && !version2) throw Error('Missing or unsupported probe header');
+  const packmode = version2 ? Number(version2[1]) : 1;
+  const expectedInteriorWord = [0x573d, 0xae7d, 0xface, 0xd73d][packmode];
   const registers = /^PVR_RTT_REG pack=([0-9a-f]{8}) base=([0-9a-f]{8}) stride=([0-9a-f]{8}) clipx=([0-9a-f]{8}) clipy=([0-9a-f]{8})$/.exec(lines.shift() ?? '');
   if (!registers) throw Error('Missing or malformed register record');
   const bytes = Buffer.alloc(2368);
@@ -26,7 +30,7 @@ export function readProbe(log) {
   for (let y = 0; y < 32; ++y)
     paddingChangedBytes += changes(bytes.subarray(32 + y * 72 + 64, 32 + (y + 1) * 72));
   // Stay well inside the quad, away from edge-coverage rules. This expected
-  // word follows the requested undithered RGB565 packing, not a hardware dump.
+  // word follows the requested undithered 16-bit packing, not a hardware dump.
   let interiorPixelsDifferentFromRequestedColor = 0;
   const pixelWordHistogram = {};
   for (let y = 0; y < 32; ++y)
@@ -36,12 +40,13 @@ export function readProbe(log) {
     }
   for (let y = 8; y < 24; ++y)
     for (let x = 8; x < 24; ++x)
-      interiorPixelsDifferentFromRequestedColor += bytes.readUInt16LE(32 + (y * 36 + x) * 2) !== 0xae7d;
+      interiorPixelsDifferentFromRequestedColor += bytes.readUInt16LE(32 + (y * 36 + x) * 2) !== expectedInteriorWord;
   return {
     execution: 'unclassified', hardwareValidated: false,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     registers: registerValues,
-    expectedConfiguration: registerValues.pack === 1 && registerValues.stride === 9
+    packmode,
+    expectedConfiguration: registerValues.pack === packmode && registerValues.stride === 9
       && registerValues.clipx === 0x001f0000 && registerValues.clipy === 0x001f0000
       && (registerValues.base & 0x01000000) !== 0,
     prefixGuardChangedBytes: changes(bytes.subarray(0, 32)),
@@ -49,7 +54,7 @@ export function readProbe(log) {
     paddingChangedBytes,
     pixelWordHistogram,
     interiorPixelsChecked: 256,
-    expectedInteriorWord: 0xae7d,
+    expectedInteriorWord,
     interiorPixelsDifferentFromRequestedColor,
     centerWord: bytes.readUInt16LE(32 + (16 * 36 + 16) * 2),
     limitation: 'Raw observations only; execution provenance and hardware correctness are not inferred.',

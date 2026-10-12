@@ -1181,3 +1181,22 @@ Captured inputs match the baseline OpenGL run byte-for-byte and in all
 recorded context fields. This isolates host dithering as the source of
 the spatial variation, while the rounded repacking discrepancy remains.
 It still does not establish the original PVR's quantization behavior.
+
+The Sega architecture document's §3.4.10 format table explicitly excludes
+24/32-bit formats from drawing to a texture map. The RTT probe therefore
+now covers selection among the four documented 16-bit formats rather than
+adding unsupported wider formats. Build with `make -B -C
+tests/manual/pvr-rtt-probe CFLAGS=-DPVR_PROBE_PACK_MODE=N`, where N is 0..3
+(default 1). The forced rebuild matters when changing the compile-time mode.
+Schema 2 records `packmode`; the reader retains schema-1 RGB565 compatibility.
+All variants request dither off, K=0, alpha threshold=0, and opaque vertex
+alpha. These do not yet sweep alpha boundaries or K values.
+
+The first mode-2 execution, `rtt-4444-verified.log` in the isolated probe
+directory, reports 576 pixels `0xface`, 448 background pixels `0xf000`,
+unchanged guards/padding, and all 256 interior samples matching. Allocation
+SHA-256 is `1c69b1e178534fcb9e63a7d6969ea567eb191e29c4cb5468df9248b384cab213`.
+Same-frame Metal/software verification reports zero differences across
+307,200 color pixels and all 8,388,608 VRAM bytes for rtt=1. Four parser tests
+pass. Modes 0 and 3 are selectable but have not yet been executed; neither
+format selection nor matching emulators establishes hardware conformance.

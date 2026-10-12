@@ -50,3 +50,18 @@ test('reject incomplete, reordered, duplicate, and malformed evidence', () => {
   assert.throws(() => readProbe(lines.join('\n').replace('data=a5', 'data=zz')));
   assert.throws(() => readProbe(lines.join('\n').replace('execution=unclassified', 'execution=hardware')));
 });
+
+test('schema 2 identifies each supported format without promoting provenance', () => {
+  for (const [mode, expected] of [0x573d, 0xae7d, 0xface, 0xd73d].entries()) {
+    const lines = fixture();
+    lines[0] = lines[0].replace('schema=1', 'schema=2') + ` packmode=${mode}`;
+    lines[1] = lines[1].replace('pack=00000001', `pack=0000000${mode}`);
+    const result = readProbe(lines.join('\n'));
+    assert.equal(result.packmode, mode);
+    assert.equal(result.expectedInteriorWord, expected);
+    assert.equal(result.expectedConfiguration, true);
+    assert.equal(result.hardwareValidated, false);
+    assert.equal(result.interiorPixelsDifferentFromRequestedColor, 256);
+    assert.throws(() => readProbe(lines.join('\n').replace(`packmode=${mode}`, 'packmode=4')));
+  }
+});

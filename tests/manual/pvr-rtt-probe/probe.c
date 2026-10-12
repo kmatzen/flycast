@@ -5,6 +5,13 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#ifndef PVR_PROBE_PACK_MODE
+#define PVR_PROBE_PACK_MODE 1
+#endif
+#if PVR_PROBE_PACK_MODE < 0 || PVR_PROBE_PACK_MODE > 3
+#error "RTT probe supports the four documented 16-bit framebuffer formats"
+#endif
+
 enum { WIDTH = 32, HEIGHT = 32, STRIDE = 36, GUARD = 32,
        TARGET_BYTES = STRIDE * HEIGHT * 2, ALLOCATION_BYTES = TARGET_BYTES + GUARD * 2 };
 
@@ -26,10 +33,11 @@ int main(void)
     if (pvr_wait_ready() < 0 || pvr_wait_render_done() < 0)
         return 3;
 
-    /* RGB565 without dither. pvr_render_start at the pinned SDK revision
+    /* Selected 16-bit format without dither, K=0 and alpha threshold=0.
+     * pvr_render_start at the pinned SDK revision
      * does not replace FB_CFG_2; dump its final value to verify that assumption. */
     const uint32_t previous_pack = PVR_GET(PVR_FB_CFG_2);
-    PVR_SET(PVR_FB_CFG_2, 1);
+    PVR_SET(PVR_FB_CFG_2, PVR_PROBE_PACK_MODE);
     dbgio_write_str("PVR_PROBE_STAGE begin_rtt\n");
     if (pvr_scene_begin_rtt(target, WIDTH, HEIGHT, STRIDE) < 0)
         return 4;
@@ -57,8 +65,8 @@ int main(void)
 
     dbgio_write_str("PVR_PROBE_STAGE readback\n");
     char line[192];
-    snprintf(line, sizeof(line), "PVR_RTT_PROBE schema=1 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u\n",
-           WIDTH, HEIGHT, STRIDE, GUARD, ALLOCATION_BYTES);
+    snprintf(line, sizeof(line), "PVR_RTT_PROBE schema=2 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u packmode=%u\n",
+           WIDTH, HEIGHT, STRIDE, GUARD, ALLOCATION_BYTES, PVR_PROBE_PACK_MODE);
     dbgio_write_str(line);
     snprintf(line, sizeof(line), "PVR_RTT_REG pack=%08lx base=%08lx stride=%08lx clipx=%08lx clipy=%08lx\n",
            (unsigned long)PVR_GET(PVR_FB_CFG_2), (unsigned long)PVR_GET(PVR_RENDER_ADDR),
