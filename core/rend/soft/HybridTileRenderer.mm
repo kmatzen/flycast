@@ -185,7 +185,7 @@ inline uint wrapTexel(int coordinate, uint size, bool clampAxis, bool flipAxis)
     return wrapped < size ? wrapped : periodMask - wrapped;
 }
 
-inline uint sampleTexture(const device uint *texture, const Triangle t, float2 uv,
+inline uint sampleTexture(const device uint *texture, const device Triangle& t, float2 uv,
         float pvrD)
 {
     const bool clampU = (t.state & (1u << 6)) != 0;
@@ -280,7 +280,7 @@ inline float fogCoefficient(float inverseDepth, float density,
     return (second + (first - second) * fraction) / 255.0f;
 }
 
-inline float2 projectedUV(const Triangle t, int sx, int sy)
+inline float2 projectedUV(const device Triangle& t, int sx, int sy)
 {
     const long w0 = edge(t.x[1], t.y[1], t.x[2], t.y[2], sx, sy);
     const long w1 = edge(t.x[2], t.y[2], t.x[0], t.y[0], sx, sy);
