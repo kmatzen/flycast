@@ -1475,4 +1475,122 @@ TEST(HybridTileRenderer, MatchesOracleForCrossingAutosortDepths)
 	ASSERT_TRUE(hybrid::render(frame, colors, depths));
 	expectEqual(cpu, colors, depths);
 }
+
+TEST(HybridTileRenderer, OrderedAutosortUsesBoundedExactPath)
+{
+	const Color clear { 7, 11, 19, 255 };
+	SoftwareRasterizer cpu(16, 16);
+	cpu.clear(clear);
+	std::vector<hybrid::Triangle> commands;
+	const u32 gpuState = hybrid::makeState(6, false, false, false, true, 0, 4, 5)
+			| hybrid::Autosort | (2u << hybrid::ListTypeShift);
+	for (u32 layer = 0; layer < 48; ++layer)
+	{
+		const float depth = .25f + layer * .125f;
+		const Color color { static_cast<u8>(17 + layer * 29),
+				static_cast<u8>(211 - layer * 13),
+				static_cast<u8>(43 + layer * 47),
+				static_cast<u8>(31 + layer * 37) };
+		const Vertex a { 0, 0, depth, color };
+		const Vertex b { 16, 0, depth, color };
+		const Vertex c { 0, 16, depth, color };
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.depthWrite = false;
+		state.deferBlend = true;
+		state.srcBlend = BlendFactor::SrcAlpha;
+		state.dstBlend = BlendFactor::OneMinusSrcAlpha;
+		state.sequence = layer;
+		cpu.drawTriangle(a, b, c, state);
+		auto command = triangle(a, b, c, gpuState);
+		command.minX = command.minY = 0;
+		command.maxX = command.maxY = 15;
+		commands.push_back(command);
+	}
+	cpu.resolveDeferredFragments();
+
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u32> initialColors(256, pack(clear));
+	hybrid::Frame frame { 16, 16, &commands, &texture, &initialColors };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	hybrid::Timing timing;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+	expectEqual(cpu, colors, depths);
+	EXPECT_EQ(timing.totalTiles, 1u);
+	EXPECT_EQ(timing.orderedAutosortFrames, 1u);
+	EXPECT_EQ(timing.orderedAutosortTiles, 1u);
+	EXPECT_EQ(timing.globalAutosortFrames, 1u);
+	EXPECT_EQ(timing.simpleTranslucentFrames, 0u);
+}
+
+TEST(HybridTileRenderer, SimpleTranslucentFastPathMatchesOracle)
+{
+	const Color clear { 13, 23, 37, 255 };
+	Color texels[4] {
+		{ 255, 91, 37, 47 }, { 29, 233, 71, 113 },
+		{ 83, 41, 227, 179 }, { 197, 149, 19, 239 },
+	};
+	std::vector<u32> texture;
+	for (Color texel : texels)
+		texture.push_back(pack(texel));
+	u32 fogTable[128];
+	for (u32 i = 0; i < 128; ++i)
+		fogTable[i] = ((i * 7 + 3) & 0xff) << 8 | ((i * 13 + 11) & 0xff);
+	const Color fogColor { 31, 97, 211, 255 };
+	SoftwareRasterizer cpu(16, 16);
+	cpu.clear(clear);
+	std::vector<hybrid::Triangle> commands;
+	const u32 gpuState = hybrid::makeState(6, false, true, true, true, 3, 4, 5)
+			| hybrid::Autosort | hybrid::LookupFog
+			| (2u << hybrid::ListTypeShift);
+	for (u32 layer = 0; layer < 32; ++layer)
+	{
+		const float depth = .5f + layer * .1875f;
+		const Color color { static_cast<u8>(41 + layer * 17),
+				static_cast<u8>(223 - layer * 11),
+				static_cast<u8>(59 + layer * 31),
+				static_cast<u8>(67 + layer * 23) };
+		const Vertex a { 0, 0, depth, color, {}, -.2f, -.1f };
+		const Vertex b { 16, 0, depth, color, {}, 1.2f, -.1f };
+		const Vertex c { 0, 16, depth, color, {}, -.2f, 1.1f };
+		PipelineState state;
+		state.depthMode = DepthMode::GreaterOrEqual;
+		state.depthWrite = false;
+		state.deferBlend = true;
+		state.srcBlend = BlendFactor::SrcAlpha;
+		state.dstBlend = BlendFactor::OneMinusSrcAlpha;
+		state.texture = { texels, 2, 2 };
+		state.bilinearFilter = true;
+		state.shadingInstruction = 3;
+		state.fogMode = 0;
+		state.fogTable = fogTable;
+		state.fogDensity = .75f;
+		state.fogRamColor = fogColor;
+		state.sequence = layer;
+		cpu.drawTriangle(a, b, c, state);
+		auto command = triangle(a, b, c, gpuState);
+		command.minX = command.minY = 0;
+		command.maxX = command.maxY = 15;
+		command.textureWidth = command.textureHeight = 2;
+		command.mipOffsets[0] = 0;
+		command.mipLevelCount = 1;
+		commands.push_back(command);
+	}
+	cpu.resolveDeferredFragments();
+
+	const std::vector<u32> initialColors(256, pack(clear));
+	hybrid::Frame frame { 16, 16, &commands, &texture, &initialColors };
+	frame.fogTable = fogTable;
+	frame.fogColor = pack(fogColor);
+	frame.fogDensity = .75f;
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	hybrid::Timing timing;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+	expectEqual(cpu, colors, depths);
+	EXPECT_EQ(timing.orderedAutosortFrames, 1u);
+	EXPECT_EQ(timing.globalAutosortFrames, 1u);
+	EXPECT_EQ(timing.simpleTranslucentFrames, 1u);
+}
 #endif
