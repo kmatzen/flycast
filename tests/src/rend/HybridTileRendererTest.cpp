@@ -136,6 +136,58 @@ TEST(HybridTileRenderer, MatchesOracleForOpaqueDepthWinner)
 	expectEqual(cpu, colors, depths);
 }
 
+TEST(HybridTileRenderer, HardwareVisibilityShadesOnlyOpaqueIspWinner)
+{
+	SoftwareRasterizer cpu(16, 16);
+	cpu.clearVisibility();
+	std::vector<hybrid::Triangle> commands;
+	std::array<std::array<Vertex, 3>, 8> geometry;
+	for (u32 polygon = 0; polygon < geometry.size(); ++polygon)
+	{
+		const float depth = 1.f + polygon;
+		const Color color { static_cast<u8>(29 + polygon * 23),
+				static_cast<u8>(211 - polygon * 17),
+				static_cast<u8>(47 + polygon * 19), 255 };
+		geometry[polygon] = {{ { 0, 0, depth, color }, { 16, 0, depth, color },
+				{ 0, 16, depth, color } }};
+		PipelineState visibility;
+		visibility.depthMode = DepthMode::GreaterOrEqual;
+		visibility.colorWrite = false;
+		visibility.recordVisibility = true;
+		visibility.sequence = polygon + 1;
+		cpu.drawTriangle(geometry[polygon][0], geometry[polygon][1],
+				geometry[polygon][2], visibility);
+
+		auto command = triangle(geometry[polygon][0], geometry[polygon][1],
+				geometry[polygon][2],
+				hybrid::makeState(6, true, false, false, true, 0, 1, 0));
+		command.minX = command.minY = 0;
+		command.maxX = command.maxY = 15;
+		commands.push_back(command);
+	}
+	cpu.clearDepth();
+	for (u32 polygon = 0; polygon < geometry.size(); ++polygon)
+	{
+		PipelineState shade;
+		shade.depthMode = DepthMode::GreaterOrEqual;
+		shade.testVisibility = true;
+		shade.sequence = polygon + 1;
+		cpu.drawTriangle(geometry[polygon][0], geometry[polygon][1],
+				geometry[polygon][2], shade);
+	}
+
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u32> initialColors(256, pack(Color {}));
+	hybrid::Frame frame { 16, 16, &commands, &texture, &initialColors };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	hybrid::Timing timing;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths, &timing));
+	expectEqual(cpu, colors, depths);
+	EXPECT_EQ(timing.totalTiles, 1u);
+	EXPECT_EQ(timing.hardwareVisibilityTiles, 1u);
+}
+
 TEST(HybridTileRenderer, RejectsMalformedCommandsWithoutPoisoningBackend)
 {
 	const Color white { 255, 255, 255, 255 };
