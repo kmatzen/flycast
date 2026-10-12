@@ -835,4 +835,105 @@ TEST(HybridTileRenderer, MatchesOracleForPerListRegionCoverage)
 	ASSERT_TRUE(hybrid::render(frame, colors, depths));
 	expectEqual(cpu, colors, depths);
 }
+
+TEST(HybridTileRenderer, MatchesOracleForPerspectiveInterpolationCorpus)
+{
+	Color texels[16];
+	for (u32 i = 0; i < 16; ++i)
+		texels[i] = { static_cast<u8>(i * 13 + 7), static_cast<u8>(241 - i * 11),
+				static_cast<u8>(i * 5 + 17), static_cast<u8>(31 + i * 13) };
+	std::vector<u32> texture;
+	for (Color color : texels)
+		texture.push_back(pack(color));
+	const std::vector<u32> initialColors(64, 0);
+	for (u32 sample = 0; sample < 32; ++sample)
+	{
+		auto color = [sample](u32 vertex) {
+			return Color {
+				static_cast<u8>((sample * 37 + vertex * 83 + 19) & 255),
+				static_cast<u8>((sample * 61 + vertex * 47 + 73) & 255),
+				static_cast<u8>((sample * 29 + vertex * 101 + 41) & 255),
+				static_cast<u8>((sample * 43 + vertex * 53 + 97) & 255),
+			};
+		};
+		const float z0 = .5f + static_cast<float>((sample * 3) % 11) * .17f;
+		const float z1 = .6f + static_cast<float>((sample * 5 + 2) % 13) * .13f;
+		const float z2 = .7f + static_cast<float>((sample * 7 + 1) % 17) * .09f;
+		const float uvBias = static_cast<float>(static_cast<int>(sample % 5) - 2) * .125f;
+		const Vertex a { 0, 0, z0, color(0), {}, uvBias, -.2f + uvBias };
+		const Vertex b { 8, 0, z1, color(1), {}, 1.2f + uvBias, .1f - uvBias };
+		const Vertex c { 0, 8, z2, color(2), {}, .15f - uvBias, 1.3f + uvBias };
+		SoftwareRasterizer cpu(8, 8);
+		PipelineState state;
+		state.depthMode = DepthMode::Always;
+		state.texture = { texels, 4, 4 };
+		state.bilinearFilter = (sample & 1) != 0;
+		state.clampU = (sample & 2) != 0;
+		state.clampV = (sample & 4) != 0;
+		state.flipU = (sample & 8) != 0;
+		state.flipV = (sample & 16) != 0;
+		state.shadingInstruction = sample & 3;
+		cpu.drawTriangle(a, b, c, state);
+
+		u32 gpuState = hybrid::makeState(7, true, true, state.bilinearFilter,
+				true, state.shadingInstruction, 1, 0);
+		if (state.clampU) gpuState |= hybrid::ClampU;
+		if (state.clampV) gpuState |= hybrid::ClampV;
+		if (state.flipU) gpuState |= hybrid::FlipU;
+		if (state.flipV) gpuState |= hybrid::FlipV;
+		std::vector<hybrid::Triangle> commands { triangle(a, b, c, gpuState) };
+		commands[0].textureWidth = commands[0].textureHeight = 4;
+		commands[0].mipOffsets[0] = 0;
+		commands[0].mipLevelCount = 1;
+		hybrid::Frame frame { 8, 8, &commands, &texture, &initialColors };
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths)) << "sample=" << sample;
+		expectEqual(cpu, colors, depths);
+	}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForCrossingAutosortDepths)
+{
+	const Color red { 230, 30, 20, 128 };
+	const Color blue { 20, 50, 230, 128 };
+	const Vertex ar0 { 0, 0, .5f, red };
+	const Vertex ar1 { 8, 0, 2.f, red };
+	const Vertex ar2 { 0, 2, .5f, red };
+	const Vertex ar3 { 8, 2, 2.f, red };
+	const Vertex ab0 { 0, 0, 2.f, blue };
+	const Vertex ab1 { 8, 0, .5f, blue };
+	const Vertex ab2 { 0, 2, 2.f, blue };
+	const Vertex ab3 { 8, 2, .5f, blue };
+	const Color clear { 0, 0, 0, 255 };
+	SoftwareRasterizer cpu(8, 2);
+	cpu.clear(clear);
+	PipelineState state;
+	state.depthMode = DepthMode::GreaterOrEqual;
+	state.depthWrite = false;
+	state.deferBlend = true;
+	state.srcBlend = BlendFactor::SrcAlpha;
+	state.dstBlend = BlendFactor::OneMinusSrcAlpha;
+	state.sequence = 0;
+	cpu.drawTriangle(ar0, ar1, ar2, state);
+	cpu.drawTriangle(ar1, ar3, ar2, state);
+	state.sequence = 1;
+	cpu.drawTriangle(ab0, ab1, ab2, state);
+	cpu.drawTriangle(ab1, ab3, ab2, state);
+	cpu.resolveDeferredFragments();
+
+	u32 gpuState = hybrid::makeState(6, false, false, false, true, 0, 4, 5)
+			| hybrid::Autosort | (2u << hybrid::ListTypeShift);
+	std::vector<hybrid::Triangle> commands {
+		triangle(ar0, ar1, ar2, gpuState), triangle(ar1, ar3, ar2, gpuState),
+		triangle(ab0, ab1, ab2, gpuState), triangle(ab1, ab3, ab2, gpuState),
+	};
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u32> initialColors(16, pack(clear));
+	hybrid::Frame frame { 8, 2, &commands, &texture, &initialColors };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+	expectEqual(cpu, colors, depths);
+}
 #endif
