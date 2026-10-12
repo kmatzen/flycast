@@ -26,6 +26,7 @@ enum StateBits : u32 {
   LookupFog = 1 << 23,
   Trilinear = 1 << 24,
   TrilinearPassB = 1 << 25,
+  IntensityShadow = 1 << 26,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -60,9 +61,10 @@ struct Triangle {
   u32 mipOffsets[11];
   u32 mipLevelCount;
   float mipNumerator;
+  u32 shadeScale;
 };
 
-static_assert(sizeof(Triangle) == 160, "Metal command layout changed");
+static_assert(sizeof(Triangle) == 164, "Metal command layout changed");
 
 struct Frame {
   u32 width = 0;
@@ -75,6 +77,7 @@ struct Frame {
   const u32 *fogTable = nullptr;
   u32 fogColor = 0;
   float fogDensity = 0.f;
+  const std::vector<u8> *modifierMask = nullptr;
 };
 
 struct Timing {

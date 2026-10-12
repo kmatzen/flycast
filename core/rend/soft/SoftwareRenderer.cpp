@@ -651,6 +651,7 @@ private:
 		if (state.fogMode == 0) encodedState |= hybrid::LookupFog;
 		if (state.trilinearFilter) encodedState |= hybrid::Trilinear;
 		if (state.trilinearFilter && state.trilinearPassB) encodedState |= hybrid::TrilinearPassB;
+		if (state.shadow && state.intensityShadow) encodedState |= hybrid::IntensityShadow;
 		hybrid::Triangle command {};
 		for (u32 i = 0; i < 3; ++i)
 		{
@@ -672,6 +673,7 @@ private:
 		command.maxY = maxY;
 		std::copy(mipOffsets.begin(), mipOffsets.end(), command.mipOffsets);
 		command.mipLevelCount = state.texture ? state.texture.mipLevelCount : 0;
+		command.shadeScale = state.shadeScale;
 		if (command.mipLevelCount > 1)
 		{
 			const double inverseArea = 1. / static_cast<double>(std::abs(area));
@@ -757,7 +759,8 @@ private:
 			if (!state.fpuPixelCenter || !state.tspPixelCenter || state.excludeClip || state.useOffsetColor
 					|| state.textureSuperSample
 					|| (state.fogMode != 0 && state.fogMode != 2) || state.colorClamp
-					|| state.shadow || state.srcSelect || state.dstSelect || state.bumpMap
+					|| (state.shadow && !state.intensityShadow)
+					|| state.srcSelect || state.dstSelect || state.bumpMap
 					|| state.dither || poly.tsp1.full != static_cast<u32>(-1))
 			{
 				static u32 reports = 0;
@@ -808,12 +811,20 @@ private:
 		if (config::EmulateFramebuffer)
 			return reject("framebuffer-emulation");
 		const RenderPass& pass = rendContext->render_passes[0];
-		if (pass.mvo_count != 0 || pass.mvo_tr_count != 0)
-			return reject("modifier-volumes");
+		if (pass.mvo_tr_count != 0)
+			return reject("translucent-modifier-volumes");
 		const bool autosort = !config::PerStripSorting && pass.autosort;
 		const bool hasOpaque = pass.op_count != 0;
 		const bool hasPunch = pass.pt_count != 0;
 		const bool hasTranslucent = pass.tr_count != 0;
+		if (pass.mvo_count != 0 && (!rendContext->fpu_shad_scale.intensity_shadow
+				|| (hasTranslucent && !autosort)))
+			return reject("unsupported-modifier-volume-mode");
+		if (pass.mvo_count != 0)
+			for (u32 i = 0; i < std::min<u32>(pass.tr_count,
+					rendContext->global_param_tr.size()); ++i)
+				if (rendContext->global_param_tr[i].pcw.Shadow)
+					return reject("translucent-shadow");
 		if (!passRegions[0].empty())
 		{
 			std::vector<u8> coverage(static_cast<size_t>(width) * height);
@@ -861,6 +872,28 @@ private:
 		hybrid::Timing timing;
 		if (!hybrid::render(frame, output, depth, &timing) || output.size() != frameStore.size())
 			return reject("backend-failure");
+		std::vector<u8> modifierMask;
+		if (pass.mvo_count != 0)
+		{
+			SoftwareRasterizer modifierRasterizer(width, height);
+			modifierRasterizer.restoreDepth(depth);
+			SoftwareRasterizer *savedRasterizer = rasterizer;
+			rasterizer = &modifierRasterizer;
+			drawModifierVolumes(rendContext->global_param_mvo, 0, pass.mvo_count);
+			rasterizer = savedRasterizer;
+			modifierMask.resize(static_cast<size_t>(width) * height);
+			const std::vector<u8>& stencil = modifierRasterizer.stencilBuffer();
+			for (size_t i = 0; i < modifierMask.size(); ++i)
+				modifierMask[i] = stencil[i] & 1;
+			frame.modifierMask = &modifierMask;
+			hybrid::Timing modifierTiming;
+			if (!hybrid::render(frame, output, depth, &modifierTiming)
+					|| output.size() != frameStore.size())
+				return reject("modifier-backend-failure");
+			timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
+			timing.gpuMilliseconds += modifierTiming.gpuMilliseconds;
+			timing.readbackMilliseconds += modifierTiming.readbackMilliseconds;
+		}
 		std::memcpy(frameStore.data(), output.data(), output.size() * sizeof(u32));
 		if (trace)
 			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f\n",

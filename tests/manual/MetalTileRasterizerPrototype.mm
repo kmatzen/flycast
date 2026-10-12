@@ -327,6 +327,21 @@ int main() {
       return 1;
   }
 
+  {
+    Triangle command = testTriangle(
+        0xff3264c8u, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0) |
+            rend::soft::hybrid::IntensityShadow);
+    command.shadeScale = 128;
+    std::vector<Triangle> commands{command};
+    const std::vector<u8> modifierMask{1};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    test.modifierMask = &modifierMask;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff193264u)
+      return 1;
+  }
+
   const std::vector<u32> atlas{0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
                                0xff0000ffu, 0xff00ff00u, 0xff00ff00u,
                                0xff00ff00u, 0xff00ff00u};

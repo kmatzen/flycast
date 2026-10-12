@@ -21,7 +21,7 @@ struct Constants {
   u32 useInitialColor;
   u32 fogColor;
   float fogDensity;
-  u32 reserved;
+  u32 useModifierMask;
 };
 
 static_assert(sizeof(Constants) == 28);
@@ -49,6 +49,7 @@ struct Triangle {
     uint mipOffsets[11];
     uint mipLevelCount;
     float mipNumerator;
+    uint shadeScale;
 };
 
 struct Constants {
@@ -58,7 +59,7 @@ struct Constants {
     uint useInitialColor;
     uint fogColor;
     float fogDensity;
-    uint reserved;
+    uint useModifierMask;
 };
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -265,6 +266,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         constant Constants& constants [[buffer(6)]],
         device atomic_uint *overflow [[buffer(7)]],
         const device uint *fogTable [[buffer(8)]],
+        const device uchar *modifierMask [[buffer(9)]],
         uint2 pixel [[thread_position_in_grid]])
 {
     if (pixel.x >= constants.width || pixel.y >= constants.height)
@@ -312,6 +314,17 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         uint source = packColor(interpolated);
         if ((t.state & (1u << 11)) == 0)
             source |= 0xff000000u;
+        if ((t.state & (1u << 26)) != 0 && constants.useModifierMask != 0
+                && modifierMask[offset] != 0) {
+            uint scaled = source & 0xff000000u;
+            for (uint component = 0; component < 3; ++component) {
+                const uint shift = component * 8;
+                const uint value = min(255u,
+                        (channel(source, shift) * t.shadeScale + 128) / 256);
+                scaled |= value << shift;
+            }
+            source = scaled;
+        }
         float pvrD = 1.0f;
         if ((t.state & (1u << 4)) != 0) {
             const float u = (t.u[0] * t.z[0] * s0 + t.u[1] * t.z[1] * s1
@@ -463,7 +476,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 26) != 0)
+        triangle.alphaReference > 255 || (triangle.state >> 27) != 0 ||
+        triangle.shadeScale > 256)
       return false;
     const s64 area = (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
                          (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -
@@ -509,6 +523,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   if (frame.initialColors != nullptr &&
       frame.initialColors->size() != pixelCount)
     return false;
+  if (frame.modifierMask != nullptr && frame.modifierMask->size() != pixelCount)
+    return false;
   id<MTLBuffer> triangleBuffer = makeBuffer(metal.device, *frame.triangles);
   id<MTLBuffer> offsetBuffer = makeBuffer(metal.device, tileOffsets);
   id<MTLBuffer> referenceBuffer = makeBuffer(metal.device, tileReferences);
@@ -518,6 +534,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
       newBufferWithBytes:frame.fogTable != nullptr ? frame.fogTable : emptyFog.data()
                 length:emptyFog.size() * sizeof(u32)
                options:MTLResourceStorageModeShared];
+  const std::vector<u8> emptyModifier(pixelCount);
+  id<MTLBuffer> modifierBuffer = makeBuffer(metal.device,
+      frame.modifierMask != nullptr ? *frame.modifierMask : emptyModifier);
   id<MTLBuffer> colorBuffer =
       [metal.device newBufferWithLength:pixelCount * sizeof(u32)
                                 options:MTLResourceStorageModeShared];
@@ -529,7 +548,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                                 options:MTLResourceStorageModeShared];
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
-      overflowBuffer == nil || fogBuffer == nil)
+      overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil)
     return false;
   *static_cast<u32 *>(overflowBuffer.contents) = 0;
   if (frame.initialColors != nullptr)
@@ -537,7 +556,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
                 pixelCount * sizeof(u32));
   const Constants constants{frame.width, frame.height, tilesX,
                             frame.initialColors != nullptr ? 1u : 0u,
-                            frame.fogColor, frame.fogDensity, 0};
+                            frame.fogColor, frame.fogDensity,
+                            frame.modifierMask != nullptr ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
@@ -552,6 +572,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBytes:&constants length:sizeof(constants) atIndex:6];
   [encoder setBuffer:overflowBuffer offset:0 atIndex:7];
   [encoder setBuffer:fogBuffer offset:0 atIndex:8];
+  [encoder setBuffer:modifierBuffer offset:0 atIndex:9];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
   [encoder endEncoding];
