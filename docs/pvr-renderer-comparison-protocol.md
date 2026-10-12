@@ -638,3 +638,30 @@ single-threaded full-framebuffer run, not merely fewer game-submitted frames.
 It does not yet attribute the entire slowdown to the renderer or establish
 the behavior of the threaded/async configurations. Log:
 `/tmp/pvr-emulated-cadence-seaman.log`; the owned process was stopped afterward.
+
+### Isolating display synchronization from rendering cost
+
+With the same muted, single-threaded, full-framebuffer Seaman configuration,
+OpenGL reported later 120-render windows at 0.9985–1.0014 emulation speed
+(`/tmp/pvr-cadence-opengl.log`). A hybrid run with detailed tracing still
+reported 0.6429 speed; sampled GPU times were 12.831–14.557 ms, encoding
+1.372–1.779 ms, readback about 0.21 ms, and no CPU translucent completion
+(`/tmp/pvr-cadence-hybrid-breakdown.log`). These samples do not constitute a
+complete cost attribution.
+
+Changing only the requested VSync setting to
+`-config config:rend.vsync=no` restored approximately full speed in the hybrid
+run. The first five later windows reported 0.9992, 0.9999, 0.9999, 0.9993,
+and 1.0019 emulation speed, with mean render-call times of 15.831–16.093 ms
+(`/tmp/pvr-cadence-hybrid-novsync.log`). Full framebuffer emulation remained
+enabled. All three owned processes were stopped after measurement.
+
+This isolates synchronization as a substantial performance factor in this
+sequence; it is not a validated synchronized-presentation fix, a 60 fps claim,
+or proof of good audio (the audio backend was null). Source inspection shows
+the bundled SDL Cocoa positive swap-interval path unconditionally waits for a
+display callback before flushing. The software renderer also does not forward
+the detected game swap interval, unlike OpenGL. Neither observation alone
+establishes the cause of the whole slowdown. Measure presentation waits and
+emulator pacing before changing their policy; do not remove framebuffer
+operations to improve this result.
