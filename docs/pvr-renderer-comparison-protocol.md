@@ -771,3 +771,20 @@ not an independent comparison of final hybrid-only VRAM writes, display
 scanout, tearing, or hardware output. Its added reference-rendering cost also
 makes this run unsuitable for performance or audio conclusions. Independent
 hybrid-only framebuffer captures remain necessary for the final write stage.
+
+An independent frame-4 write-stage check subsequently ran software-only and
+hybrid-only processes with late-swap enabled, full framebuffer emulation,
+single-threaded rendering, null audio, and the verifier disabled. Captures are
+under `/tmp/pvr-lateswap-final.WoNnce/{sw,hybrid}`. The input comparator passed:
+raw TA, processed VRAM, live registers, and schema-2 latched/configuration
+fields matched. The hybrid trace between the processed and rendered markers
+shows four triangles, one texture, no CPU translucent completion, and no
+rejection. Both owned processes were stopped after capture.
+
+The complete rendered 8 MiB VRAM images are byte-identical, SHA-256
+`075ce6bd0f823361921139f4d5e374900ebd4017aeb3228884785988684ecae2`.
+The RGB565 comparison at base `0x200000`, stride 1280, 640 × 480 reports zero
+differing pixels and zero native-channel error. Input-comparator fixture tests
+also passed. This closes the independent framebuffer-write check for this
+early frame only; it does not extend that proof to the later translucent
+sequence, every captured/uncaptured state, host scanout, or Dreamcast hardware.
