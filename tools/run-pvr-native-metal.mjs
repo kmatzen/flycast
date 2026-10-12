@@ -7,9 +7,10 @@ import { analyzeStages } from './read-pvr-stages.mjs';
 // Integration smoke test with a finite cadence ELF, not a performance gate.
 const [appArg, elfArg, outputArg, ...options] = process.argv.slice(2);
 if (!appArg || !elfArg || !outputArg || new Set(options).size !== options.length
-    || options.some(x => !['--timing', '--stages'].includes(x)))
-  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing] [--stages]');
+    || options.some(x => !['--timing', '--stages', '--ordered'].includes(x)))
+  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing] [--stages] [--ordered]');
 const timing = options.includes('--timing'), stages = options.includes('--stages');
+const ordered = options.includes('--ordered');
 const app = resolve(appArg), elf = resolve(elfArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -27,6 +28,7 @@ if (timing) {
   env.FLYCAST_AUDIO_TRACE_DELIVERY = '1';
 }
 if (stages) env.FLYCAST_PVR_TRACE_STAGES = '1';
+if (ordered) env.FLYCAST_PVR_ORDERED_PRESENT = '1';
 let stdout = '', stderr = '', timedOut = false, forced = false, stopping = false;
 const result = await new Promise((accept, reject) => {
   const child = spawn(app, ['-config', `audio:backend=${timing ? 'sdl2' : 'null'}`, '-config', 'config:pvr.rend=7',
@@ -67,6 +69,7 @@ const integrationPassed = stopping && !timedOut && !forced && (result.code === 0
   && appHash === hash(app) && elfHash === hash(elf)
   && stderr.includes('PVR_METAL_CONTEXT active=1') && (timing ? comparisons === 0 : comparisons >= 40) && !mismatch
   && (!timing || /AUDIO_DELIVERY_FINAL backend=sdl2/.test(stderr))
+  && (!ordered || /PVR_ORDERED_FINAL dropped=\d+/.test(stderr))
   && callbacks.filter(x => x.time > 0).length >= 40;
 const first = new Map();
 for (const record of callbacks)
@@ -87,7 +90,8 @@ if (stages) {
       selections: records.filter(x => x.stage === 'select' && x.id === id),
       callbacks: callbacks.filter(x => x.id === id) })) };
 }
-const report = { appHash, elfHash, timing, stages, stageReport, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
+const report = { appHash, elfHash, timing, stages, ordered, stageReport, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
+  orderedFinal: stderr.match(/PVR_ORDERED_FINAL[^\n]*/)?.[0],
   skippedCallbacks: callbacks.filter(x => x.time === 0).length, integrationPassed,
   missingIds, measuredMissingIds: missingIds.filter(id => id >= 60),
   measuredFirstPresentationGapMs: { p50: sorted[Math.floor(sorted.length * .5)], p95: sorted[Math.floor(sorted.length * .95)], max: sorted.at(-1) },

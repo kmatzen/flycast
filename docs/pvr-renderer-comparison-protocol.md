@@ -2669,3 +2669,35 @@ in the latest-only producer/UI handoff, before Metal submission. It does not
 prove all future losses have this cause or that an arbitrary queue will solve
 pacing; the previously rejected shallow FIFO remains contrary evidence.
 Publication-to-selection p95 was 7.004 ms and 4.455 ms in these two traced runs.
+
+### Opt-in distinct-image ordered handoff experiment
+
+`FLYCAST_PVR_ORDERED_PRESENT=1` (runner `--ordered`) enables a three-image
+FIFO only in the native Metal context. Consecutive images with identical
+dimensions, aspect, border, and pixels are coalesced before entering the queue.
+Overflow discards the oldest queued image and increments the reported
+`PVR_ORDERED_FINAL dropped` counter. The producer does not wait for display;
+queue access uses a mutex. Empty-queue presentations retain the last selected
+image so native callbacks and UI rendering continue to be serviced. The
+latest-only mailbox remains the default and still supplies lifecycle retention.
+
+All 149 renderer tests pass on ARM64 and Rosetta, including ordering,
+coalescing, overflow, clearing the epoch, and changed-metadata tests:
+`/tmp/pvr-ordered-tests-native.log`, `/tmp/pvr-ordered-tests-rosetta.log`.
+The ARM64 application builds. Four serial runs used the same application hash
+`113acb340f95030889307210ac2d4a5c55bff56aee3b9d539b7daf0144c46e4c`:
+
+| Run | Missing IDs | Queue overflow | Audio underruns | Gaps over 20 ms |
+| --- | --- | --- | --- | --- |
+| Control 1 | None | Not applicable | 2 | 1 |
+| Ordered 1 | None | 0 | 1 | 1 |
+| Control 2 | None | Not applicable | 1 | 2 |
+| Ordered 2 | None | 0 | 0 | 2 |
+
+Reports are `/tmp/pvr-ordered-{control1,test1,control2,test2}-20261012/report.json`.
+Long gaps were approximately 33.332 ms; all median/p95 gaps were approximately
+16.666 ms. The first pair had zero skipped native callbacks; the second pair
+had one each. Ordered 1's underrun was already present at the first periodic
+audio report and did not increase afterward. These short runs do not establish
+a practical improvement over the controls, which also delivered every ID.
+The experiment remains disabled by default, not a performance solution.

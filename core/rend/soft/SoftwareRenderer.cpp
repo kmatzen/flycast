@@ -144,6 +144,7 @@ public:
 		if (nativeMetalPresentationActive()) {
 			if (!emulationThreadRendering)
 				throw FlycastException("Native Metal requires decoupled framebuffer rendering");
+			orderedPresentation = std::getenv("FLYCAST_PVR_ORDERED_PRESENT") != nullptr;
 			return true;
 		}
 #endif
@@ -177,6 +178,8 @@ public:
 
 	void Term() override
 	{
+		if (orderedPresentation)
+			std::fprintf(stderr, "PVR_ORDERED_FINAL dropped=%llu\n", (unsigned long long)orderedFrames.dropped());
 		reportPresentationDelivery(true);
 		if (hybridAsyncActive)
 		{
@@ -202,6 +205,7 @@ public:
 		textureCache.Clear();
 		screenRasterizer.reset();
 		framebufferPresentation.clear();
+		orderedFrames.clear();
 		lastPresentedFramebuffer.reset();
 		pendingPresentedFramebuffer.reset();
 		presentationDelivery = {};
@@ -675,6 +679,7 @@ public:
 				std::move(pixels), ++presentationSequence, presentationContentSequence);
 		frameReady = frame != nullptr;
 		tracePresentationStage("publish", frame);
+		if (orderedPresentation) orderedFrames.publish(frame);
 		framebufferPresentation.publish(std::move(frame));
 		clearLastFrame = false;
 		frameAspectRatio = getDCFramebufferAspectRatio();
@@ -761,10 +766,11 @@ public:
 	{
 		if (emulationThreadRendering)
 		{
-			auto frame = framebufferPresentation.acquire();
-			if (!frame || frame == lastPresentedFramebuffer || clearLastFrame)
+			auto frame = orderedPresentation ? orderedFrames.take() : framebufferPresentation.acquire();
+			if (!frame && orderedPresentation) frame = lastPresentedFramebuffer;
+			if (!frame || (!orderedPresentation && frame == lastPresentedFramebuffer) || clearLastFrame)
 				return false;
-			tracePresentationStage("select", frame);
+			if (frame != lastPresentedFramebuffer) tracePresentationStage("select", frame);
 			lastPresentedFramebuffer = std::move(frame);
 	#ifndef LIBRETRO
 			imguiDriver->setFrameRendered();
@@ -2586,6 +2592,8 @@ private:
 	// display frame when an intervening RTT render uses identical dimensions.
 	std::unique_ptr<SoftwareRasterizer> screenRasterizer;
 	PresentationMailbox framebufferPresentation;
+	OrderedPresentationQueue orderedFrames;
+	bool orderedPresentation = false;
 	std::shared_ptr<const PresentationFrame> lastPresentedFramebuffer;
 	std::shared_ptr<const PresentationFrame> pendingPresentedFramebuffer;
 	PresentationDelivery presentationDelivery;

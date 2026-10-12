@@ -7,6 +7,45 @@
 
 using namespace rend::soft;
 
+TEST(PresentationFrame, OrderedQueueCoalescesDuplicatesAndReportsOverflow)
+{
+	OrderedPresentationQueue queue;
+	auto make = [](unsigned value, unsigned sequence) {
+		return PresentationFrame::create(1, 1, 1.f, {}, {{u8(value), 0, 0, 255}}, sequence);
+	};
+	auto first = make(1, 1);
+	queue.publish(first);
+	queue.publish(make(1, 2));
+	queue.publish(make(2, 3));
+	queue.publish(make(3, 4));
+	EXPECT_EQ(queue.take(), first);
+	EXPECT_EQ(queue.take()->sequence, 3u);
+	EXPECT_EQ(queue.take()->sequence, 4u);
+	queue.publish(make(3, 5));
+	EXPECT_FALSE(queue.take());
+	for (unsigned i = 4; i < 8; ++i) queue.publish(make(i, i + 2));
+	EXPECT_EQ(queue.dropped(), 1u);
+	EXPECT_EQ(queue.take()->sequence, 7u);
+	queue.clear();
+	EXPECT_FALSE(queue.take());
+	EXPECT_EQ(queue.dropped(), 0u);
+	queue.publish(make(7, 1));
+	ASSERT_TRUE(queue.take()); // A new epoch must not coalesce with the old one.
+}
+
+TEST(PresentationFrame, OrderedQueuePreservesMetadataChanges)
+{
+	OrderedPresentationQueue queue;
+	queue.publish(PresentationFrame::create(1, 1, 1.f, {}, {{1, 2, 3, 255}}, 1));
+	queue.publish(PresentationFrame::create(1, 1, 2.f, {}, {{1, 2, 3, 255}}, 2));
+	queue.publish(PresentationFrame::create(1, 1, 2.f, {1, 0, 0, 255}, {{1, 2, 3, 255}}, 3));
+	for (unsigned sequence = 1; sequence <= 3; ++sequence) {
+		auto frame = queue.take();
+		ASSERT_TRUE(frame);
+		EXPECT_EQ(frame->sequence, sequence);
+	}
+}
+
 TEST(PresentationFrame, CadenceProbeIdsSurviveFramebufferConcatenation)
 {
 	for (unsigned concat = 0; concat < 8; ++concat)

@@ -3,6 +3,8 @@
 #include "SoftwareRasterizer.h"
 #include <cmath>
 #include <memory>
+#include <mutex>
+#include <deque>
 
 namespace rend::soft {
 
@@ -81,6 +83,45 @@ public:
 	void clear() { publish({}); }
 private:
 	std::shared_ptr<const PresentationFrame> latest;
+};
+
+// Experimental bounded handoff. Consecutive identical images do not consume
+// queue slots. Never wait for display on the producer thread; overflow drops
+// the oldest queued image and remains observable through dropped().
+class OrderedPresentationQueue
+{
+public:
+	void publish(std::shared_ptr<const PresentationFrame> frame)
+	{
+		if (!frame) return;
+		std::lock_guard<std::mutex> lock(mutex);
+		if (previous && previous->width == frame->width && previous->height == frame->height
+				&& previous->aspectRatio == frame->aspectRatio && previous->border == frame->border
+				&& previous->pixels == frame->pixels)
+			return;
+		previous = frame;
+		if (frames.size() == 3) { frames.pop_front(); ++drops; }
+		frames.push_back(std::move(frame));
+	}
+	std::shared_ptr<const PresentationFrame> take()
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (frames.empty()) return {};
+		auto frame = std::move(frames.front());
+		frames.pop_front();
+		return frame;
+	}
+	u64 dropped() const { std::lock_guard<std::mutex> lock(mutex); return drops; }
+	void clear()
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		frames.clear(); previous.reset(); drops = 0;
+	}
+private:
+	mutable std::mutex mutex;
+	std::deque<std::shared_ptr<const PresentationFrame>> frames;
+	std::shared_ptr<const PresentationFrame> previous;
+	u64 drops = 0;
 };
 
 } // namespace rend::soft
