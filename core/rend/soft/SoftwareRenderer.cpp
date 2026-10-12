@@ -206,6 +206,21 @@ public:
 		const bool hybridRendered = tryRenderHybrid(width, height, passRegions, frameStore);
 		if (hybridRendered && !verifyHybrid)
 		{
+			if (rendContext->isRTT)
+			{
+				std::vector<RegionInfo> committedRegions;
+				for (const RegionInfo& region : passRegions[0])
+					if (region.flushAccumulate)
+						committedRegions.push_back(region);
+				if (committedRegions.empty() && passRegions[0].empty())
+					committedRegions.push_back({ 0, 0, static_cast<s32>(width),
+							static_cast<s32>(height), false, true, false, false,
+							true, true, true, true, true });
+				writeFramebufferToVram(frameStore, committedRegions);
+				rasterizer = screenRasterizer.get();
+				activeCoverageMask = nullptr;
+				return false;
+			}
 			rawFrameStore = frameStore;
 			presentationBuffer = frameStore;
 			presentationWidth = width;
@@ -339,6 +354,14 @@ public:
 			for (size_t passIndex = 0; passIndex < passRegions.size(); ++passIndex)
 				renderRegions(passIndex, passRegions[passIndex]);
 		}
+		if (!hybridVerification.empty())
+		{
+			size_t mismatches = 0;
+			for (size_t i = 0; i < frameStore.size(); ++i)
+				mismatches += packedColor(frameStore[i]) != packedColor(hybridVerification[i]);
+			std::fprintf(stderr, "HYBRID verify pixels=%zu mismatches=%zu\n",
+					frameStore.size(), mismatches);
+		}
 		if (rendContext->isRTT)
 		{
 			rasterizer = screenRasterizer.get();
@@ -351,14 +374,6 @@ public:
 		}
 		else
 		{
-			if (!hybridVerification.empty())
-			{
-				size_t mismatches = 0;
-				for (size_t i = 0; i < frameStore.size(); ++i)
-					mismatches += packedColor(frameStore[i]) != packedColor(hybridVerification[i]);
-				std::fprintf(stderr, "HYBRID verify pixels=%zu mismatches=%zu\n",
-						frameStore.size(), mismatches);
-			}
 			rawFrameStore = std::move(frameStore);
 			// A normal PVR render targets its internal frame store. It is not
 			// written to Dreamcast VRAM unless framebuffer emulation is enabled,
@@ -951,16 +966,18 @@ private:
 		};
 		if (std::getenv("FLYCAST_HYBRID_SOFT") == nullptr)
 			return false;
-		if (rendContext->isRTT)
-			return reject("render-to-texture");
 		if (rendContext->render_passes.size() != passRegions.size()
 				|| rendContext->render_passes.empty())
 			return reject("invalid-passes");
-		if (config::EmulateFramebuffer)
+		if (!rendContext->isRTT && config::EmulateFramebuffer)
 			return reject("framebuffer-emulation");
 		if (rendContext->render_passes.size() > 1)
+		{
+			if (rendContext->isRTT)
+				return reject("multipass-render-to-texture");
 			return tryRenderHybridPasses(width, height, passRegions, frameStore, trace)
 					|| reject("unsupported-multiple-passes");
+		}
 		const RenderPass& pass = rendContext->render_passes[0];
 		const bool autosort = !config::PerStripSorting && pass.autosort;
 		const bool hasTranslucent = pass.tr_count != 0;
