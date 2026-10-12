@@ -70,6 +70,13 @@ contents, or retained accumulation/presentation buffers. Use them to screen
 candidate captures and investigate mismatches before claiming matched inputs.
 Hashing full VRAM also adds CPU work, so disable it for performance runs.
 
+The diagnostic includes the instantiated backend name (including factory and
+initialization fallbacks). `software` identifies the software renderer object;
+it does not identify whether an individual frame used Metal acceleration.
+Set `FLYCAST_PVR_INPUT_PAGE_FRAME` to a decimal frame number to emit separate
+XXH64 hashes for every 64 KiB VRAM page at that frame. This requires the main
+fingerprint option and single-threaded rendering as above.
+
 ### Runtime screening observation (2026-10-12)
 
 At commit `19bfde271`, two muted, single-threaded Seaman USA (`MK-51048`)
@@ -88,6 +95,15 @@ attribute the divergence to rendering rather than other emulated state.
 Next, record active backend identity and capture differing VRAM ranges before
 making a visual correctness claim from these runs. The earlier equal hashes
 also remain subject to the incomplete-state limitations above.
+
+A subsequent run with backend identification confirmed `opengl` and `software`
+and reproduced both frame-5 whole-VRAM hashes above. Of 128 pages, nine differed:
+offsets `00440000`, `00450000`, `00460000`, `00480000`, `00490000`,
+`004a0000`, `004d0000`, `004e0000`, and `004f0000`. All other page hashes
+matched. The next investigation can therefore focus on these ranges and the
+writes that precede frame 5. This identifies differing pages, not the exact
+bytes or the cause. Local run logs are `/tmp/pvr-pages-gl.log` and
+`/tmp/pvr-pages-software.log`.
 
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw

@@ -27,6 +27,7 @@ void retro_resize_renderer(int w, int h, float aspectRatio);
 u32 FrameCount=1;
 
 Renderer* renderer;
+static const char *rendererBackend = "uninitialized";
 
 static cResetEvent renderEnd;
 u32 fb_w_cur = 1;
@@ -220,14 +221,25 @@ private:
 			{
 				const auto vramHash = XXH64(&vram[0], VRAM_SIZE, 0);
 				const auto registerHash = XXH64(pvr_regs, sizeof(pvr_regs), 0);
+				const char *pageFrame = std::getenv("FLYCAST_PVR_INPUT_PAGE_FRAME");
+				if (pageFrame != nullptr)
+				{
+					char *end;
+					const unsigned long requested = std::strtoul(pageFrame, &end, 10);
+					if (end != pageFrame && *end == '\0' && requested == FrameCount)
+						for (u32 offset = 0; offset < VRAM_SIZE; offset += 65536)
+							std::fprintf(stderr, "PVR_PAGE frame=%u offset=%08x bytes=65536 hash=%016llx\n",
+									FrameCount, offset,
+									static_cast<unsigned long long>(XXH64(&vram[offset], 65536, 0)));
+				}
 				u32 contextIndex = 0;
 				for (TA_context *context = taContext; context != nullptr;
 						context = context->nextContext, ++contextIndex)
 				{
 					const size_t bytes = context->getTADataEnd() - context->getTADataBegin();
 					std::fprintf(stderr,
-							"PVR_INPUT frame=%u context=%u address=%08x bytes=%zu ta=%016llx vram=%016llx regs=%016llx\n",
-							FrameCount, contextIndex, context->Address, bytes,
+							"PVR_INPUT frame=%u backend=%s context=%u address=%08x bytes=%zu ta=%016llx vram=%016llx regs=%016llx\n",
+							FrameCount, rendererBackend, contextIndex, context->Address, bytes,
 							static_cast<unsigned long long>(XXH64(context->getTADataBegin(), bytes, 0)),
 							static_cast<unsigned long long>(vramHash),
 							static_cast<unsigned long long>(registerHash));
@@ -456,48 +468,59 @@ static void rend_create_renderer()
 {
 #ifdef NO_REND
 	renderer	 = rend_norend();
+	rendererBackend = "none";
 #else
 	switch (config::RendererType)
 	{
 	case RenderType::Software:
 		renderer = rend_software();
+		rendererBackend = "software";
 		break;
 #ifdef USE_OPENGL
 	case RenderType::OpenGL:
 		renderer = rend_GLES2();
+		rendererBackend = "opengl";
 		break;
 #if !defined(GLES2) && !defined(__APPLE__)
 	case RenderType::OpenGL_OIT:
 		renderer = rend_GL4();
+		rendererBackend = "opengl-oit";
 		break;
 #endif
 #endif
 #ifdef USE_VULKAN
 	case RenderType::Vulkan:
 		renderer = rend_Vulkan();
+		rendererBackend = "vulkan";
 		break;
 	case RenderType::Vulkan_OIT:
 		renderer = rend_OITVulkan();
+		rendererBackend = "vulkan-oit";
 		break;
 #endif
 #ifdef USE_DX9
 	case RenderType::DirectX9:
 		renderer = rend_DirectX9();
+		rendererBackend = "direct3d9";
 		break;
 #endif
 #ifdef USE_DX11
 	case RenderType::DirectX11:
 		renderer = rend_DirectX11();
+		rendererBackend = "direct3d11";
 		break;
 	case RenderType::DirectX11_OIT:
 		renderer = rend_OITDirectX11();
+		rendererBackend = "direct3d11-oit";
 		break;
 #endif
 	default:
 #ifdef USE_OPENGL
 		renderer = rend_GLES2();
+		rendererBackend = "opengl-fallback";
 #else
 		renderer = rend_norend();
+		rendererBackend = "none";
 #endif
 		break;
 	}
@@ -513,6 +536,7 @@ bool rend_init_renderer()
 	if (!success) {
 		delete renderer;
 		renderer = rend_norend();
+		rendererBackend = "none-init-failed";
 		renderer->Init();
 	}
 	return success;
