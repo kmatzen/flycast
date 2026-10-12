@@ -2391,3 +2391,13 @@ Unchanged executable SHA-256:
 `ca0e47ad5a1d562301c4c0f77757559f9dea2e504c4a48c6e262265f27d0aa07`.
 The reusable component is still built only by the isolated tests/probe;
 native emulator window integration and reliable delivery remain unfinished.
+
+The shared Metal presentation shader now forces output alpha to one, matching
+the software renderer's OpenGL `GL_TEXTURE_SWIZZLE_A=GL_ONE`. Uploaded
+framebuffer alpha remains byte-exact data; it must not become window-compositor
+transparency. The asymmetric RGBA/BGRA drawing test now uses source alpha
+values 0, 1, 128, and 255, requiring unchanged RGB and opaque display alpha
+for every pixel. All five tests pass on ARM64 with Metal validation and under
+Rosetta (`/tmp/pvr-metal-alpha-native.log` and
+`/tmp/pvr-metal-alpha-rosetta.log`). This checks presentation parity, not an
+additional claim about PVR hardware alpha behavior.

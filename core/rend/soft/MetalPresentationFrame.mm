@@ -13,7 +13,9 @@ id<MTLRenderPipelineState> createMetalPresentationPipeline(id<MTLDevice> device,
         "V v; v.p=float4(p[i],0,1); v.uv=float2((p[i].x+1)*.5,(1-p[i].y)*.5); return v; }\n"
         "fragment float4 frag(V v [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
         "constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
-        "return t.sample(s,v.uv); }";
+        // Match the GL presentation texture's GL_TEXTURE_SWIZZLE_A=GL_ONE:
+        // framebuffer alpha is data, not window-compositor transparency.
+        "return float4(t.sample(s,v.uv).rgb,1.0); }";
     id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:error];
     if (library == nil) return nil;
     MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];

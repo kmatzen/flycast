@@ -38,8 +38,8 @@ TEST(MetalUi, PresentationPipelinePreservesOrientationChannelsAndViewport)
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         ASSERT_NE(device, nil);
         id<MTLCommandQueue> queue = [device newCommandQueue];
-        const std::vector<Color> source {{13, 27, 43, 255}, {61, 79, 97, 255},
-            {113, 131, 149, 255}, {167, 181, 199, 255}};
+        const std::vector<Color> source {{13, 27, 43, 0}, {61, 79, 97, 1},
+            {113, 131, 149, 128}, {167, 181, 199, 255}};
         auto frame = PresentationFrame::create(2, 2, 1.f, {}, source);
         id<MTLTexture> texture = uploadMetalPresentationFrame(device, *frame);
         ASSERT_NE(texture, nil);
@@ -73,8 +73,9 @@ TEST(MetalUi, PresentationPipelinePreservesOrientationChannelsAndViewport)
                 for (unsigned x = 0; x < 6; ++x) {
                     Color actual = pixels[y * 6 + x];
                     if (format == MTLPixelFormatBGRA8Unorm) std::swap(actual.r, actual.b);
-                    const Color expected = x >= 1 && x < 5 && y >= 1 && y < 5
+                    Color expected = x >= 1 && x < 5 && y >= 1 && y < 5
                         ? source[((y - 1) / 2) * 2 + (x - 1) / 2] : Color{0, 0, 0, 255};
+                    expected.a = 255; // Display is opaque; upload bytes remain unchanged.
                     EXPECT_EQ(actual, expected) << "at " << x << ',' << y;
                 }
         }
