@@ -93,3 +93,25 @@ ELF SHA-256:
 The decoder and existing renderer suite passed all 147 tests on native ARM64
 and x86-64 under Rosetta. Neither those tests nor these swaps prove physical
 scanout timing or original-hardware accuracy.
+
+### Rejected two-image FIFO experiment
+
+A subsequent experiment replaced latest-image consumption with a FIFO holding
+at most two pending immutable images. Publication never waited for the UI;
+overflow dropped the oldest pending image. This preserved PVR/VRAM execution
+ordering but could add a pending frame of presentation latency.
+
+The same on/off/on/off protocol passed capture validation in all four runs.
+The first VSync run still omitted measured ID 368; the second omitted none.
+Both non-VSync runs omitted none. All four reported zero audio underruns.
+The experimental suite passed 148 cases on ARM64 and Rosetta, including queue
+ordering, overflow, and retained-image ownership. This did not establish
+reliable delivery or an improvement distinguishable from run-to-run variation.
+The FIFO and its test/flag were removed; the default latest-image path remains.
+
+Raw local evidence: `/tmp/pvr-cadence-fifo-20261012/report.json` and separate
+stream logs. Experimental app SHA-256:
+`73c144bb20f63be526be285ed894c20d54770b8413b36dd8f0e594f4b62aea7b`.
+The ELF hash is unchanged. These are exploratory results, not a performance
+claim. Next investigation should locate time spent between frame publication,
+UI acquisition, and completed swap before changing buffering again.
