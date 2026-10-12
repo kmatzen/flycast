@@ -1480,3 +1480,26 @@ stores alpha bit 1. These are observations to compare against physical
 hardware, not evidence that those alpha rules are correct. In particular,
 the shared post-render dither and packing path is outside the independent
 CPU/GPU comparison boundary.
+
+### Rejected experiment: hardware visibility for disjoint depth ties
+
+The small-triangle workload previously uses zero hardware-visibility bins:
+same-depth triangles in a bin fail the conservative strictly separated depth
+test, including the two shared-edge halves of a quad. An experiment reused
+the existing geometric non-overlap proof to allow ambiguous depth ranges only
+when their triangles had disjoint coverage. This admitted all 1,200 bins.
+Focused comparisons covered shared-edge versus overlapping equal-depth
+triangles at both supported sample offsets (0 and 8); their software color
+and depth matched. The full small-triangle benchmark also retained exact
+color/depth agreement for every sample.
+
+The experiment was nevertheless reverted because it increased total cost.
+Before: `/tmp/pvr-visibility-before.xml`, wall p95 15.768 ms, GPU p95
+11.313 ms, CPU encode p95 3.361 ms. Experiment:
+`/tmp/pvr-visibility-after.xml`, wall p95 17.174 ms, GPU p95 10.648 ms,
+CPU encode p95 5.184 ms, failing the explicit 16.667-ms wall gate. These are
+twenty-sample runs of the same workload, not a general statistical claim.
+The new eligibility proof and its temporary test were removed; the prior
+conservative visibility policy remains. A future attempt should investigate
+the per-bin visibility vertex duplication and draw/encoding overhead rather
+than assuming that admitting more hardware work improves end-to-end time.
