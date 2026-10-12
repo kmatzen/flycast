@@ -9,9 +9,13 @@ export function readProbe(log) {
   const header = 'PVR_RTT_PROBE schema=1 execution=unclassified width=32 height=32 stride=36 guard=32 bytes=2368';
   const first = lines.shift();
   const version2 = /^PVR_RTT_PROBE schema=2 execution=unclassified width=32 height=32 stride=36 guard=32 bytes=2368 packmode=([0-3])$/.exec(first ?? '');
-  if (first !== header && !version2) throw Error('Missing or unsupported probe header');
-  const packmode = version2 ? Number(version2[1]) : 1;
-  const expectedInteriorWord = [0x573d, 0xae7d, 0xface, 0xd73d][packmode];
+  const version3 = /^PVR_RTT_PROBE schema=3 execution=unclassified width=32 height=32 stride=36 guard=32 bytes=2368 packmode=([0-3]) alpha=([0-9a-f]{2}) threshold=([0-9a-f]{2})$/.exec(first ?? '');
+  if (first !== header && !version2 && !version3) throw Error('Missing or unsupported probe header');
+  const packmode = Number(version3?.[1] ?? version2?.[1] ?? 1);
+  const alpha = version3 ? parseInt(version3[2], 16) : 255;
+  const threshold = version3 ? parseInt(version3[3], 16) : 0;
+  const expectedInteriorWord = [0x573d, 0xae7d, (alpha >> 4) * 4096 + 0xace,
+    0x573d | (alpha >= threshold ? 0x8000 : 0)][packmode];
   const registers = /^PVR_RTT_REG pack=([0-9a-f]{8}) base=([0-9a-f]{8}) stride=([0-9a-f]{8}) clipx=([0-9a-f]{8}) clipy=([0-9a-f]{8})$/.exec(lines.shift() ?? '');
   if (!registers) throw Error('Missing or malformed register record');
   const bytes = Buffer.alloc(2368);
@@ -46,7 +50,8 @@ export function readProbe(log) {
     sha256: createHash('sha256').update(bytes).digest('hex'),
     registers: registerValues,
     packmode,
-    expectedConfiguration: registerValues.pack === packmode && registerValues.stride === 9
+    alpha, threshold,
+    expectedConfiguration: registerValues.pack === (packmode | (threshold << 16)) && registerValues.stride === 9
       && registerValues.clipx === 0x001f0000 && registerValues.clipy === 0x001f0000
       && (registerValues.base & 0x01000000) !== 0,
     prefixGuardChangedBytes: changes(bytes.subarray(0, 32)),

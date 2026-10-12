@@ -1219,3 +1219,23 @@ After these runs, the full focused renderer suite passes all 135 tests on
 native ARM64 and x86-64 under Rosetta. Logs are `renderer-tests-native.log`
 and `renderer-tests-x86.log` in the isolated probe directory. This is a
 regression check of the current model, not an expanded hardware claim.
+
+The probe now preserves vertex alpha explicitly (`context.gen.alpha=true`)
+while retaining opaque ONE/ZERO blending. Compile-time byte parameters
+`PVR_PROBE_ALPHA` and `PVR_PROBE_ALPHA_THRESHOLD` select input alpha and
+the framebuffer threshold. Schema 3 records both; older schemas remain
+readable. Five parser tests pass, including below/equal/above-threshold
+expectations and malformed-alpha rejection. These expected values express
+the current model, not hardware-derived goldens.
+
+Executed mode-3 runs with threshold 128 and alpha 127, 128, and 129 all
+complete with intact guards/padding and zero full-VRAM/color verifier
+differences. Logs are `rtt-alpha127-threshold128.log`,
+`rtt-alpha128-threshold128.log`, and `rtt-alpha129-threshold128.log` in
+the isolated probe directory. Alpha 127 stores 576 quad words `0x573d`
+(allocation hash `a0e0da8cf347fb14c99f71089740290ad38f4ca0d68a2736b6d17030cdf65a5f`);
+alpha 128 and 129 store `0xd73d` (allocation hash
+`0b8f083bfa8444ae07eb937024557d52758ad974e35c5b5ff74af711a1f0c259`).
+The equality case therefore exercises the modeled inclusive comparison
+through actual RTT writes. The opaque background stays `0x8000` in all
+three. This tests one threshold boundary in emulator execution only.

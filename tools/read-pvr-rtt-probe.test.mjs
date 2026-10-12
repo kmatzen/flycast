@@ -65,3 +65,16 @@ test('schema 2 identifies each supported format without promoting provenance', (
     assert.throws(() => readProbe(lines.join('\n').replace(`packmode=${mode}`, 'packmode=4')));
   }
 });
+
+test('schema 3 distinguishes threshold boundaries and rejects malformed alpha', () => {
+  for (const [alpha, expected] of [['7f', 0x573d], ['80', 0xd73d], ['81', 0xd73d]]) {
+    const lines = fixture();
+    lines[0] = lines[0].replace('schema=1', 'schema=3') + ` packmode=3 alpha=${alpha} threshold=80`;
+    lines[1] = lines[1].replace('pack=00000001', 'pack=00800003');
+    const result = readProbe(lines.join('\n'));
+    assert.equal(result.expectedInteriorWord, expected);
+    assert.equal(result.expectedConfiguration, true);
+    assert.equal(result.hardwareValidated, false);
+    assert.throws(() => readProbe(lines.join('\n').replace(`alpha=${alpha}`, 'alpha=100')));
+  }
+});

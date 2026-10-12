@@ -8,6 +8,15 @@
 #ifndef PVR_PROBE_PACK_MODE
 #define PVR_PROBE_PACK_MODE 1
 #endif
+#ifndef PVR_PROBE_ALPHA
+#define PVR_PROBE_ALPHA 255
+#endif
+#ifndef PVR_PROBE_ALPHA_THRESHOLD
+#define PVR_PROBE_ALPHA_THRESHOLD 0
+#endif
+#if PVR_PROBE_ALPHA < 0 || PVR_PROBE_ALPHA > 255 || PVR_PROBE_ALPHA_THRESHOLD < 0 || PVR_PROBE_ALPHA_THRESHOLD > 255
+#error "Probe alpha and threshold must be bytes"
+#endif
 #if PVR_PROBE_PACK_MODE < 0 || PVR_PROBE_PACK_MODE > 3
 #error "RTT probe supports the four documented 16-bit framebuffer formats"
 #endif
@@ -33,17 +42,19 @@ int main(void)
     if (pvr_wait_ready() < 0 || pvr_wait_render_done() < 0)
         return 3;
 
-    /* Selected 16-bit format without dither, K=0 and alpha threshold=0.
+    /* Selected 16-bit format without dither, K=0 and explicit alpha threshold.
      * pvr_render_start at the pinned SDK revision
      * does not replace FB_CFG_2; dump its final value to verify that assumption. */
     const uint32_t previous_pack = PVR_GET(PVR_FB_CFG_2);
-    PVR_SET(PVR_FB_CFG_2, PVR_PROBE_PACK_MODE);
+    PVR_SET(PVR_FB_CFG_2, PVR_PROBE_PACK_MODE | ((uint32_t)PVR_PROBE_ALPHA_THRESHOLD << 16));
     dbgio_write_str("PVR_PROBE_STAGE begin_rtt\n");
     if (pvr_scene_begin_rtt(target, WIDTH, HEIGHT, STRIDE) < 0)
         return 4;
     pvr_poly_cxt_t context;
     pvr_poly_hdr_t header __attribute__((aligned(32)));
     pvr_poly_cxt_col(&context, PVR_LIST_OP_POLY);
+    /* Preserve vertex alpha without changing the opaque ONE/ZERO blend. */
+    context.gen.alpha = true;
     pvr_poly_compile(&header, &context);
     if (pvr_list_begin(PVR_LIST_OP_POLY) < 0 || pvr_prim(&header, sizeof(header)) < 0)
         return 5;
@@ -54,7 +65,7 @@ int main(void)
         vertex.x = xy[i][0];
         vertex.y = xy[i][1];
         vertex.z = 1;
-        vertex.argb = 0xffabcdef;
+        vertex.argb = ((uint32_t)PVR_PROBE_ALPHA << 24) | 0x00abcdef;
         if (pvr_prim(&vertex, sizeof(vertex)) < 0)
             return 6;
     }
@@ -65,8 +76,9 @@ int main(void)
 
     dbgio_write_str("PVR_PROBE_STAGE readback\n");
     char line[192];
-    snprintf(line, sizeof(line), "PVR_RTT_PROBE schema=2 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u packmode=%u\n",
-           WIDTH, HEIGHT, STRIDE, GUARD, ALLOCATION_BYTES, PVR_PROBE_PACK_MODE);
+    snprintf(line, sizeof(line), "PVR_RTT_PROBE schema=3 execution=unclassified width=%u height=%u stride=%u guard=%u bytes=%u packmode=%u alpha=%02x threshold=%02x\n",
+           WIDTH, HEIGHT, STRIDE, GUARD, ALLOCATION_BYTES, PVR_PROBE_PACK_MODE,
+           PVR_PROBE_ALPHA, PVR_PROBE_ALPHA_THRESHOLD);
     dbgio_write_str(line);
     snprintf(line, sizeof(line), "PVR_RTT_REG pack=%08lx base=%08lx stride=%08lx clipx=%08lx clipy=%08lx\n",
            (unsigned long)PVR_GET(PVR_FB_CFG_2), (unsigned long)PVR_GET(PVR_RENDER_ADDR),
