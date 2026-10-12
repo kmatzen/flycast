@@ -5,6 +5,46 @@
 #include <vector>
 #include "rend/soft/MetalPresentationFrame.h"
 
+// This stub implements only the allocation message used by the uploader, to exercise
+// allocation failure without exhausting GPU/system memory.
+@interface PvrFailingTextureDevice : NSObject
+@property(nonatomic) unsigned attempts;
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor*)descriptor;
+@end
+@implementation PvrFailingTextureDevice
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor*)descriptor
+{
+    self.attempts += 1;
+    return nil;
+}
+@end
+
+TEST(MetalUi, AllocationFailureReturnsNoTexture)
+{
+    @autoreleasepool {
+        PvrFailingTextureDevice *device = [PvrFailingTextureDevice new];
+        auto frame = rend::soft::PresentationFrame::create(1, 1, 1.f, {},
+            std::vector<rend::soft::Color>(1));
+        ASSERT_TRUE(frame);
+        EXPECT_EQ(rend::soft::uploadMetalPresentationFrame((id<MTLDevice>)device, *frame), nil);
+        EXPECT_EQ(device.attempts, 1u);
+    }
+}
+
+TEST(MetalUi, RejectsOversizedUploadsBeforeCallingMetal)
+{
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        ASSERT_NE(device, nil);
+        for (bool tall : {false, true}) {
+            auto frame = rend::soft::PresentationFrame::create(tall ? 1 : 16385,
+                tall ? 16385 : 1, 1.f, {}, std::vector<rend::soft::Color>(16385));
+            ASSERT_TRUE(frame);
+            EXPECT_EQ(rend::soft::uploadMetalPresentationFrame(device, *frame), nil);
+        }
+    }
+}
+
 TEST(MetalUi, ConvertedFramebufferUploadPreservesBytesAndOwnership)
 {
     @autoreleasepool {

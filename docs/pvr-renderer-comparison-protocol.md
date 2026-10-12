@@ -2236,3 +2236,16 @@ Both tests pass on ARM64 with Metal API validation enabled and on x86-64
 under Rosetta. Raw logs are `/tmp/pvr-metal-frame-native.log` and
 `/tmp/pvr-metal-frame-rosetta.log`. These results establish the tested upload
 and composition behavior, not sustained frame rates or drawable delivery.
+
+The uploader rejects either dimension above 16,384 before allocating a Metal
+texture. This is a conservative supported desktop-path limit based on
+[Apple's feature tables](https://developer.apple.com/metal/capabilities/),
+not a statement of every newer GPU's maximum. The PVR model itself is unchanged.
+Tests exercise oversized width and height with Metal validation enabled, and
+a test-only allocation stub verifies that a failed texture allocation returns
+no texture without attempting an upload or exhausting real GPU memory.
+All four Metal UI tests pass in both architecture slices after a clean
+recompilation of the test source. Final evidence:
+`/tmp/pvr-metal-limits-rebuilt-native.log` (Metal validation enabled) and
+`/tmp/pvr-metal-limits-rebuilt-rosetta.log`. Earlier logs with unequal test
+counts came from a source edit during universal compilation and are superseded.
