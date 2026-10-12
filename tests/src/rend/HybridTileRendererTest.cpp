@@ -1043,7 +1043,8 @@ TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
 		command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
 		command.tspSampleOffset = state.tspPixelCenter ? 8 : 0;
 		if (state.useOffsetColor) command.effects |= hybrid::UseOffsetColor;
-		if (state.fogMode == 1) command.effects |= hybrid::VertexFog;
+		if (state.fogMode == 1 && state.useOffsetColor)
+			command.effects |= hybrid::VertexFog;
 		if (state.fogMode == 3) command.effects |= hybrid::LookupFogAlpha;
 		if (state.colorClamp) command.effects |= hybrid::ColorClamp;
 		if (state.dither) command.effects |= hybrid::Dither;
@@ -1066,6 +1067,185 @@ TEST(HybridTileRenderer, MatchesOracleForCombinedPixelStateCorpus)
 		ASSERT_EQ(secondary.size(), cpu.secondaryBuffer().size());
 		for (size_t i = 0; i < secondary.size(); ++i)
 			EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i])) << "secondary pixel=" << i;
+	}
+}
+
+TEST(HybridTileRenderer, MatchesOracleForSubpixelGeometryStateCorpus)
+{
+	Color texels[64];
+	std::vector<u32> texture;
+	for (u32 i = 0; i < 64; ++i)
+	{
+		texels[i] = { static_cast<u8>(i * 37 + 11), static_cast<u8>(i * 19 + 73),
+				static_cast<u8>(i * 53 + 29), static_cast<u8>(i * 23 + 41) };
+		texture.push_back(pack(texels[i]));
+	}
+	u32 fogTable[128];
+	for (u32 i = 0; i < 128; ++i)
+		fogTable[i] = ((i * 17 + 5) & 0xff) << 8 | ((i * 29 + 13) & 0xff);
+
+	u32 random = 0x6d2b79f5u;
+	auto next = [&random]() {
+		random ^= random << 13;
+		random ^= random >> 17;
+		random ^= random << 5;
+		return random;
+	};
+	auto channel = [&next]() { return static_cast<u8>(next()); };
+	auto coordinate = [&next]() {
+		return static_cast<float>(16 + next() % 208) / 16.f;
+	};
+	auto uv = [&next]() {
+		return static_cast<float>(static_cast<s32>(next() % 513) - 128) / 256.f;
+	};
+
+	for (u32 sample = 0; sample < 256; ++sample)
+	{
+		SCOPED_TRACE(testing::Message() << "sample=" << sample);
+		Vertex vertices[3];
+		for (Vertex& vertex : vertices)
+		{
+			vertex.x = coordinate();
+			vertex.y = coordinate();
+			vertex.z = .125f + static_cast<float>(next() % 7936) / 1024.f;
+			vertex.u = uv();
+			vertex.v = uv();
+			vertex.color = { channel(), channel(), channel(), channel() };
+			vertex.offsetColor = { channel(), channel(), channel(), channel() };
+		}
+		const float signedArea = (vertices[1].x - vertices[0].x)
+				* (vertices[2].y - vertices[0].y)
+				- (vertices[1].y - vertices[0].y)
+				* (vertices[2].x - vertices[0].x);
+		if (std::abs(signedArea) < 2.f)
+		{
+			--sample;
+			continue;
+		}
+
+		const Color background { channel(), channel(), channel(), channel() };
+		const Color secondaryBackground { channel(), channel(), channel(), channel() };
+		const std::vector<u32> initialColors(256, pack(background));
+		const std::vector<u32> initialSecondary(256, pack(secondaryBackground));
+		const u32 bits = next();
+		PipelineState state;
+		state.depthMode = static_cast<DepthMode>(bits & 7);
+		state.depthWrite = (bits & (1u << 3)) != 0;
+		state.texture = { texels, 8, 8 };
+		state.bilinearFilter = (bits & (1u << 4)) != 0;
+		state.clampU = (bits & (1u << 5)) != 0;
+		state.clampV = (bits & (1u << 6)) != 0;
+		state.flipU = (bits & (1u << 7)) != 0;
+		state.flipV = (bits & (1u << 8)) != 0;
+		state.shadingInstruction = (bits >> 9) & 3;
+		state.useAlpha = (bits & (1u << 11)) != 0;
+		state.ignoreTextureAlpha = (bits & (1u << 12)) != 0;
+		state.useOffsetColor = (bits & (1u << 13)) != 0;
+		state.srcBlend = static_cast<BlendFactor>((bits >> 14) & 7);
+		state.dstBlend = static_cast<BlendFactor>((bits >> 17) & 7);
+		state.fogMode = (bits >> 20) & 3;
+		state.fogTable = fogTable;
+		state.fogDensity = .63f;
+		state.fogRamColor = { 197, 43, 109, 255 };
+		state.fogVertexColor = { 31, 211, 67, 255 };
+		state.colorClamp = (bits & (1u << 22)) != 0;
+		state.clampMin = { 7, 19, 31, 11 };
+		state.clampMax = { 233, 219, 201, 241 };
+		state.fpuPixelCenter = (bits & (1u << 23)) != 0;
+		state.tspPixelCenter = (bits & (1u << 24)) != 0;
+		state.texelSampleCenter = (bits & (1u << 25)) != 0;
+		state.excludeClip = (bits & (1u << 26)) != 0;
+		state.excludeX0 = 5;
+		state.excludeY0 = 4;
+		state.excludeX1 = 10;
+		state.excludeY1 = 11;
+		state.srcSelect = (bits & (1u << 27)) != 0;
+		state.dstSelect = (bits & (1u << 28)) != 0;
+		state.dither = (bits & (1u << 29)) != 0;
+		state.ditherDivisorR = 5;
+		state.ditherDivisorG = 6;
+		state.ditherDivisorB = 5;
+		state.ditherDivisorA = 8;
+		state.gouraud = (bits & (1u << 30)) != 0;
+		SCOPED_TRACE(testing::Message() << "bits=0x" << std::hex << bits
+				<< " area=" << std::dec << signedArea
+				<< " fog=" << static_cast<u32>(state.fogMode)
+				<< " gouraud=" << state.gouraud
+				<< " srcSelect=" << state.srcSelect
+				<< " dstSelect=" << state.dstSelect
+				<< " dither=" << state.dither);
+
+		SoftwareRasterizer cpu(16, 16);
+		cpu.clear(background);
+		cpu.clearSecondary(secondaryBackground);
+		cpu.drawTriangle(vertices[0], vertices[1], vertices[2], state);
+
+		u32 gpuState = hybrid::makeState(static_cast<u32>(state.depthMode),
+				state.depthWrite, true, state.bilinearFilter, state.useAlpha,
+				state.shadingInstruction, static_cast<u32>(state.srcBlend),
+				static_cast<u32>(state.dstBlend));
+		if (state.clampU) gpuState |= hybrid::ClampU;
+		if (state.clampV) gpuState |= hybrid::ClampV;
+		if (state.flipU) gpuState |= hybrid::FlipU;
+		if (state.flipV) gpuState |= hybrid::FlipV;
+		if (state.ignoreTextureAlpha) gpuState |= hybrid::IgnoreTextureAlpha;
+		if (!state.texelSampleCenter) gpuState &= ~hybrid::TexelSampleCenter;
+		if (state.fogMode == 0) gpuState |= hybrid::LookupFog;
+		// Production command encoding normalizes winding after preserving the
+		// original third vertex as the flat-shading provoking vertex.
+		Vertex encoded[3] { vertices[0], vertices[1], vertices[2] };
+		if (signedArea < 0.f)
+			std::swap(encoded[1], encoded[2]);
+		auto command = triangle(encoded[0], encoded[1], encoded[2], gpuState);
+		command.minX = command.minY = 0;
+		command.maxX = command.maxY = 15;
+		command.textureWidth = command.textureHeight = 8;
+		command.mipOffsets[0] = 0;
+		command.mipLevelCount = 1;
+		command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
+		command.tspSampleOffset = state.tspPixelCenter ? 8 : 0;
+		if (!state.gouraud)
+			for (u32 vertex = 0; vertex < 3; ++vertex)
+			{
+				command.color[vertex] = pack(vertices[2].color);
+				command.offsetColor[vertex] = pack(vertices[2].offsetColor);
+			}
+		if (state.useOffsetColor) command.effects |= hybrid::UseOffsetColor;
+		if (state.fogMode == 1 && state.useOffsetColor)
+			command.effects |= hybrid::VertexFog;
+		if (state.fogMode == 3) command.effects |= hybrid::LookupFogAlpha;
+		if (state.colorClamp) command.effects |= hybrid::ColorClamp;
+		if (state.excludeClip) command.effects |= hybrid::ExcludeClip;
+		if (state.srcSelect) command.effects |= hybrid::SourceSelect;
+		if (state.dstSelect) command.effects |= hybrid::DestinationSelect;
+		if (state.dither) command.effects |= hybrid::Dither;
+		command.excludeX0 = state.excludeX0;
+		command.excludeY0 = state.excludeY0;
+		command.excludeX1 = state.excludeX1;
+		command.excludeY1 = state.excludeY1;
+		command.clampMin = pack(state.clampMin);
+		command.clampMax = pack(state.clampMax);
+		command.ditherDivisors = state.ditherDivisorR
+				| static_cast<u32>(state.ditherDivisorG) << 8
+				| static_cast<u32>(state.ditherDivisorB) << 16
+				| static_cast<u32>(state.ditherDivisorA) << 24;
+
+		std::vector<hybrid::Triangle> commands { command };
+		hybrid::Frame frame { 16, 16, &commands, &texture, &initialColors };
+		frame.fogTable = fogTable;
+		frame.fogColor = pack(state.fogRamColor);
+		frame.fogVertexColor = pack(state.fogVertexColor);
+		frame.fogDensity = state.fogDensity;
+		frame.initialSecondary = &initialSecondary;
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		std::vector<u32> secondary;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, nullptr, &secondary));
+		expectEqual(cpu, colors, depths);
+		ASSERT_EQ(secondary.size(), cpu.secondaryBuffer().size());
+		for (size_t i = 0; i < secondary.size(); ++i)
+			EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i]))
+					<< "secondary pixel=" << i;
 	}
 }
 
