@@ -1249,6 +1249,137 @@ TEST(HybridTileRenderer, MatchesOracleForSubpixelGeometryStateCorpus)
 	}
 }
 
+TEST(HybridTileRenderer, MatchesOracleForOverlappingSceneCorpus)
+{
+	Color texels[16];
+	std::vector<u32> texture;
+	for (u32 i = 0; i < 16; ++i)
+	{
+		texels[i] = { static_cast<u8>(i * 41 + 7), static_cast<u8>(i * 67 + 19),
+				static_cast<u8>(i * 23 + 101), static_cast<u8>(i * 31 + 47) };
+		texture.push_back(pack(texels[i]));
+	}
+	u32 random = 0x243f6a88u;
+	auto next = [&random]() {
+		random ^= random << 13;
+		random ^= random >> 17;
+		random ^= random << 5;
+		return random;
+	};
+	auto channel = [&next]() { return static_cast<u8>(next()); };
+
+	for (u32 scene = 0; scene < 64; ++scene)
+	{
+		SCOPED_TRACE(testing::Message() << "scene=" << scene);
+		const Color background { channel(), channel(), channel(), channel() };
+		const Color secondaryBackground { channel(), channel(), channel(), channel() };
+		SoftwareRasterizer cpu(16, 16);
+		cpu.clear(background);
+		cpu.clearSecondary(secondaryBackground);
+		std::vector<hybrid::Triangle> commands;
+		for (u32 polygon = 0; polygon < 12; ++polygon)
+		{
+			const u32 bits = next();
+			const float left = static_cast<float>(next() % 65) / 16.f;
+			const float top = static_cast<float>(next() % 65) / 16.f;
+			const float right = 11.f + static_cast<float>(next() % 65) / 16.f;
+			const float bottom = 11.f + static_cast<float>(next() % 65) / 16.f;
+			const float z0 = .25f + static_cast<float>(next() % 3840) / 512.f;
+			const float z1 = .25f + static_cast<float>(next() % 3840) / 512.f;
+			const float z2 = .25f + static_cast<float>(next() % 3840) / 512.f;
+			Vertex vertices[3] {
+				{ left, top, z0, { channel(), channel(), channel(), channel() },
+						{ channel(), channel(), channel(), channel() }, -.25f, -.125f },
+				{ right, top, z1, { channel(), channel(), channel(), channel() },
+						{ channel(), channel(), channel(), channel() }, 1.25f, -.125f },
+				{ left, bottom, z2, { channel(), channel(), channel(), channel() },
+						{ channel(), channel(), channel(), channel() }, -.25f, 1.125f },
+			};
+			PipelineState state;
+			state.depthMode = static_cast<DepthMode>(bits & 7);
+			state.depthWrite = (bits & (1u << 3)) != 0;
+			state.srcBlend = static_cast<BlendFactor>((bits >> 4) & 7);
+			state.dstBlend = static_cast<BlendFactor>((bits >> 7) & 7);
+			state.texture = { texels, 4, 4 };
+			state.bilinearFilter = (bits & (1u << 10)) != 0;
+			state.clampU = (bits & (1u << 11)) != 0;
+			state.clampV = (bits & (1u << 12)) != 0;
+			state.flipU = (bits & (1u << 13)) != 0;
+			state.flipV = (bits & (1u << 14)) != 0;
+			state.shadingInstruction = (bits >> 15) & 3;
+			state.useAlpha = (bits & (1u << 17)) != 0;
+			state.ignoreTextureAlpha = (bits & (1u << 18)) != 0;
+			state.useOffsetColor = (bits & (1u << 19)) != 0;
+			state.gouraud = (bits & (1u << 20)) != 0;
+			state.fpuPixelCenter = (bits & (1u << 21)) != 0;
+			state.tspPixelCenter = (bits & (1u << 22)) != 0;
+			state.texelSampleCenter = (bits & (1u << 23)) != 0;
+			state.srcSelect = (bits & (1u << 24)) != 0;
+			state.dstSelect = (bits & (1u << 25)) != 0;
+			state.colorClamp = (bits & (1u << 26)) != 0;
+			state.clampMin = { 13, 29, 5, 17 };
+			state.clampMax = { 239, 211, 227, 247 };
+			state.dither = (bits & (1u << 27)) != 0;
+			state.ditherDivisorR = 5;
+			state.ditherDivisorG = 6;
+			state.ditherDivisorB = 5;
+			state.ditherDivisorA = 8;
+			cpu.drawTriangle(vertices[0], vertices[1], vertices[2], state);
+
+			u32 gpuState = hybrid::makeState(static_cast<u32>(state.depthMode),
+					state.depthWrite, true, state.bilinearFilter, state.useAlpha,
+					state.shadingInstruction, static_cast<u32>(state.srcBlend),
+					static_cast<u32>(state.dstBlend));
+			if (state.clampU) gpuState |= hybrid::ClampU;
+			if (state.clampV) gpuState |= hybrid::ClampV;
+			if (state.flipU) gpuState |= hybrid::FlipU;
+			if (state.flipV) gpuState |= hybrid::FlipV;
+			if (state.ignoreTextureAlpha) gpuState |= hybrid::IgnoreTextureAlpha;
+			if (!state.texelSampleCenter) gpuState &= ~hybrid::TexelSampleCenter;
+			auto command = triangle(vertices[0], vertices[1], vertices[2], gpuState);
+			command.minX = command.minY = 0;
+			command.maxX = command.maxY = 15;
+			command.textureWidth = command.textureHeight = 4;
+			command.mipOffsets[0] = 0;
+			command.mipLevelCount = 1;
+			command.fpuSampleOffset = state.fpuPixelCenter ? 8 : 0;
+			command.tspSampleOffset = state.tspPixelCenter ? 8 : 0;
+			if (!state.gouraud)
+				for (u32 vertex = 0; vertex < 3; ++vertex)
+				{
+					command.color[vertex] = pack(vertices[2].color);
+					command.offsetColor[vertex] = pack(vertices[2].offsetColor);
+				}
+			if (state.useOffsetColor) command.effects |= hybrid::UseOffsetColor;
+			if (state.srcSelect) command.effects |= hybrid::SourceSelect;
+			if (state.dstSelect) command.effects |= hybrid::DestinationSelect;
+			if (state.colorClamp) command.effects |= hybrid::ColorClamp;
+			if (state.dither) command.effects |= hybrid::Dither;
+			command.clampMin = pack(state.clampMin);
+			command.clampMax = pack(state.clampMax);
+			command.ditherDivisors = state.ditherDivisorR
+					| static_cast<u32>(state.ditherDivisorG) << 8
+					| static_cast<u32>(state.ditherDivisorB) << 16
+					| static_cast<u32>(state.ditherDivisorA) << 24;
+			commands.push_back(command);
+		}
+
+		const std::vector<u32> initialColors(256, pack(background));
+		const std::vector<u32> initialSecondary(256, pack(secondaryBackground));
+		hybrid::Frame frame { 16, 16, &commands, &texture, &initialColors };
+		frame.initialSecondary = &initialSecondary;
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		std::vector<u32> secondary;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths, nullptr, &secondary));
+		expectEqual(cpu, colors, depths);
+		ASSERT_EQ(secondary.size(), cpu.secondaryBuffer().size());
+		for (size_t i = 0; i < secondary.size(); ++i)
+			EXPECT_EQ(secondary[i], pack(cpu.secondaryBuffer()[i]))
+					<< "secondary pixel=" << i;
+	}
+}
+
 TEST(HybridTileRenderer, MatchesOracleForCrossingAutosortDepths)
 {
 	const Color red { 230, 30, 20, 128 };
