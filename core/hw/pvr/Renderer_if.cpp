@@ -282,6 +282,26 @@ private:
 							static_cast<unsigned long long>(XXH64(context->getTADataBegin(), bytes, 0)),
 							static_cast<unsigned long long>(vramHash),
 							static_cast<unsigned long long>(registerHash));
+					const char *prefix = std::getenv("FLYCAST_PVR_SNAPSHOT_PREFIX");
+					if (prefix != nullptr && pageFrame != nullptr)
+					{
+						char *end;
+						const unsigned long requested = std::strtoul(pageFrame, &end, 10);
+						if (end != pageFrame && *end == '\0' && requested == FrameCount)
+						{
+							const std::string path = std::string(prefix) + ".input.context-"
+									+ std::to_string(contextIndex) + ".ta";
+							FILE *file = std::fopen(path.c_str(), "wbx");
+							bool saved = false;
+							if (file != nullptr)
+							{
+								saved = std::fwrite(context->getTADataBegin(), 1, bytes, file) == bytes;
+								saved = std::fclose(file) == 0 && saved;
+							}
+							std::fprintf(stderr, "PVR_TA_SNAPSHOT frame=%u context=%u address=%08x bytes=%zu saved=%u\n",
+									FrameCount, contextIndex, context->Address, bytes, saved ? 1u : 0u);
+						}
+					}
 				}
 			}
 		}

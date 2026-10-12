@@ -362,5 +362,22 @@ A muted Seaman frame-4 run verified both files at each stage. The log reports
 `f084342605d4c551`, matching the input fingerprint. Both stage register files
 have SHA256 `b0b22b67a8bccb306e034225c02e1ff47de25c8665d965f41bb35f5bef905892`.
 Artifacts: `/tmp/pvr-register-capture.FtdBJw/`. The owned emulator session was
-stopped after capture. Latched context and raw TA capture remain separate work;
-these files do not yet constitute a standalone scene replay.
+stopped after capture. Latched context capture remains separate work; these
+files do not yet constitute a standalone scene replay.
+
+### Raw TA capture
+
+The same selected-frame snapshot settings also save each linked context's
+raw byte stream before backend `Process`, as
+`<prefix>.input.context-<index>.ta`. The zero-based index preserves linked-list
+order. Retain the accompanying `PVR_INPUT` and `PVR_TA_SNAPSHOT` log records:
+they identify context address, byte count, hash, and write success. Files use
+exclusive creation, so a repeated prefix cannot silently replace evidence.
+
+A muted Seaman frame-4 capture saved context 0 at address `00555780`, with
+256 bytes and SHA256
+`60b87321a3d3b520b746310bd850a341da217f380cdc3deab4f279784b44ee4e`.
+Artifacts are in `/tmp/pvr-ta-capture.WgaMqf/`; the owned emulator session was
+stopped afterward. This live check exercised a single-context frame, not a
+multi-context capture. Raw TA is upstream input, not a substitute for the
+latched context state or the hardware's post-TA parameter representation.
