@@ -788,3 +788,24 @@ differing pixels and zero native-channel error. Input-comparator fixture tests
 also passed. This closes the independent framebuffer-write check for this
 early frame only; it does not extend that proof to the later translucent
 sequence, every captured/uncaptured state, host scanout, or Dreamcast hardware.
+
+The independent comparison was extended to frame 450 under
+`/tmp/pvr-lateswap-translucent.Nv9Phg/{sw,hybrid}` using the same settings and
+the verifier disabled. Both captures use RGB565 with dithering, base
+`0x200000`, stride 1280, and dimensions 640 × 480. The captured inputs **do
+not match**: registers and schema-2 context/configuration fields agree, but
+raw TA and processed VRAM differ. Consequently the 70121 differing output
+pixels (245338 bytes across full VRAM) cannot be attributed to rasterizer
+behavior. Both owned processes were stopped after capture.
+
+Software processed VRAM SHA-256:
+`aacf66d7cdd33829690658c474b88dab7236284d20c81fda21627514fe264294`;
+hybrid processed VRAM SHA-256:
+`57ae514311d46fb9546c5ae90961fa69e3b1ec2abb49bd2dd10bcb3974428ca4`.
+Raw TA hashes are respectively
+`9c9ea2818f20cc4cc716b005b5570c45dbd99d5b60c48a6e39fbaf7bbae0a36b`
+and `3b96630b2c142dd1974f589f124c7cee4a6348250f46e1b87345207c729735fd`.
+Do not publish this as a matched-input renderer diff. A next useful check is
+to extend same-run verification through each path's final VRAM commit, with
+the initial VRAM restored between them, rather than relying on equal frame
+numbers from separate game runs.
