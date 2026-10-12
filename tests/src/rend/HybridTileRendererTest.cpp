@@ -1655,7 +1655,16 @@ TEST(HybridTileRenderer, MatchesOracleForOverlappingSceneCorpus)
 	};
 	auto channel = [&next]() { return static_cast<u8>(next()); };
 
-	for (u32 scene = 0; scene < 64; ++scene)
+	u32 sceneCount = 64;
+	if (const char *requested = std::getenv("FLYCAST_HYBRID_OVERLAP_SCENES"))
+	{
+		char *end = nullptr;
+		const unsigned long value = std::strtoul(requested, &end, 10);
+		ASSERT_TRUE(end != requested && *end == '\0' && value >= 64 && value <= 1000000)
+				<< "FLYCAST_HYBRID_OVERLAP_SCENES must be between 64 and 1000000";
+		sceneCount = static_cast<u32>(value);
+	}
+	for (u32 scene = 0; scene < sceneCount; ++scene)
 	{
 		SCOPED_TRACE(testing::Message() << "scene=" << scene);
 		const Color background { channel(), channel(), channel(), channel() };
