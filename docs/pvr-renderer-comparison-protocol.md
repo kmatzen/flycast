@@ -939,3 +939,27 @@ emulation windows measured 1.0026, 1.0006, and 0.9976 speed. Log:
 `/tmp/pvr-postwrite-audio-soak.log`; the owned emulator was stopped. This
 establishes no observed regression in this repeated scene, not broad game,
 long-session, tear-free presentation, or glitch-free startup coverage.
+
+### Hardware probe substrate follow-up
+
+KallistiOS HEAD resolved to `568c3404c292a941bcf550465bd968f4fa249aa2`
+during this audit. Its [RTT example](https://github.com/KallistiOS/KallistiOS/blob/568c3404c292a941bcf550465bd968f4fa249aa2/examples/dreamcast/pvr/texture_render/texture_render.c)
+renders polygons to a texture and displays that texture, but does not compare
+readback bytes. It is a candidate execution substrate, not a golden corpus.
+The [PVR API](https://github.com/KallistiOS/KallistiOS/blob/568c3404c292a941bcf550465bd968f4fa249aa2/kernel/arch/dreamcast/include/dc/pvr.h)
+provides explicit-size RTT and a render-completion wait. Initial RTT support
+is 16-bit; pitch must be at least the render width and a multiple of four
+pixels. Primitive submissions require aligned storage. These constraints
+must be honored in a hardware probe rather than inferred from emulator-only
+success. Neither `sh-elf-gcc` nor `sh4-elf-gcc` was on PATH in this audit.
+
+Before treating such a probe as evidence, build a pinned executable, wait
+for actual render completion, read the target through the uncached physical
+VRAM view, and export raw bytes plus programmed registers and input vertices.
+Record whether execution was on a console or emulator; emulator output must
+never populate the hardware-golden category. Start with an allocated interior
+RGB565 target and guards. End-of-VRAM tests require dedicated memory ownership
+so wrapped output cannot overwrite live SDK lists or framebuffers. Dithering
+and alternate pack modes also require auditing SDK register programming, since
+writing registers before submission may be overwritten when rendering starts.
+No probe has yet been built or run, and no new hardware result is claimed.
