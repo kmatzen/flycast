@@ -809,3 +809,25 @@ Do not publish this as a matched-input renderer diff. A next useful check is
 to extend same-run verification through each path's final VRAM commit, with
 the initial VRAM restored between them, rather than relying on equal frame
 numbers from separate game runs.
+
+### Same-run final VRAM verification
+
+`FLYCAST_HYBRID_VERIFY_VRAM=1` extends `FLYCAST_HYBRID_VERIFY=1` when
+threaded rendering is disabled and either RTT or full framebuffer emulation
+is active. Other configurations do not emit VRAM verification results.
+Successful hybrid rendering performs the production framebuffer commit,
+captures the entire 8 MiB VRAM image, restores initial VRAM (invalidating
+locked texture pages), then runs and commits the software reference. The
+diagnostic reports byte differences between the resulting images. Single-pass
+commit code is shared with the normal hybrid path; multi-pass commits remain
+inside the existing hybrid pass loop. Verification leaves the software result
+active and adds substantial memory traffic, so it is not a performance test.
+
+A muted Seaman run with late-swap enabled verified 398 full VRAM images with
+zero byte mismatches, including the later 16-triangle, six-texture translucent
+scene. Log: `/tmp/pvr-vram-verifier.log`; the owned process was stopped.
+The app build, whitespace check, and existing 125 renderer tests passed.
+This exercises the new integration check for screen framebuffer writes; RTT
+and multipass coverage must be established separately. Both paths still share
+framebuffer conversion code, so agreement does not independently prove that
+conversion matches Dreamcast hardware, nor does it measure host scanout.

@@ -268,16 +268,44 @@ public:
 			tileCount = std::max(tileCount, passRegions.back().size());
 		}
 		const bool verifyHybrid = std::getenv("FLYCAST_HYBRID_VERIFY") != nullptr;
+		const bool verifyVram = verifyHybrid && !config::ThreadedRendering
+				&& std::getenv("FLYCAST_HYBRID_VERIFY_VRAM") != nullptr
+				&& (rendContext->isRTT || config::EmulateFramebuffer);
 		std::vector<Color> hybridInitial;
 		std::vector<u8> hybridVramInitial;
+		std::vector<u8> hybridVramResult;
 		if (verifyHybrid)
 		{
 			hybridInitial = frameStore;
 			if ((rendContext->isRTT && rendContext->render_passes.size() > 1)
-					|| config::EmulateFramebuffer)
+					|| config::EmulateFramebuffer || verifyVram)
 				hybridVramInitial.assign(&vram[0], &vram[0] + VRAM_SIZE);
 		}
 		const bool hybridRendered = tryRenderHybrid(width, height, passRegions, frameStore);
+		// Multi-pass rendering commits inside tryRenderHybrid. Single-pass
+		// rendering uses this same final commit for production and verification.
+		auto commitHybridSinglePass = [&]()
+		{
+			if (rendContext->render_passes.size() != 1)
+				return;
+			std::vector<RegionInfo> committedRegions;
+			for (const RegionInfo& region : passRegions[0])
+				if (region.flushAccumulate)
+					committedRegions.push_back(region);
+			if (committedRegions.empty() && passRegions[0].empty())
+				committedRegions.push_back({ 0, 0, static_cast<s32>(width),
+						static_cast<s32>(height), false, true, false, false,
+						true, true, true, true, true });
+			if (rendContext->isRTT)
+				writeFramebufferToVram(frameStore, committedRegions);
+			else
+				writeDisplayFramebufferToVram(frameStore, committedRegions);
+		};
+		if (hybridRendered && verifyVram)
+		{
+			commitHybridSinglePass();
+			hybridVramResult.assign(&vram[0], &vram[0] + VRAM_SIZE);
+		}
 		if (!hybridRendered)
 		{
 			if (!drainHybridAsync(frameStore))
@@ -307,21 +335,7 @@ public:
 			}
 			if (rendContext->isRTT || config::EmulateFramebuffer)
 			{
-				if (rendContext->render_passes.size() == 1)
-				{
-					std::vector<RegionInfo> committedRegions;
-					for (const RegionInfo& region : passRegions[0])
-						if (region.flushAccumulate)
-							committedRegions.push_back(region);
-					if (committedRegions.empty() && passRegions[0].empty())
-						committedRegions.push_back({ 0, 0, static_cast<s32>(width),
-								static_cast<s32>(height), false, true, false, false,
-								true, true, true, true, true });
-					if (rendContext->isRTT)
-						writeFramebufferToVram(frameStore, committedRegions);
-					else
-						writeDisplayFramebufferToVram(frameStore, committedRegions);
-				}
+				commitHybridSinglePass();
 				if (rendContext->isRTT)
 				{
 					rasterizer = screenRasterizer.get();
@@ -490,6 +504,14 @@ public:
 			// between passes remain observable to later framebuffer-texture reads.
 			for (size_t passIndex = 0; passIndex < passRegions.size(); ++passIndex)
 				renderRegions(passIndex, passRegions[passIndex]);
+		}
+		if (!hybridVramResult.empty())
+		{
+			size_t mismatches = 0;
+			for (size_t i = 0; i < hybridVramResult.size(); ++i)
+				mismatches += vram[i] != hybridVramResult[i];
+			std::fprintf(stderr, "HYBRID verify_vram bytes=%zu mismatches=%zu rtt=%u\n",
+					hybridVramResult.size(), mismatches, rendContext->isRTT);
 		}
 		if (!hybridVerification.empty())
 		{
