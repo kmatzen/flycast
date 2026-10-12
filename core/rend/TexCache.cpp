@@ -1181,38 +1181,13 @@ template void WriteTextureToVRam<2, 1, 0, 3>(u32 width, u32 height, const u8 *da
 template<typename FBLineWriter>
 static void writeFramebufferLW(u32 width, u32 height, const u8 *data, u32 dstAddr, FB_W_CTRL_type fb_w_ctrl, u32 linestride, const Rect& clip)
 {
-	int bpp = FBLineWriter::BytesPerPixel;
-
-	u32 padding = linestride;
-	if (padding > width * bpp)
-		padding = padding - width * bpp;
-	else
-		padding = 0;
-
-	const u8 *p = data + 4 * clip.origin.y * width;
-	dstAddr = framebufferWriteRowAddress(dstAddr, width, bpp, linestride, clip.origin.y);
-
-	const u32 clipWidth = std::min<u32>(width, clip.origin.x + clip.size.x);
-	height = std::min<u32>(height, clip.origin.y + clip.size.y);
-
-	FBPixelWriter pixWriter(dstAddr);
-	FBLineWriter lineWriter(fb_w_ctrl, pixWriter);
-
-	const unsigned dp1 = 4 * clip.origin.x;
-	const unsigned adv1 = bpp * clip.origin.x;
-	const unsigned adv2 = padding + (width - clipWidth) * bpp;
-	const unsigned dp2 = (width - clipWidth) * 4;
-
-	for (u32 l = clip.origin.y; l < height; l++)
-	{
-		p += dp1;
-		pixWriter.advance(adv1);
-
-		lineWriter.write(clip.origin.x, clipWidth, p, l);
-
-		pixWriter.advance(adv2);
-		p += dp2;
-	}
+	forEachFramebufferWriteRow(width, height, data, dstAddr,
+			FBLineWriter::BytesPerPixel, linestride, clip,
+			[&](u32 address, const u8 *source, u32 xmin, u32 xmax, u32 y) {
+				FBPixelWriter pixWriter(address);
+				FBLineWriter lineWriter(fb_w_ctrl, pixWriter);
+				lineWriter.write(xmin, xmax, source, y);
+			});
 }
 
 template<int Red, int Green, int Blue, int Alpha>

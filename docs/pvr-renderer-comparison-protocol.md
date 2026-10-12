@@ -857,3 +857,13 @@ existing zero/short-stride fallback policy is preserved, not newly validated.
 The app builds and all 128 tests pass on ARM64 and x86_64 Rosetta. This checks
 the exact address helper used by the production writer; full VRAM-write
 integration cases with these padded RGB888 layouts remain to be added.
+
+The production framebuffer row traversal was subsequently extracted into
+`forEachFramebufferWriteRow`, which is called directly by `writeFramebufferLW`.
+A byte-level regression executes that traversal with a test RGB888 storage
+callback, nonzero X/Y clipping, multiple rows, a one-byte row padding, and
+guard bytes. It compares the entire destination buffer against independently
+indexed expected bytes, including untouched pixels and padding. All 129 tests
+pass on ARM64 and x86_64 Rosetta, and the app builds. This covers production
+source/destination row traversal, but the test callback does not exercise
+`FBPixelWriter`'s physical VRAM mapping or the production color packer.

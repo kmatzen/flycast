@@ -26,6 +26,33 @@ TEST(SoftwareRasterizer, PreservesBytePaddingAtClippedRgb888RowStart)
 	EXPECT_EQ(framebufferWriteRowAddress(0, 640, 3, 0, 32), 32u * 1920u);
 }
 
+TEST(SoftwareRasterizer, WritesClippedRgb888RowsWithoutTouchingPadding)
+{
+	constexpr u32 width = 5, height = 4, base = 7, stride = 16;
+	std::vector<u8> source(width * height * 4);
+	for (size_t i = 0; i < source.size(); ++i)
+		source[i] = static_cast<u8>(i);
+	std::vector<u8> actual(base + stride * height + 8, 0xa5);
+	auto expected = actual;
+	struct Clip { struct Point { int x, y; }; Point origin, size; };
+	const Clip clip { { 1, 1 }, { 3, 2 } };
+	unsigned rows = 0;
+	forEachFramebufferWriteRow(width, height, source.data(), base, 3, stride, clip,
+			[&](u32 address, const u8 *pixel, u32 xmin, u32 xmax, u32 y) {
+				++rows;
+				EXPECT_EQ(y, rows);
+				for (u32 x = xmin; x < xmax; ++x, pixel += 4)
+					for (int channel : { 2, 1, 0 })
+						actual.at(address++) = pixel[channel];
+			});
+	for (u32 y = 1; y < 3; ++y)
+		for (u32 x = 1; x < 4; ++x)
+			for (u32 c = 0; c < 3; ++c)
+				expected[base + y * stride + x * 3 + c] = source[(y * width + x) * 4 + 2 - c];
+	EXPECT_EQ(rows, 2u);
+	EXPECT_EQ(actual, expected); // Includes clipped pixels, padding, and guards.
+}
+
 TEST(SoftwareRasterizer, TruncatesBackgroundDepthRegisterLowBits)
 {
 	ISP_BACKGND_D_type depth {};
