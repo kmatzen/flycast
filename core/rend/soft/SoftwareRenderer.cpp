@@ -884,9 +884,10 @@ private:
 			const RenderPass& pass = rendContext->render_passes[passIndex];
 			const std::vector<RegionInfo>& regions = passRegions[passIndex];
 			if (regions.empty() || (config::ModifierVolumes
-					&& (pass.mvo_count != previous.mvo_count
-							|| pass.mvo_tr_count != previous.mvo_tr_count)))
+					&& pass.mvo_tr_count != previous.mvo_tr_count))
 				return false;
+			const bool useOpaqueModifiers = config::ModifierVolumes
+					&& pass.mvo_count != previous.mvo_count;
 			const bool autosort = !config::PerStripSorting && pass.autosort;
 			const bool hasTranslucent = pass.tr_count != previous.tr_count;
 			const size_t pixelCount = static_cast<size_t>(width) * height;
@@ -894,6 +895,7 @@ private:
 			std::vector<u8> opaqueMask(pixelCount);
 			std::vector<u8> punchMask(pixelCount);
 			std::vector<u8> translucentMask(pixelCount);
+			std::vector<u8> opaqueModifierMask(pixelCount);
 			for (const RegionInfo& region : regions)
 			{
 				if (hasTranslucent && region.translucentPresent
@@ -911,6 +913,7 @@ private:
 					if (region.opaquePresent) std::fill(opaqueMask.begin() + first, opaqueMask.begin() + last, 1);
 					if (region.punchThroughPresent) std::fill(punchMask.begin() + first, punchMask.begin() + last, 1);
 					if (region.translucentPresent) std::fill(translucentMask.begin() + first, translucentMask.begin() + last, 1);
+					if (region.opaqueModifierPresent) std::fill(opaqueModifierMask.begin() + first, opaqueModifierMask.begin() + last, 1);
 				}
 			}
 
@@ -926,10 +929,12 @@ private:
 					|| commands.empty())
 				return false;
 			hybrid::Frame frame { width, height, &commands, &textureAtlas, &accumulation };
+			const std::vector<float> initialDepth = preservedDepth;
+			const std::vector<u32> initialSecondary = preservedSecondary;
 			if (passIndex != 0)
 			{
-				frame.initialDepths = &preservedDepth;
-				frame.initialSecondary = &preservedSecondary;
+				frame.initialDepths = &initialDepth;
+				frame.initialSecondary = &initialSecondary;
 			}
 			frame.depthClearMask = &depthClearMask;
 			frame.opaqueMask = &opaqueMask;
@@ -950,6 +955,31 @@ private:
 			if (!hybrid::render(frame, output, preservedDepth, &timing, &preservedSecondary)
 					|| output.size() != accumulation.size())
 				return false;
+			if (useOpaqueModifiers)
+			{
+				SoftwareRasterizer modifierRasterizer(width, height);
+				modifierRasterizer.restoreDepth(preservedDepth);
+				SoftwareRasterizer *savedRasterizer = rasterizer;
+				const std::vector<u8> *savedCoverageMask = activeCoverageMask;
+				rasterizer = &modifierRasterizer;
+				activeCoverageMask = &opaqueModifierMask;
+				drawModifierVolumes(rendContext->global_param_mvo,
+						previous.mvo_count, pass.mvo_count);
+				activeCoverageMask = savedCoverageMask;
+				rasterizer = savedRasterizer;
+				std::vector<u8> modifierMask(pixelCount);
+				const std::vector<u8>& stencil = modifierRasterizer.stencilBuffer();
+				for (size_t i = 0; i < modifierMask.size(); ++i)
+					modifierMask[i] = stencil[i] & 1;
+				frame.modifierMask = &modifierMask;
+				hybrid::Timing modifierTiming;
+				if (!hybrid::render(frame, output, preservedDepth, &modifierTiming,
+						&preservedSecondary) || output.size() != accumulation.size())
+					return false;
+				timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
+				timing.gpuMilliseconds += modifierTiming.gpuMilliseconds;
+				timing.readbackMilliseconds += modifierTiming.readbackMilliseconds;
+			}
 			accumulation = std::move(output);
 			std::vector<RegionInfo> committedRegions;
 			for (const RegionInfo& region : regions)
