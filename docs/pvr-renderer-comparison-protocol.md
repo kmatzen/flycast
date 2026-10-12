@@ -263,3 +263,21 @@ Commands:
 ./build-renderer-tests/tests/flycast-renderer-tests
 arch -x86_64 ./build-renderer-tests/tests/flycast-renderer-tests
 ```
+
+### Extended mixed-state geometry sweep
+
+The subpixel geometry/state corpus accepts `FLYCAST_HYBRID_GEOMETRY_SAMPLES`
+between 256 and 1000000; the default remains 256. It uses the same fixed random
+seed and reports the sample index in failures, so extending the run preserves
+the existing prefix and reproduces later failures. A 16384-sample ARM64/Metal
+run passed after the explicit fused-interpolation change (10.484 seconds):
+
+```sh
+FLYCAST_HYBRID_GEOMETRY_SAMPLES=16384 \
+  ./build-renderer-tests/tests/flycast-renderer-tests \
+  --gtest_filter=HybridTileRenderer.MatchesOracleForSubpixelGeometryStateCorpus
+```
+
+This extends differential coverage of mixed geometry and pixel states, not
+hardware conformance coverage. Each sample is an independent triangle; use
+the separate overlapping-scene corpus to exercise interactions among polygons.

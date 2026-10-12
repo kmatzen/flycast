@@ -5,7 +5,7 @@ different standards of evidence.
 
 | Renderer | Implementation | Platform support | Current evidence |
 | --- | --- | --- | --- |
-| Exact software oracle | Portable C++ | Platforms that build Flycast's software renderer | Unit tests and game-frame behavior tests |
+| Software reference | Portable C++ | Platforms that build Flycast's software renderer | Unit tests and game-frame behavior tests |
 | Accelerated hybrid backend | Metal compute with IOSurface presentation | Apple Metal platforms; direct IOSurface/OpenGL presentation is macOS-specific | Differential tests against the software oracle and live macOS testing |
 
 The hybrid renderer is **not** currently a portable GPU renderer. It does not
@@ -36,7 +36,8 @@ the reproducible 640x480 fill-rate workload completes in about 5.0 ms against a
 Dreamcast peak of 120 million pixels per second (2.0 million per 60 Hz frame).
 The separate 72-layer full-screen stress case is intentionally far outside that
 hardware envelope and takes about 62.4 ms; it is a throughput diagnostic, not a
-frame-rate claim. Tested Seaman scenes meet their game cadence. These
+frame-rate claim. GPU timings in tested Seaman scenes fit within a 60 Hz frame
+interval, but do not establish sustained end-to-end emulator cadence. These
 measurements must not be generalized to other Apple GPUs, operating systems, or
 graphics APIs without testing them there.
 

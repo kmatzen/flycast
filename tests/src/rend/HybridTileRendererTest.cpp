@@ -1471,7 +1471,17 @@ TEST(HybridTileRenderer, MatchesOracleForSubpixelGeometryStateCorpus)
 		return static_cast<float>(static_cast<s32>(next() % 513) - 128) / 256.f;
 	};
 
-	for (u32 sample = 0; sample < 256; ++sample)
+	// Keep ordinary test runs short, while allowing a reproducible deeper sweep.
+	u32 sampleCount = 256;
+	if (const char *requested = std::getenv("FLYCAST_HYBRID_GEOMETRY_SAMPLES"))
+	{
+		char *end = nullptr;
+		const unsigned long value = std::strtoul(requested, &end, 10);
+		ASSERT_TRUE(end != requested && *end == '\0' && value >= 256 && value <= 1000000)
+				<< "FLYCAST_HYBRID_GEOMETRY_SAMPLES must be between 256 and 1000000";
+		sampleCount = static_cast<u32>(value);
+	}
+	for (u32 sample = 0; sample < sampleCount; ++sample)
 	{
 		SCOPED_TRACE(testing::Message() << "sample=" << sample);
 		Vertex vertices[3];
