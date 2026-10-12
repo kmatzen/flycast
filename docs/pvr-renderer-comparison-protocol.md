@@ -195,6 +195,21 @@ at rows 111 through 382; they are not confined to one dither-table position.
 This spatial observation does not yet isolate sampling or interpolation as
 the cause. JSON reports are saved beside both capture sets as `comparison.json`.
 
+### Texture filtering isolation
+
+Repeating the no-dither build with the existing
+`-config config:rend.TextureFiltering=1` override in both backends reduces
+the frame-4 difference from 50 pixels to one. Processed VRAM remains
+byte-identical. The remaining pixel differs only in green, by one RGB565 code
+value. Captures, run logs, and the JSON report are in
+`/tmp/pvr-nearest.gC5JR1/`. Normal dithering code was restored and rebuilt
+after the experiment; forced-nearest sampling is not an accuracy fix.
+
+Together the interventions narrow this comparison from 1,732 differences
+(normal), to 50 (dither bypass), to one (dither bypass plus forced nearest).
+They establish sensitivity to dithering and texture filtering, but do not
+prove a particular rounding rule or which implementation matches hardware.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one
