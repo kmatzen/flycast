@@ -63,6 +63,14 @@ target_compile_definitions(flycast-renderer-tests PRIVATE FLYCAST_TEXCONV_STANDA
 
 if(APPLE AND NOT IOS)
   if(NOT LIBRETRO)
+   if(TARGET SDL2::SDL2)
+    add_executable(flycast-metal-window-probe EXCLUDE_FROM_ALL
+            src/rend/MetalWindowProbe.mm ../core/rend/soft/MetalPresentationFrame.mm)
+    target_include_directories(flycast-metal-window-probe PRIVATE ../core ../core/deps ../core/deps/glm)
+    target_compile_options(flycast-metal-window-probe PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(flycast-metal-window-probe PRIVATE SDL2::SDL2 nowide::nowide
+            "-framework Metal" "-framework Foundation" "-framework QuartzCore")
+   endif()
     add_executable(flycast-metal-ui-tests EXCLUDE_FROM_ALL
             src/rend/MetalUiTest.mm
             ../core/rend/soft/MetalPresentationFrame.mm

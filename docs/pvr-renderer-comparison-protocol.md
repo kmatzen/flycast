@@ -2249,3 +2249,38 @@ recompilation of the test source. Final evidence:
 `/tmp/pvr-metal-limits-rebuilt-native.log` (Metal validation enabled) and
 `/tmp/pvr-metal-limits-rebuilt-rosetta.log`. Earlier logs with unequal test
 counts came from a source edit during universal compilation and are superseded.
+
+### Native drawable baseline probe
+
+`flycast-metal-window-probe` is a separately built manual SDL/Metal executable.
+It opens a resizable native Metal window, uploads 120 independently owned
+converted framebuffer packets, and draws them through a nearest-sampled
+full-window triangle. It does not instantiate the emulator or its menus.
+
+```sh
+cmake --build build-renderer-tests --target flycast-metal-window-probe -j8
+MTL_DEBUG_LAYER=1 build-renderer-tests/tests/flycast-metal-window-probe
+```
+
+The baseline enables drawable VSync, allows three drawables, submits with
+`presentDrawable`, and waits for GPU completion before the next submission.
+The presented callback logs `presentedTime`; a zero timestamp is counted as
+skipped, not successful delivery. It requires all 120 callbacks and no skipped
+frames for success, with a two-second callback drain. Closing the window or
+getting an unavailable drawable fails the run. macOS older than 10.15.4 is
+rejected because the presentation callbacks are unavailable there.
+
+This isolates host presentation from PVR work and audio. It does not prove
+physical scanout, color accuracy of the composed window, sustained gameplay,
+or correct integration with Flycast's UI/window lifecycle. A baseline failure
+must not be hidden by counting GPU command completion as displayed frames.
+Serial baseline runs on the development M1 received all 120 callbacks but
+reported two skipped startup frames on ARM64 (IDs 0 and 1), and one under
+Rosetta (ID 0). Both therefore fail the lossless-delivery gate. Raw logs:
+`/tmp/pvr-metal-window-serial-native.log` (Metal validation enabled) and
+`/tmp/pvr-metal-window-serial-rosetta.log`. Executable SHA-256 was unchanged
+before and after both runs:
+`3e35879d42083973ff8766e1fd6da60f19432351c1250a2ebc7efc71ce651743`.
+Earlier exploratory logs are not this serial comparison. The next pacing
+experiment must keep the skipped-frame criterion rather than simply exclude
+the observed startup losses after the fact.
