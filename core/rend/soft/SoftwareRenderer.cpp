@@ -128,6 +128,7 @@ public:
 		rasterizer = nullptr;
 		rawFrameStore.clear();
 		presentationBuffer.clear();
+		hybridPresentation = {};
 		presentationWidth = presentationHeight = 0;
 		activeCoverageMask = nullptr;
 		backgroundCoverageMask = nullptr;
@@ -156,6 +157,7 @@ public:
 		const auto renderWallStart = std::chrono::steady_clock::now();
 		if (rendContext == nullptr)
 			return false;
+		hybridPresentation = {};
 		const u32 width = std::max(1u, rendContext->framebufferWidth);
 		const u32 height = std::max(1u, rendContext->framebufferHeight);
 		auto& targetRasterizer = rendContext->isRTT ? rttRasterizer : screenRasterizer;
@@ -1252,7 +1254,9 @@ private:
 			static_cast<u8>(rendContext->fog_col_vert.blue() * 255.f), 255 });
 		frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 		hybrid::Timing timing;
-		if (!hybrid::render(frame, output, depth, &timing, &secondary)
+		hybrid::PresentationSurface presentation;
+		if (!hybrid::render(frame, output, depth, &timing, &secondary,
+					rendContext->isRTT ? nullptr : &presentation)
 				|| output.size() != frameStore.size())
 			return reject("backend-failure");
 		std::vector<u8> modifierMask;
@@ -1274,7 +1278,8 @@ private:
 				modifierMask[i] = stencil[i] & 1;
 			frame.modifierMask = &modifierMask;
 			hybrid::Timing modifierTiming;
-			if (!hybrid::render(frame, output, depth, &modifierTiming, &secondary)
+			if (!hybrid::render(frame, output, depth, &modifierTiming, &secondary,
+					rendContext->isRTT ? nullptr : &presentation)
 					|| output.size() != frameStore.size())
 				return reject("modifier-backend-failure");
 			timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
@@ -1333,6 +1338,7 @@ private:
 					timing.simpleTranslucentFrames,
 					timing.orderedAutosortRejectReason, timing.opaqueTriangles,
 					timing.punchThroughTriangles, timing.translucentTriangles);
+		hybridPresentation = presentation;
 		return true;
 	}
 
@@ -2112,6 +2118,7 @@ private:
 	std::vector<Color> rawFrameStore;
 	PixelBuffer<u32> framebufferPixels;
 	std::vector<Color> presentationBuffer;
+	hybrid::PresentationSurface hybridPresentation;
 	u32 presentationWidth = 0;
 	u32 presentationHeight = 0;
 	const std::vector<u8> *activeCoverageMask = nullptr;

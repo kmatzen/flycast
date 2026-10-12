@@ -22,7 +22,10 @@ target_sources(${PROJECT_NAME} PRIVATE
 if(APPLE AND NOT IOS)
     target_sources(${PROJECT_NAME} PRIVATE soft/HybridTileRenderer.mm)
     find_library(HYBRID_METAL_LIBRARY Metal REQUIRED)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${HYBRID_METAL_LIBRARY})
+    find_library(HYBRID_IOSURFACE_LIBRARY IOSurface REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+            ${HYBRID_METAL_LIBRARY}
+            ${HYBRID_IOSURFACE_LIBRARY})
 endif()
 
 if(USE_OPENGL)

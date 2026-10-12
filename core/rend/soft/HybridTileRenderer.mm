@@ -1,6 +1,7 @@
 #include "HybridTileRenderer.h"
 
 #import <Foundation/Foundation.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 
 #include <array>
@@ -858,6 +859,11 @@ public:
 
   bool valid() const { return queue != nil && pipeline != nil; }
 
+  ~MetalState() {
+    if (presentationSurface != nullptr)
+      CFRelease(presentationSurface);
+  }
+
   id<MTLBuffer> buffer(BufferSlot slot, size_t length,
                        const void *contents = nullptr) {
     if (length == 0)
@@ -904,6 +910,54 @@ public:
     return visibility;
   }
 
+  id<MTLBuffer> presentationBuffer(u32 width, u32 height,
+                                   PresentationSurface *output) {
+    if (output == nullptr)
+      return buffer(Color, static_cast<size_t>(width) * height * sizeof(u32));
+    if (presentationSurface == nullptr || presentationWidth != width ||
+        presentationHeight != height) {
+      if (presentationSurface != nullptr)
+        CFRelease(presentationSurface);
+      presentationSurface = nullptr;
+      presentationBufferValue = nil;
+      presentationWidth = presentationHeight = 0;
+      const size_t bytesPerRow = static_cast<size_t>(width) * sizeof(u32);
+      const size_t byteCount = bytesPerRow * height;
+      NSDictionary *properties = @{
+        (id)kIOSurfaceWidth : @(width),
+        (id)kIOSurfaceHeight : @(height),
+        (id)kIOSurfaceBytesPerElement : @4,
+        (id)kIOSurfaceBytesPerRow : @(bytesPerRow),
+        (id)kIOSurfaceAllocSize : @(byteCount),
+        (id)kIOSurfacePixelFormat : @(0x42475241u), // 'BGRA'
+      };
+      IOSurfaceRef surface =
+          IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+      if (surface != nullptr && IOSurfaceGetBytesPerRow(surface) == bytesPerRow &&
+          IOSurfaceGetAllocSize(surface) >= byteCount) {
+        id<MTLBuffer> value = [device
+            newBufferWithBytesNoCopy:IOSurfaceGetBaseAddress(surface)
+                               length:byteCount
+                              options:MTLResourceStorageModeShared
+                          deallocator:nil];
+        if (value != nil) {
+          presentationSurface = surface;
+          presentationBufferValue = value;
+          presentationWidth = width;
+          presentationHeight = height;
+        } else {
+          CFRelease(surface);
+        }
+      } else if (surface != nullptr) {
+        CFRelease(surface);
+      }
+    }
+    output->handle = presentationSurface;
+    output->width = presentationWidth;
+    output->height = presentationHeight;
+    return presentationBufferValue;
+  }
+
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> pipeline = nil;
@@ -920,13 +974,18 @@ private:
   id<MTLTexture> visibility = nil;
   u32 visibilityWidth = 0;
   u32 visibilityHeight = 0;
+  IOSurfaceRef presentationSurface = nullptr;
+  id<MTLBuffer> presentationBufferValue = nil;
+  u32 presentationWidth = 0;
+  u32 presentationHeight = 0;
 };
 
 } // namespace
 
 bool render(const Frame &frame, std::vector<u32> &colors,
             std::vector<float> &depths, Timing *timing,
-            std::vector<u32> *secondaryOutput) {
+            std::vector<u32> *secondaryOutput,
+            PresentationSurface *presentation) {
   static MetalState metal;
   if (!metal.valid() || frame.width == 0 || frame.height == 0 ||
       frame.triangles == nullptr || frame.triangles->empty() ||
@@ -1336,7 +1395,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
       metal.upload(MetalState::HardwareVisibilityTiles,
                    hardwareVisibilityTiles);
   id<MTLBuffer> colorBuffer =
-      metal.buffer(MetalState::Color, pixelCount * sizeof(u32));
+      metal.presentationBuffer(frame.width, frame.height, presentation);
   id<MTLBuffer> depthBuffer =
       metal.buffer(MetalState::Depth, pixelCount * sizeof(float));
   id<MTLBuffer> overflowBuffer =

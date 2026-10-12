@@ -137,11 +137,21 @@ struct Timing {
   u32 translucentTriangles = 0;
 };
 
+// A borrowed native surface containing the packed color output. The handle is
+// valid until the next render that changes its dimensions. On macOS it is an
+// IOSurfaceRef and can be attached directly to an OpenGL rectangle texture.
+struct PresentationSurface {
+  void *handle = nullptr;
+  u32 width = 0;
+  u32 height = 0;
+};
+
 // Renders the currently supported exact subset into packed RGBA8 and IEEE
 // depth buffers. False means that Metal is unavailable or the frame violates
 // a checked invariant; callers must use the CPU oracle without partial output.
 bool render(const Frame &frame, std::vector<u32> &colors,
             std::vector<float> &depths, Timing *timing = nullptr,
-            std::vector<u32> *secondaryOutput = nullptr);
+            std::vector<u32> *secondaryOutput = nullptr,
+            PresentationSurface *presentation = nullptr);
 
 } // namespace rend::soft::hybrid

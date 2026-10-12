@@ -1,10 +1,11 @@
 // Differential/performance test for the production Metal tile backend.
 // clang++ -std=c++20 -O3 -fobjc-arc -Icore -Icore/deps/nowide/include \
-//   -framework Foundation -framework Metal \
+//   -framework Foundation -framework IOSurface -framework Metal \
 //   tests/manual/MetalTileRasterizerPrototype.mm \
 //   core/rend/soft/HybridTileRenderer.mm -o /tmp/metal-tile-prototype
 
 #include "rend/soft/HybridTileRenderer.h"
+#import <IOSurface/IOSurface.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -245,8 +246,19 @@ int main() {
   if (!rend::soft::hybrid::render(frame, actualColors, actualDepths))
     return 2;
   rend::soft::hybrid::Timing timing;
-  if (!rend::soft::hybrid::render(frame, actualColors, actualDepths, &timing))
+  rend::soft::hybrid::PresentationSurface presentation;
+  if (!rend::soft::hybrid::render(frame, actualColors, actualDepths, &timing,
+                                  nullptr, &presentation))
     return 2;
+  size_t presentationMismatches = actualColors.size();
+  if (presentation.handle != nullptr && presentation.width == Width &&
+      presentation.height == Height) {
+    const auto *surfaceColors = static_cast<const u32 *>(
+        IOSurfaceGetBaseAddress((IOSurfaceRef)presentation.handle));
+    presentationMismatches = 0;
+    for (size_t i = 0; i < actualColors.size(); ++i)
+      presentationMismatches += surfaceColors[i] != actualColors[i];
+  }
   const std::vector<Triangle> opaqueTriangles(triangles.begin(),
                                                triangles.begin() + 26);
   const rend::soft::hybrid::Frame opaqueFrame{Width, Height, &opaqueTriangles,
@@ -769,7 +781,8 @@ int main() {
       "ordered_opaque_gpu_ms=%.3f ordered_mismatches=%zu readback_ms=%.3f "
       "generic_translucent_gpu_ms=%.3f simple_translucent_gpu_ms=%.3f "
       "simple_translucent_mismatches=%zu "
-      "color_mismatches=%zu depth_bit_mismatches=%zu\n",
+      "presentation_mismatches=%zu color_mismatches=%zu "
+      "depth_bit_mismatches=%zu\n",
       triangles.size(), cpuMs, timing.encodeMilliseconds,
       timing.gpuMilliseconds, timing.gpuExecutionMilliseconds,
       opaqueTriangles.size(),
@@ -777,7 +790,8 @@ int main() {
       orderedOpaqueTiming.gpuMilliseconds, orderedMismatches,
       timing.readbackMilliseconds, genericTranslucentGpu,
       simpleTranslucentGpu, simpleTranslucentMismatches,
-      colorMismatches, depthMismatches);
+      presentationMismatches, colorMismatches, depthMismatches);
   return colorMismatches == 0 && depthMismatches == 0 &&
-      orderedMismatches == 0 && simpleTranslucentMismatches == 0 ? 0 : 1;
+      orderedMismatches == 0 && simpleTranslucentMismatches == 0 &&
+      presentationMismatches == 0 ? 0 : 1;
 }
