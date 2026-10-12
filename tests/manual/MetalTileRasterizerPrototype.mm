@@ -363,6 +363,19 @@ int main() {
     if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
         actualColors[0] != 0xffff0000u)
       return 1;
+
+    for (u32 pass = 0; pass < 2; ++pass) {
+      command.state |= rend::soft::hybrid::Trilinear;
+      if (pass != 0)
+        command.state |= rend::soft::hybrid::TrilinearPassB;
+      command.mipNumerator = .5625f;
+      commands = {command};
+      const rend::soft::hybrid::Frame trilinear{1, 1, &commands, &levels};
+      const u32 expected = pass == 0 ? 0xbf00bf00u : 0x40400000u;
+      if (!rend::soft::hybrid::render(trilinear, actualColors, actualDepths) ||
+          actualColors[0] != expected)
+        return 1;
+    }
   }
 
   std::vector<Triangle> invalid = triangles;

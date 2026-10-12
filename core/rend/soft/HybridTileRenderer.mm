@@ -176,7 +176,8 @@ inline uint sampleTexture(const device uint *texture, const Triangle t, float2 u
     uint textureOffset = t.textureOffset;
     if (t.mipLevelCount > 1) {
         const float selected = max(0.0f, floor(max(pvrD, 1.0f)) - 1.0f);
-        const uint level = min(t.mipLevelCount - 1, uint(selected));
+        const uint passOffset = (t.state & (1u << 25)) != 0 ? 1u : 0u;
+        const uint level = min(t.mipLevelCount - 1, uint(selected) + passOffset);
         width = max(1u, width >> level);
         height = max(1u, height >> level);
         textureOffset = t.mipOffsets[level];
@@ -311,12 +312,13 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         uint source = packColor(interpolated);
         if ((t.state & (1u << 11)) == 0)
             source |= 0xff000000u;
+        float pvrD = 1.0f;
         if ((t.state & (1u << 4)) != 0) {
             const float u = (t.u[0] * t.z[0] * s0 + t.u[1] * t.z[1] * s1
                     + t.u[2] * t.z[2] * s2) * inverseZ;
             const float v = (t.v[0] * t.z[0] * s0 + t.v[1] * t.z[1] * s1
                     + t.v[2] * t.z[2] * s2) * inverseZ;
-            const float pvrD = t.mipLevelCount > 1
+            pvrD = t.mipLevelCount > 1
                     ? max(0.0f, z == 0.0f ? 0.0f : t.mipNumerator / (z * z)) : 1.0f;
             uint texel = sampleTexture(texture, t, float2(u, v), pvrD);
             if ((t.state & (1u << 12)) != 0)
@@ -334,6 +336,15 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             }
             fogged.w = float(channel(source, 24));
             source = packColor(fogged);
+        }
+        if ((t.state & (1u << 24)) != 0) {
+            const float fraction = pvrD - floor(pvrD);
+            const float weight = (t.state & (1u << 25)) != 0
+                    ? fraction : 1.0f - fraction;
+            float4 weighted;
+            for (uint component = 0; component < 4; ++component)
+                weighted[component] = float(channel(source, component * 8)) * weight;
+            source = packColor(weighted);
         }
         if ((t.state & (1u << 13)) != 0 && channel(source, 24) < t.alphaReference)
             continue;
@@ -452,7 +463,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 24) != 0)
+        triangle.alphaReference > 255 || (triangle.state >> 26) != 0)
       return false;
     const s64 area = (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
                          (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -

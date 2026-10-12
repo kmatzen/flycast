@@ -24,6 +24,8 @@ enum StateBits : u32 {
   DestinationBlendShift = 19,
   Autosort = 1 << 22,
   LookupFog = 1 << 23,
+  Trilinear = 1 << 24,
+  TrilinearPassB = 1 << 25,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,

@@ -649,6 +649,8 @@ private:
 		if (state.alphaTest) encodedState |= hybrid::AlphaTest;
 		if (state.deferBlend) encodedState |= hybrid::Autosort;
 		if (state.fogMode == 0) encodedState |= hybrid::LookupFog;
+		if (state.trilinearFilter) encodedState |= hybrid::Trilinear;
+		if (state.trilinearFilter && state.trilinearPassB) encodedState |= hybrid::TrilinearPassB;
 		hybrid::Triangle command {};
 		for (u32 i = 0; i < 3; ++i)
 		{
@@ -754,7 +756,7 @@ private:
 			state.deferBlend = sorting;
 			if (!state.fpuPixelCenter || !state.tspPixelCenter || state.excludeClip || state.useOffsetColor
 					|| state.textureSuperSample
-					|| state.trilinearFilter || (state.fogMode != 0 && state.fogMode != 2) || state.colorClamp
+					|| (state.fogMode != 0 && state.fogMode != 2) || state.colorClamp
 					|| state.shadow || state.srcSelect || state.dstSelect || state.bumpMap
 					|| state.dither || poly.tsp1.full != static_cast<u32>(-1))
 			{
