@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <cstdio>
+#include <cstdlib>
 
 class SDLAudioBackend : AudioBackend
 {
@@ -19,6 +21,11 @@ class SDLAudioBackend : AudioBackend
 	unsigned sample_buffer_size = 0;
 	unsigned sample_count = 0;
 	SDL_AudioCVT audioCvt;
+	bool traceDelivery = false;
+	// Protected by stream_mutex; never log from the audio callback.
+	u64 deliveryCallbacks = 0, deliveryUnderruns = 0, deliverySilenceFrames = 0;
+	u64 deliveryDroppedFrames = 0, deliverySubmittedFrames = 0;
+	u64 deliveryNextReport = 44100 * 4;
 
 	SDL_AudioDeviceID recorddev {};
 	u8 recordbuf[480 * 4];
@@ -33,9 +40,16 @@ class SDLAudioBackend : AudioBackend
 		// Wait until there's enough samples to feed the kraken
 		unsigned oslen = len / sizeof(uint32_t);
 		unsigned islen = backend->needs_resampling ? std::ceil(oslen / backend->audioCvt.len_ratio) : oslen;
+		if (backend->traceDelivery)
+			++backend->deliveryCallbacks;
 
 		if (backend->sample_count < islen)
 		{
+			if (backend->traceDelivery)
+			{
+				++backend->deliveryUnderruns;
+				backend->deliverySilenceFrames += oslen;
+			}
 			// No data, just output a bit of silence for the underrun
 			memset(stream, 0, len);
 			backend->stream_mutex.unlock();
@@ -81,6 +95,10 @@ public:
 		sample_buffer_size = std::max<u32>(SAMPLE_COUNT * 2, config::AudioBufferSize);
 		sample_buffer = new uint32_t[sample_buffer_size]();
 		sample_count = 0;
+		traceDelivery = std::getenv("FLYCAST_AUDIO_TRACE_DELIVERY") != nullptr;
+		deliveryCallbacks = deliveryUnderruns = deliverySilenceFrames = 0;
+		deliveryDroppedFrames = deliverySubmittedFrames = 0;
+		deliveryNextReport = 44100 * 4;
 
 		// Support 44.1KHz (native) but also upsampling to 48KHz
 		SDL_AudioSpec wav_spec, out_spec;
@@ -144,7 +162,29 @@ public:
 		unsigned tocopy = samples < free_samples ? samples : free_samples;
 		memcpy(&sample_buffer[sample_count], frame, tocopy * sizeof(uint32_t));
 		sample_count += tocopy;
+		bool report = false;
+		u64 callbacks = 0, underruns = 0, silence = 0, dropped = 0, submitted = 0;
+		if (traceDelivery)
+		{
+			deliveryDroppedFrames += samples - tocopy;
+			deliverySubmittedFrames += samples;
+			if (deliverySubmittedFrames >= deliveryNextReport)
+			{
+				report = true;
+				callbacks = deliveryCallbacks;
+				underruns = deliveryUnderruns;
+				silence = deliverySilenceFrames;
+				dropped = deliveryDroppedFrames;
+				submitted = deliverySubmittedFrames;
+				deliveryNextReport = deliverySubmittedFrames + 44100 * 4;
+			}
+		}
 		stream_mutex.unlock();
+		if (report)
+			std::fprintf(stderr, "AUDIO_DELIVERY backend=sdl2 callbacks=%llu underruns=%llu silence_output_frames=%llu dropped_input_frames=%llu submitted_input_frames=%llu buffer_frames=%u\n",
+					(unsigned long long)callbacks, (unsigned long long)underruns,
+					(unsigned long long)silence, (unsigned long long)dropped,
+					(unsigned long long)submitted, sample_buffer_size);
 
 		return 1;
 	}
@@ -240,4 +280,3 @@ public:
 static SDLAudioBackend sdlAudioBackend;
 
 #endif
-

@@ -729,3 +729,26 @@ after measurement. The app build and whitespace check passed. No pixel
 operations, framebuffer ordering, or render-completion waits were removed.
 The measurement does not prove live pixel equivalence, stable audio, good
 display pacing, or sustained performance across other scenes and games.
+
+### Real audio delivery with late-swap pacing
+
+`FLYCAST_AUDIO_TRACE_DELIVERY=1` enables cumulative SDL2 audio counters.
+The callback counts invocations, underruns, and output stereo frames replaced
+with silence under its existing stream mutex. The producer snapshots those
+counters and reports outside that mutex every roughly four seconds of
+submitted 44.1 kHz input. It also counts dropped input frames. No logging is
+performed on the audio callback thread. Counters reset on backend initialization;
+they are not listening tests or host-device deadline measurements.
+
+With the computer output muted, the real `audio:backend=sdl2` backend and a
+2822-frame buffer, the single-threaded full-framebuffer hybrid/late-swap run
+recorded six startup/early underruns (6144 output frames replaced by silence)
+by 353280 submitted input frames. The count remained six through 1413120
+submitted frames and 1384 callbacks, with zero dropped input frames. Thus
+there were no additional reported underruns across approximately 24 seconds
+of subsequent submitted audio. Three later emulation windows measured
+1.0016, 0.9995, and 0.9978 speed. This is stronger than the null-backend timing
+result, but not evidence of glitch-free startup or long-session audio stability.
+Log: `/tmp/pvr-late-swap-audio.log`; the owned emulator was stopped after
+measurement, and computer output remains muted. Build and whitespace checks
+passed. No audio buffer policy or renderer pixel operations were changed.
