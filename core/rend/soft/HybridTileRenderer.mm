@@ -1129,6 +1129,12 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     timing->hardwareVisibilityTiles = static_cast<u32>(std::count(
         hardwareVisibilityTiles.begin(), hardwareVisibilityTiles.end(), u8{1}));
     timing->totalTiles = static_cast<u32>(hardwareVisibilityTiles.size());
+    for (const Triangle &triangle : *frame.triangles) {
+      const u32 listType = (triangle.state >> ListTypeShift) & 3;
+      timing->opaqueTriangles += listType == 0;
+      timing->punchThroughTriangles += listType == 1;
+      timing->translucentTriangles += listType == 2;
+    }
   }
   return true;
 }

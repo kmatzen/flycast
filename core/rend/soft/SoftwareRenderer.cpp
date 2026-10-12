@@ -1064,15 +1064,20 @@ private:
 			totalTiming.readbackMilliseconds += timing.readbackMilliseconds;
 			totalTiming.hardwareVisibilityTiles += timing.hardwareVisibilityTiles;
 			totalTiming.totalTiles += timing.totalTiles;
+			totalTiming.opaqueTriangles += timing.opaqueTriangles;
+			totalTiming.punchThroughTriangles += timing.punchThroughTriangles;
+			totalTiming.translucentTriangles += timing.translucentTriangles;
 			previous = pass;
 		}
 		frameStore = std::move(committed);
 		if (trace)
-			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u\n",
+			std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u lists=%u/%u/%u\n",
 					rendContext->render_passes.size(), totalTriangles, totalTextures,
 					totalTiming.encodeMilliseconds, totalTiming.gpuMilliseconds,
 					totalTiming.readbackMilliseconds, totalCpuTranslucentMilliseconds,
-					totalTiming.hardwareVisibilityTiles, totalTiming.totalTiles);
+					totalTiming.hardwareVisibilityTiles, totalTiming.totalTiles,
+					totalTiming.opaqueTriangles, totalTiming.punchThroughTriangles,
+					totalTiming.translucentTriangles);
 		return true;
 	}
 
@@ -1237,11 +1242,12 @@ private:
 					}
 				}
 		if (trace)
-			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u\n",
+			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u lists=%u/%u/%u\n",
 					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,
 					timing.gpuMilliseconds, timing.readbackMilliseconds,
 					cpuTranslucentMilliseconds, timing.hardwareVisibilityTiles,
-					timing.totalTiles);
+					timing.totalTiles, timing.opaqueTriangles,
+					timing.punchThroughTriangles, timing.translucentTriangles);
 		return true;
 	}
 
