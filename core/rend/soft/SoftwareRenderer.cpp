@@ -1,4 +1,7 @@
 #include "SoftwareRenderer.h"
+#ifdef FLYCAST_NATIVE_METAL_UI
+#include "wsi/metal_context.h"
+#endif
 
 #include "HybridTileRenderer.h"
 #include "SoftwareRasterizer.h"
@@ -137,6 +140,13 @@ public:
 				&& std::getenv("FLYCAST_PVR_DECOUPLED_PRESENT") != nullptr;
 #endif
 		BaseTextureCacheData::SetDirectXColorOrder(false);
+#ifdef FLYCAST_NATIVE_METAL_UI
+		if (nativeMetalPresentationActive()) {
+			if (!emulationThreadRendering)
+				throw FlycastException("Native Metal requires decoupled framebuffer rendering");
+			return true;
+		}
+#endif
 #ifdef USE_OPENGL
 		// The software rasterizer still uses OpenGL to present its completed
 		// framebuffer. Initialize the shared GL capability/shader state before
@@ -675,6 +685,10 @@ public:
 	{
 		if (clearLastFrame)
 			return false;
+#ifdef FLYCAST_NATIVE_METAL_UI
+		if (nativeMetalPresentationActive())
+			return bool(selectedPresentation());
+#endif
 		return drawFrame();
 	}
 

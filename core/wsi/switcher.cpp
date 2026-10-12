@@ -22,6 +22,10 @@
 #include "context.h"
 #include "cfg/option.h"
 #include "oslib/i18n.h"
+#ifdef FLYCAST_NATIVE_METAL_UI
+#include "metal_context.h"
+#include <cstdlib>
+#endif
 
 #include "gl_context.h"
 #include "rend/dx9/dxcontext.h"
@@ -32,6 +36,12 @@
 
 void initRenderApi(void *window, void *display)
 {
+#ifdef FLYCAST_NATIVE_METAL_UI
+    if (isSoftware(config::RendererType) && std::getenv("FLYCAST_PVR_NATIVE_METAL")) {
+        createNativeMetalContext(window, display);
+        return;
+    }
+#endif
 #ifdef USE_VULKAN
 	if (isVulkan(config::RendererType))
 	{

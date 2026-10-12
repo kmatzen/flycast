@@ -2576,3 +2576,46 @@ This confirms application linkage and existing-path recovery, not native Metal
 frontend activation. The build still warns that local libpng/libomp binaries
 target newer macOS versions than the application's deployment target; it is
 not evidence of compatibility with older macOS releases.
+
+### First opt-in native emulator context
+
+The default-off build option now includes an experimental SDL Metal graphics
+context. With renderer 7 and `FLYCAST_PVR_NATIVE_METAL=1`, it creates the Metal
+window/view, manages drawable-size updates and ImGui teardown, and provides the
+software renderer's selected immutable packet to the native driver. Software
+renderer initialization skips GL resource creation in this context.
+
+This first integration requires threaded rendering, framebuffer emulation,
+`FLYCAST_PVR_DECOUPLED_PRESENT=1`, nearest display filtering, and no rotation.
+It uses the driver's fixed 60 Hz presentation request; display filtering,
+rotation, configurable pacing, minimize/recovery, and late-callback accounting
+across renderer epochs are not complete. Callbacks log packet IDs and times
+without retaining or dereferencing a renderer. Existing GL swap counters are
+not native presentation counters. The default OpenGL path remains unchanged.
+
+Run the bounded integration smoke test with:
+
+```sh
+node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY
+```
+
+The corrected first run passes in
+`/tmp/pvr-native-context-serial-20261012/report.json`: native context activation,
+660 matching full-VRAM CPU/Metal comparisons, 791 presentation callbacks,
+zero zero-time callbacks, all 660 probe IDs seen with positive presentation
+times, normal exit, and no forced termination. The 600 measured IDs have
+first-presentation gap median/p95 approximately 16.666 ms, but maximum
+99.995 ms and 20 gaps over 20 ms. Thus even this lossless sample is not a
+sustained frame-rate pass. It uses null audio and verification overhead; it
+does not demonstrate playable Seaman, audio quality, or hardware conformance.
+
+Application SHA-256:
+`9ac77bf6226578dbb65199b84c2342bf052f6d9f8d7e75580bafeaa59f37995e`.
+The same binary passes the existing OpenGL injected-error regression in
+`/tmp/pvr-native-context-gl-regression-20261012/report.json`.
+
+The initial native test at `/tmp/pvr-native-context-first-20261012` timed out
+because the runner omitted serial-console settings needed to receive the ELF
+end marker. It recorded 660 matching VRAM comparisons but is not a passing
+test. The corrected runner explicitly enables serial output; no application
+binary change was needed between these two native runs.

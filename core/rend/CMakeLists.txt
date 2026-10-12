@@ -20,8 +20,11 @@ target_sources(${PROJECT_NAME} PRIVATE
         norend/norend.cpp)
 
 if(APPLE AND NOT IOS)
-    option(FLYCAST_BUILD_METAL_UI_DRIVER "Compile experimental native Metal UI driver (not selected at runtime)" OFF)
+    option(FLYCAST_BUILD_METAL_UI_DRIVER "Compile experimental opt-in native Metal UI context" OFF)
     if(FLYCAST_BUILD_METAL_UI_DRIVER AND NOT LIBRETRO)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE FLYCAST_NATIVE_METAL_UI)
+        target_sources(${PROJECT_NAME} PRIVATE ../wsi/metal_context.mm)
+        set_source_files_properties(../wsi/metal_context.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_sources(${PROJECT_NAME} PRIVATE soft/MetalUiDriver.mm soft/MetalPresentationFrame.mm
                 "${IMGUI_BACKENDS_DIR}/imgui_impl_metal.mm")
         set_source_files_properties(soft/MetalUiDriver.mm soft/MetalPresentationFrame.mm
