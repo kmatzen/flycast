@@ -2619,3 +2619,28 @@ because the runner omitted serial-console settings needed to receive the ELF
 end marker. It recorded 660 matching VRAM comparisons but is not a passing
 test. The corrected runner explicitly enables serial output; no application
 binary change was needed between these two native runs.
+
+### Native presentation with verifier disabled and SDL audio
+
+The native runner now accepts `--timing`. This disables Metal validation and
+CPU/Metal verification, selects SDL2 audio, and records final audio counters,
+missing frame IDs, and first-presentation gaps for measured IDs 60–659.
+`integrationPassed` and exit success mean the test ran to completion, not that
+frame delivery or audio passed a performance gate. `performanceValidated`
+remains false. The computer remained muted while the SDL audio backend ran.
+
+Two serial runs of the same application hash above produced:
+
+| Run | Missing measured IDs | Zero-time callbacks | Audio underruns | Long measured gaps |
+| --- | --- | --- | --- | --- |
+| Timing 1 | None | 0 | 1 (1024 silence frames) | One, 33.331 ms |
+| Timing 2 | 199, 426 | 0 | 0 | Four, maximum 33.332 ms |
+
+Both median and p95 gaps were approximately 16.666 ms. Logs/reports are in
+`/tmp/pvr-native-timing1-20261012` and `/tmp/pvr-native-timing2-20261012`.
+Their initial report schema called the integration field `passed`; it has
+since been renamed `integrationPassed` to avoid confusing it with performance.
+Neither run simultaneously establishes lossless cadence and clean audio.
+Missing IDs with no skipped drawable callbacks point to a loss before native
+presentation, but producer/selection tracing is still needed to locate it.
+This simple probe does not establish Seaman performance or audio quality.

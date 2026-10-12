@@ -4,9 +4,10 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Integration smoke test with a finite cadence ELF, not a performance gate.
-const [appArg, elfArg, outputArg, ...extra] = process.argv.slice(2);
-if (!appArg || !elfArg || !outputArg || extra.length)
-  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY');
+const [appArg, elfArg, outputArg, mode, ...extra] = process.argv.slice(2);
+if (!appArg || !elfArg || !outputArg || extra.length || (mode && mode !== '--timing'))
+  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing]');
+const timing = mode === '--timing';
 const app = resolve(appArg), elf = resolve(elfArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -17,9 +18,15 @@ for (const key of Object.keys(env))
 Object.assign(env, { MTL_DEBUG_LAYER: '1', FLYCAST_PVR_NATIVE_METAL: '1',
   FLYCAST_PVR_DECOUPLED_PRESENT: '1', FLYCAST_HYBRID_SOFT: '1',
   FLYCAST_HYBRID_VERIFY: '1', FLYCAST_HYBRID_VERIFY_VRAM: '1' });
+if (timing) {
+  env.MTL_DEBUG_LAYER = '0';
+  delete env.FLYCAST_HYBRID_VERIFY;
+  delete env.FLYCAST_HYBRID_VERIFY_VRAM;
+  env.FLYCAST_AUDIO_TRACE_DELIVERY = '1';
+}
 let stdout = '', stderr = '', timedOut = false, forced = false, stopping = false;
 const result = await new Promise((accept, reject) => {
-  const child = spawn(app, ['-config', 'audio:backend=null', '-config', 'config:pvr.rend=7',
+  const child = spawn(app, ['-config', `audio:backend=${timing ? 'sdl2' : 'null'}`, '-config', 'config:pvr.rend=7',
     '-config', 'config:rend.ThreadedRendering=yes', '-config', 'config:rend.EmulateFramebuffer=yes',
     '-config', 'config:rend.LinearInterpolation=no', '-config', 'config:rend.Rotate90=no',
     '-config', 'config:rend.vsync=yes', '-config', 'config:Debug.SerialConsoleEnabled=yes',
@@ -53,14 +60,24 @@ const missingIds = Array.from({ length: 660 }, (_, id) => id).filter(id => !disp
 const combined = stdout + '\n' + stderr;
 const comparisons = [...combined.matchAll(/HYBRID verify_vram bytes=8388608 mismatches=0 rtt=0/g)].length;
 const mismatch = /HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(combined);
-const passed = stopping && !timedOut && !forced && (result.code === 0 || result.signal === 'SIGINT')
+const integrationPassed = stopping && !timedOut && !forced && (result.code === 0 || result.signal === 'SIGINT')
   && appHash === hash(app) && elfHash === hash(elf)
-  && stderr.includes('PVR_METAL_CONTEXT active=1') && comparisons >= 40 && !mismatch
+  && stderr.includes('PVR_METAL_CONTEXT active=1') && (timing ? comparisons === 0 : comparisons >= 40) && !mismatch
+  && (!timing || /AUDIO_DELIVERY_FINAL backend=sdl2/.test(stderr))
   && callbacks.filter(x => x.time > 0).length >= 40;
-const report = { appHash, elfHash, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
-  skippedCallbacks: callbacks.filter(x => x.time === 0).length, passed,
+const first = new Map();
+for (const record of callbacks)
+  if (record.time > 0 && record.id >= 60 && record.id < 660 && !first.has(record.id)) first.set(record.id, record);
+const records = [...first.values()].sort((a, b) => a.time - b.time);
+const gaps = records.slice(1).map((x, i) => ({ from: records[i].id, to: x.id, ms: (x.time - records[i].time) * 1000 }));
+const sorted = gaps.map(x => x.ms).sort((a, b) => a - b);
+const report = { appHash, elfHash, timing, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
+  skippedCallbacks: callbacks.filter(x => x.time === 0).length, integrationPassed,
   missingIds, measuredMissingIds: missingIds.filter(id => id >= 60),
+  measuredFirstPresentationGapMs: { p50: sorted[Math.floor(sorted.length * .5)], p95: sorted[Math.floor(sorted.length * .95)], max: sorted.at(-1) },
+  longGaps: gaps.filter(x => x.ms > 20),
+  audio: stderr.match(/AUDIO_DELIVERY_FINAL[^\n]*/)?.[0],
   performanceValidated: false, hardwareValidated: false };
 writeFileSync(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 console.log(report);
-if (!passed) process.exitCode = 1;
+if (!integrationPassed) process.exitCode = 1;
