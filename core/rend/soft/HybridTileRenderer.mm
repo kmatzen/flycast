@@ -50,6 +50,7 @@ struct Triangle {
     uint mipLevelCount;
     float mipNumerator;
     uint shadeScale;
+    uint area1Index;
 };
 
 struct Constants {
@@ -284,7 +285,11 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     uint sortedSequences[MaxSortedFragments];
     uint sortedCount = 0;
     for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
-        const Triangle t = triangles[tileReferences[i]];
+        const uint triangleIndex = tileReferences[i];
+        const Triangle base = triangles[triangleIndex];
+        const bool selectArea1 = constants.useModifierMask != 0
+                && modifierMask[offset] != 0 && base.area1Index != 0xffffffffu;
+        const Triangle t = selectArea1 ? triangles[base.area1Index] : base;
         if (int(pixel.x) < t.minX || int(pixel.x) > t.maxX
                 || int(pixel.y) < t.minY || int(pixel.y) > t.maxY)
             continue;
@@ -371,7 +376,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             uint position = sortedCount++;
             while (position != 0 && (z < sortedDepths[position - 1]
                     || (z == sortedDepths[position - 1]
-                            && tileReferences[i] < sortedSequences[position - 1]))) {
+                            && triangleIndex < sortedSequences[position - 1]))) {
                 sortedColors[position] = sortedColors[position - 1];
                 sortedDepths[position] = sortedDepths[position - 1];
                 sortedStates[position] = sortedStates[position - 1];
@@ -381,7 +386,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             sortedColors[position] = source;
             sortedDepths[position] = z;
             sortedStates[position] = t.state;
-            sortedSequences[position] = tileReferences[i];
+            sortedSequences[position] = triangleIndex;
             continue;
         }
         if ((t.state & (1u << 3)) != 0)
@@ -476,8 +481,12 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         triangle.maxX < triangle.minX || triangle.maxY < triangle.minY ||
         triangle.maxX >= static_cast<s32>(frame.width) ||
         triangle.maxY >= static_cast<s32>(frame.height) ||
-        triangle.alphaReference > 255 || (triangle.state >> 27) != 0 ||
+        triangle.alphaReference > 255 || (triangle.state >> 28) != 0 ||
         triangle.shadeScale > 256)
+      return false;
+    if (triangle.area1Index != std::numeric_limits<u32>::max() &&
+        (triangle.area1Index >= frame.triangles->size() ||
+         ((*frame.triangles)[triangle.area1Index].state & Area1Only) == 0))
       return false;
     const s64 area = (static_cast<s64>(triangle.x[1]) - triangle.x[0]) *
                          (static_cast<s64>(triangle.y[2]) - triangle.y[0]) -
@@ -506,6 +515,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
           return false;
       }
     }
+    if ((triangle.state & Area1Only) != 0)
+      continue;
     for (s32 y = triangle.minY / static_cast<s32>(TileSize);
          y <= triangle.maxY / static_cast<s32>(TileSize); ++y)
       for (s32 x = triangle.minX / static_cast<s32>(TileSize);

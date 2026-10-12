@@ -144,6 +144,7 @@ Triangle testTriangle(u32 color, float z, u32 state) {
                     0,             0,          0};
   if ((state & rend::soft::hybrid::Textured) != 0)
     triangle.mipLevelCount = 1;
+  triangle.area1Index = std::numeric_limits<u32>::max();
   return triangle;
 }
 
@@ -230,6 +231,7 @@ int main() {
          static_cast<s32>(Width) - 1 - inset,
          static_cast<s32>(Height) - 1 - inset});
     triangles.back().mipLevelCount = 1;
+    triangles.back().area1Index = std::numeric_limits<u32>::max();
   }
   std::vector<u32> expectedColors(Width * Height), actualColors;
   std::vector<float> expectedDepths(Width * Height), actualDepths;
@@ -339,6 +341,28 @@ int main() {
     test.modifierMask = &modifierMask;
     if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
         actualColors[0] != 0xff193264u)
+      return 1;
+  }
+
+  {
+    Triangle area0 = testTriangle(
+        0xff0000ffu, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    Triangle area1 = testTriangle(
+        0xff00ff00u, 1.f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0) |
+            rend::soft::hybrid::Area1Only);
+    area0.area1Index = 1;
+    std::vector<Triangle> commands{area0, area1};
+    std::vector<u8> modifierMask{1};
+    rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    test.modifierMask = &modifierMask;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff00ff00u)
+      return 1;
+    modifierMask[0] = 0;
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths) ||
+        actualColors[0] != 0xff0000ffu)
       return 1;
   }
 

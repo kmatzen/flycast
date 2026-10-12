@@ -27,6 +27,7 @@ enum StateBits : u32 {
   Trilinear = 1 << 24,
   TrilinearPassB = 1 << 25,
   IntensityShadow = 1 << 26,
+  Area1Only = 1 << 27,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -62,9 +63,10 @@ struct Triangle {
   u32 mipLevelCount;
   float mipNumerator;
   u32 shadeScale;
+  u32 area1Index;
 };
 
-static_assert(sizeof(Triangle) == 164, "Metal command layout changed");
+static_assert(sizeof(Triangle) == 168, "Metal command layout changed");
 
 struct Frame {
   u32 width = 0;

@@ -562,7 +562,8 @@ private:
 	bool appendHybridTriangle(const PolyParam& poly, u32 ia, u32 ib, u32 ic,
 			const PipelineState& state, std::vector<hybrid::Triangle>& commands,
 			std::vector<u32>& textureAtlas,
-			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets)
+			std::unordered_map<const Color *, std::array<u32, 11>>& textureOffsets,
+			bool area1Data = false)
 	{
 		if (ia >= rendContext->verts.size() || ib >= rendContext->verts.size()
 				|| ic >= rendContext->verts.size())
@@ -652,15 +653,18 @@ private:
 		if (state.trilinearFilter) encodedState |= hybrid::Trilinear;
 		if (state.trilinearFilter && state.trilinearPassB) encodedState |= hybrid::TrilinearPassB;
 		if (state.shadow && state.intensityShadow) encodedState |= hybrid::IntensityShadow;
+		if (area1Data) encodedState |= hybrid::Area1Only;
 		hybrid::Triangle command {};
 		for (u32 i = 0; i < 3; ++i)
 		{
 			command.x[i] = x[i];
 			command.y[i] = y[i];
 			command.z[i] = vertices[i].z;
-			command.u[i] = vertices[i].u;
-			command.v[i] = vertices[i].v;
-			command.color[i] = packedColor(state.gouraud ? vertices[i].color : flatVertex.color);
+			command.u[i] = area1Data ? vertices[i].u1 : vertices[i].u;
+			command.v[i] = area1Data ? vertices[i].v1 : vertices[i].v;
+			command.color[i] = packedColor(state.gouraud
+					? (area1Data ? vertices[i].color1 : vertices[i].color)
+					: (area1Data ? flatVertex.color1 : flatVertex.color));
 		}
 		command.textureOffset = mipOffsets[0];
 		command.textureWidth = textureWidth;
@@ -674,8 +678,11 @@ private:
 		std::copy(mipOffsets.begin(), mipOffsets.end(), command.mipOffsets);
 		command.mipLevelCount = state.texture ? state.texture.mipLevelCount : 0;
 		command.shadeScale = state.shadeScale;
+		command.area1Index = std::numeric_limits<u32>::max();
 		if (command.mipLevelCount > 1)
 		{
+			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
+			auto vertexV = [&](u32 i) { return area1Data ? vertices[i].v1 : vertices[i].v; };
 			const double inverseArea = 1. / static_cast<double>(std::abs(area));
 			const float barycentricDx[3] {
 				static_cast<float>(-(static_cast<s64>(y[2]) - y[1]) * 16 * inverseArea),
@@ -688,9 +695,9 @@ private:
 				static_cast<float>((static_cast<s64>(x[1]) - x[0]) * 16 * inverseArea),
 			};
 			auto step = [&](bool u, const float *barycentric) {
-				return (u ? vertices[0].u : vertices[0].v) * vertices[0].z * barycentric[0]
-						+ (u ? vertices[1].u : vertices[1].v) * vertices[1].z * barycentric[1]
-						+ (u ? vertices[2].u : vertices[2].v) * vertices[2].z * barycentric[2];
+				return (u ? vertexU(0) : vertexV(0)) * vertices[0].z * barycentric[0]
+						+ (u ? vertexU(1) : vertexV(1)) * vertices[1].z * barycentric[1]
+						+ (u ? vertexU(2) : vertexV(2)) * vertices[2].z * barycentric[2];
 			};
 			const float qDxHost = vertices[0].z * barycentricDx[0]
 					+ vertices[1].z * barycentricDx[1] + vertices[2].z * barycentricDx[2];
@@ -701,8 +708,8 @@ private:
 			const float vqDxHost = step(false, barycentricDx);
 			const float vqDyHost = step(false, barycentricDy);
 			float referenceQ = vertices[0].z;
-			float referenceUQ = vertices[0].u * vertices[0].z;
-			float referenceVQ = vertices[0].v * vertices[0].z;
+			float referenceUQ = vertexU(0) * vertices[0].z;
+			float referenceVQ = vertexV(0) * vertices[0].z;
 			if (!state.dCalcCtrl)
 			{
 				const s32 sampleXFixed = minX * 16 + 8;
@@ -715,10 +722,10 @@ private:
 				const float q1 = static_cast<float>(edgeAt(2, 0) * inverseArea);
 				const float q2 = static_cast<float>(edgeAt(0, 1) * inverseArea);
 				const float q = vertices[0].z * q0 + vertices[1].z * q1 + vertices[2].z * q2;
-				const float uq = vertices[0].u * vertices[0].z * q0
-						+ vertices[1].u * vertices[1].z * q1 + vertices[2].u * vertices[2].z * q2;
-				const float vq = vertices[0].v * vertices[0].z * q0
-						+ vertices[1].v * vertices[1].z * q1 + vertices[2].v * vertices[2].z * q2;
+				const float uq = vertexU(0) * vertices[0].z * q0
+						+ vertexU(1) * vertices[1].z * q1 + vertexU(2) * vertices[2].z * q2;
+				const float vq = vertexV(0) * vertices[0].z * q0
+						+ vertexV(1) * vertices[1].z * q1 + vertexV(2) * vertices[2].z * q2;
 				const float sampleX = sampleXFixed / 16.f - state.nativeOriginX;
 				const float sampleY = sampleYFixed / 16.f - state.nativeOriginY;
 				referenceQ = q - qDxHost * sampleX - qDyHost * sampleY;
@@ -756,12 +763,27 @@ private:
 			PipelineState state;
 			configureState(poly, state, punchThrough, sorting);
 			state.deferBlend = sorting;
-			if (!state.fpuPixelCenter || !state.tspPixelCenter || state.excludeClip || state.useOffsetColor
-					|| state.textureSuperSample
-					|| (state.fogMode != 0 && state.fogMode != 2) || state.colorClamp
-					|| (state.shadow && !state.intensityShadow)
-					|| state.srcSelect || state.dstSelect || state.bumpMap
-					|| state.dither || poly.tsp1.full != static_cast<u32>(-1))
+			auto unsupported = [](const PipelineState& candidate) {
+				return !candidate.fpuPixelCenter || !candidate.tspPixelCenter
+						|| candidate.excludeClip || candidate.useOffsetColor
+						|| candidate.textureSuperSample
+						|| (candidate.fogMode != 0 && candidate.fogMode != 2)
+						|| candidate.colorClamp || candidate.srcSelect || candidate.dstSelect
+						|| candidate.bumpMap || candidate.dither;
+			};
+			const bool hasArea1 = state.shadow && !state.intensityShadow
+					&& poly.tsp1.full != static_cast<u32>(-1);
+			PipelineState area1State;
+			if (hasArea1)
+			{
+				if (punchThrough)
+					return false;
+				area1State = state;
+				configureArea1(poly, area1State);
+				area1State.deferBlend = sorting;
+			}
+			if (unsupported(state) || (hasArea1 && unsupported(area1State))
+					|| (state.shadow && !state.intensityShadow && !hasArea1))
 			{
 				static u32 reports = 0;
 				if (std::getenv("FLYCAST_HYBRID_TRACE") != nullptr && reports++ < 40)
@@ -783,9 +805,21 @@ private:
 				const u32 c = rendContext->idx[poly.first + vertex];
 				if (vertex & 1)
 					std::swap(a, b);
+				const size_t primaryIndex = commands.size();
 				if (!appendHybridTriangle(poly, a, b, c, state, commands,
 						textureAtlas, textureOffsets))
 					return false;
+				if (hasArea1 && commands.size() != primaryIndex)
+				{
+					const size_t area1Index = commands.size();
+					if (!appendHybridTriangle(poly, a, b, c, area1State, commands,
+							textureAtlas, textureOffsets, true))
+						return false;
+					if (commands.size() != area1Index + 1
+							|| area1Index > std::numeric_limits<u32>::max())
+						return false;
+					commands[primaryIndex].area1Index = static_cast<u32>(area1Index);
+				}
 			}
 		}
 		return true;
@@ -817,8 +851,7 @@ private:
 		const bool hasOpaque = pass.op_count != 0;
 		const bool hasPunch = pass.pt_count != 0;
 		const bool hasTranslucent = pass.tr_count != 0;
-		if (pass.mvo_count != 0 && (!rendContext->fpu_shad_scale.intensity_shadow
-				|| (hasTranslucent && !autosort)))
+		if (pass.mvo_count != 0 && hasTranslucent && !autosort)
 			return reject("unsupported-modifier-volume-mode");
 		if (pass.mvo_count != 0)
 			for (u32 i = 0; i < std::min<u32>(pass.tr_count,
