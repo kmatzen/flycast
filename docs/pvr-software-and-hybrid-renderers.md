@@ -83,6 +83,6 @@ screen presentation.
 
 Native Metal presentation consumes immutable images after VRAM write/read
 conversion; it does not bypass framebuffer semantics with a raw GPU surface.
-It remains experimental: display rotation/filter options, configurable pacing,
+It remains experimental: display rotation, configurable pacing,
 native completion accounting across renderer epochs, and broader window/UI
 lifecycle validation are unfinished. The default presentation path is unchanged.

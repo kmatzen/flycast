@@ -11,11 +11,12 @@ id<MTLRenderPipelineState> createMetalPresentationPipeline(id<MTLDevice> device,
         "vertex V vert(uint i [[vertex_id]]) {\n"
         "float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};\n"
         "V v; v.p=float4(p[i],0,1); v.uv=float2((p[i].x+1)*.5,(1-p[i].y)*.5); return v; }\n"
-        "fragment float4 frag(V v [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
+        "fragment float4 frag(V v [[stage_in]], texture2d<float> t [[texture(0)]], constant uint& linear [[buffer(0)]]) {\n"
         "constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
+        "constexpr sampler l(coord::normalized, address::clamp_to_edge, filter::linear);\n"
         // Match the GL presentation texture's GL_TEXTURE_SWIZZLE_A=GL_ONE:
         // framebuffer alpha is data, not window-compositor transparency.
-        "return float4(t.sample(s,v.uv).rgb,1.0); }";
+        "return float4((linear ? t.sample(l,v.uv) : t.sample(s,v.uv)).rgb,1.0); }";
     id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:error];
     if (library == nil) return nil;
     MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
@@ -26,7 +27,7 @@ id<MTLRenderPipelineState> createMetalPresentationPipeline(id<MTLDevice> device,
 }
 
 bool encodeMetalPresentation(id<MTLRenderCommandEncoder> encoder,
-    id<MTLRenderPipelineState> pipeline, id<MTLTexture> texture, MTLViewport viewport)
+    id<MTLRenderPipelineState> pipeline, id<MTLTexture> texture, MTLViewport viewport, bool linearFiltering)
 {
     if (encoder == nil || pipeline == nil || texture == nil
         || !std::isfinite(viewport.originX) || !std::isfinite(viewport.originY)
@@ -36,6 +37,8 @@ bool encodeMetalPresentation(id<MTLRenderCommandEncoder> encoder,
     [encoder setViewport:viewport];
     [encoder setRenderPipelineState:pipeline];
     [encoder setFragmentTexture:texture atIndex:0];
+    const unsigned linear = linearFiltering ? 1 : 0;
+    [encoder setFragmentBytes:&linear length:sizeof(linear) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     return true;
 }

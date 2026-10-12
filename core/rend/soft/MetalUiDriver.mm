@@ -15,8 +15,9 @@ struct CompletionQueue {
 
 class API_AVAILABLE(macos(10.15.4)) MetalUiDriver final : public ImGuiDriver {
 public:
-    MetalUiDriver(CAMetalLayer *layer, MetalFrameProvider provider, MetalPresentationObserver observer)
-        : layer(layer), provider(std::move(provider)), observer(std::move(observer))
+    MetalUiDriver(CAMetalLayer *layer, MetalFrameProvider provider, MetalPresentationObserver observer,
+            std::function<bool()> linearFiltering)
+        : layer(layer), provider(std::move(provider)), observer(std::move(observer)), linearFiltering(std::move(linearFiltering))
     {
         if (!layer || !layer.device || !this->provider || ImGui::GetIO().BackendRendererUserData)
             throw FlycastException("Metal UI requires a configured layer and an unowned ImGui backend");
@@ -62,7 +63,8 @@ public:
             const double imageWidth = std::min(width, height * frame->aspectRatio);
             const double imageHeight = imageWidth / frame->aspectRatio;
             if (!encodeMetalPresentation(encoder, pipeline, image,
-                MTLViewport{(width - imageWidth) / 2, (height - imageHeight) / 2, imageWidth, imageHeight, 0, 1})) {
+                MTLViewport{(width - imageWidth) / 2, (height - imageHeight) / 2, imageWidth, imageHeight, 0, 1},
+                linearFiltering && linearFiltering())) {
                 [encoder endEncoding];
                 throw FlycastException("Metal framebuffer encoding failed");
             }
@@ -137,16 +139,18 @@ private:
     MTLRenderPassDescriptor *pass;
     MetalFrameProvider provider;
     MetalPresentationObserver observer;
+    std::function<bool()> linearFiltering;
     std::shared_ptr<CompletionQueue> completed = std::make_shared<CompletionQueue>();
     std::unordered_map<std::string, id<MTLTexture>> textures;
     ImDrawData *ui = nullptr;
     bool frameRendered = false;
 };
 }
-std::unique_ptr<ImGuiDriver> createMetalUiDriver(void *layer, MetalFrameProvider provider, MetalPresentationObserver observer)
+std::unique_ptr<ImGuiDriver> createMetalUiDriver(void *layer, MetalFrameProvider provider, MetalPresentationObserver observer,
+        std::function<bool()> linearFiltering)
 {
     if (@available(macOS 10.15.4, *))
-        return std::make_unique<MetalUiDriver>((__bridge CAMetalLayer*)layer, std::move(provider), std::move(observer));
+        return std::make_unique<MetalUiDriver>((__bridge CAMetalLayer*)layer, std::move(provider), std::move(observer), std::move(linearFiltering));
     throw FlycastException("Metal UI requires macOS 10.15.4");
 }
 }

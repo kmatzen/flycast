@@ -2771,3 +2771,29 @@ The updated runner's existing GL injected-error control passes in
 These are lifecycle checks, not visual UI-composition, interactive-playthrough,
 audio, or cadence validation. GL delivery counters remain zero in native mode
 and must not be interpreted as native display accounting.
+
+### Native display filtering
+
+Native presentation now honors `rend.LinearInterpolation` instead of rejecting
+it. The driver queries the setting for each presentation and selects nearest
+or linear clamp-to-edge sampling in the final display shader. Upload bytes,
+framebuffer conversion, and PVR texture filtering are unchanged. Earlier
+notes requiring nearest display filtering describe the initial prototype;
+that restriction is removed, while rotation remains unsupported.
+
+The framebuffer pipeline readback test now exercises both filters in RGBA
+and BGRA targets. Nearest output remains byte-exact. Linear RGB is compared
+against independently computed pixel-center interpolation with one-byte
+quantization tolerance; display alpha remains exactly 255. All six Metal tests
+pass with validation on ARM64 and Rosetta in
+`/tmp/pvr-native-filter-tests.log` and `/tmp/pvr-native-filter-rosetta.log`.
+
+The full app builds. `run-pvr-native-metal.mjs --linear` passes at
+`/tmp/pvr-native-linear-20261012/report.json`: 660 matching full-VRAM
+comparisons, all 660 probe IDs presented, zero skipped callbacks, normal exit.
+Application SHA-256:
+`053acd468425c7cfc88fed06968e244910bd2406f87756659ab4494c8c86afc5`.
+The run still has seven measured gaps over 20 ms (maximum 33.332 ms) and uses
+null audio plus verification, so it is not a performance pass. The uniform
+probe frames validate integration, while the offscreen tests establish the
+scaling/filtering behavior; neither is a hardware PVR conformance result.

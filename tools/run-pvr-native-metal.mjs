@@ -7,10 +7,11 @@ import { analyzeStages } from './read-pvr-stages.mjs';
 // Integration smoke test with a finite cadence ELF, not a performance gate.
 const [appArg, elfArg, outputArg, ...options] = process.argv.slice(2);
 if (!appArg || !elfArg || !outputArg || new Set(options).size !== options.length
-    || options.some(x => !['--timing', '--stages', '--ordered'].includes(x)))
-  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing] [--stages] [--ordered]');
+    || options.some(x => !['--timing', '--stages', '--ordered', '--linear'].includes(x)))
+  throw Error('Usage: node tools/run-pvr-native-metal.mjs APP CADENCE_ELF NEW_OUTPUT_DIRECTORY [--timing] [--stages] [--ordered] [--linear]');
 const timing = options.includes('--timing'), stages = options.includes('--stages');
 const ordered = options.includes('--ordered');
+const linear = options.includes('--linear');
 const app = resolve(appArg), elf = resolve(elfArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -33,7 +34,7 @@ let stdout = '', stderr = '', timedOut = false, forced = false, stopping = false
 const result = await new Promise((accept, reject) => {
   const child = spawn(app, ['-config', `audio:backend=${timing ? 'sdl2' : 'null'}`, '-config', 'config:pvr.rend=7',
     '-config', 'config:rend.ThreadedRendering=yes', '-config', 'config:rend.EmulateFramebuffer=yes',
-    '-config', 'config:rend.LinearInterpolation=no', '-config', 'config:rend.Rotate90=no',
+    '-config', `config:rend.LinearInterpolation=${linear ? 'yes' : 'no'}`, '-config', 'config:rend.Rotate90=no',
     '-config', 'config:rend.vsync=yes', '-config', 'config:Debug.SerialConsoleEnabled=yes',
     '-config', 'config:Debug.SerialPTY=false', elf], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let grace, finish;
@@ -90,7 +91,7 @@ if (stages) {
       selections: records.filter(x => x.stage === 'select' && x.id === id),
       callbacks: callbacks.filter(x => x.id === id) })) };
 }
-const report = { appHash, elfHash, timing, stages, ordered, stageReport, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
+const report = { appHash, elfHash, timing, stages, ordered, linear, stageReport, ...result, timedOut, forced, comparisons, callbacks: callbacks.length,
   orderedFinal: stderr.match(/PVR_ORDERED_FINAL[^\n]*/)?.[0],
   skippedCallbacks: callbacks.filter(x => x.time === 0).length, integrationPassed,
   missingIds, measuredMissingIds: missingIds.filter(id => id >= 60),

@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_metal.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <vector>
 #include "rend/soft/MetalPresentationFrame.h"
 
@@ -101,7 +102,8 @@ TEST(MetalUi, PresentationPipelinePreservesOrientationChannelsAndViewport)
         auto frame = PresentationFrame::create(2, 2, 1.f, {}, source);
         id<MTLTexture> texture = uploadMetalPresentationFrame(device, *frame);
         ASSERT_NE(texture, nil);
-        for (MTLPixelFormat format : {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm}) {
+        for (MTLPixelFormat format : {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm})
+        for (bool linear : {false, true}) {
             NSError *error = nil;
             id<MTLRenderPipelineState> pipeline = createMetalPresentationPipeline(device, format, &error);
             ASSERT_NE(pipeline, nil);
@@ -119,7 +121,7 @@ TEST(MetalUi, PresentationPipelinePreservesOrientationChannelsAndViewport)
             id<MTLCommandBuffer> command = [queue commandBuffer];
             id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
             EXPECT_FALSE(encodeMetalPresentation(encoder, pipeline, texture, MTLViewport{0, 0, 0, 1, 0, 1}));
-            EXPECT_TRUE(encodeMetalPresentation(encoder, pipeline, texture, MTLViewport{1, 1, 4, 4, 0, 1}));
+            EXPECT_TRUE(encodeMetalPresentation(encoder, pipeline, texture, MTLViewport{1, 1, 4, 4, 0, 1}, linear));
             [encoder endEncoding];
             [command commit];
             [command waitUntilCompleted];
@@ -134,7 +136,20 @@ TEST(MetalUi, PresentationPipelinePreservesOrientationChannelsAndViewport)
                     Color expected = x >= 1 && x < 5 && y >= 1 && y < 5
                         ? source[((y - 1) / 2) * 2 + (x - 1) / 2] : Color{0, 0, 0, 255};
                     expected.a = 255; // Display is opaque; upload bytes remain unchanged.
-                    EXPECT_EQ(actual, expected) << "at " << x << ',' << y;
+                    if (linear && x >= 1 && x < 5 && y >= 1 && y < 5) {
+                        // Pixel-center positions for 2x enlargement, clamped
+                        // independently of the shader at the texture edges.
+                        const float u = std::clamp((float(x) - 1.5f) / 2.f, 0.f, 1.f);
+                        const float v = std::clamp((float(y) - 1.5f) / 2.f, 0.f, 1.f);
+                        auto channel = [&](u8 Color::*field) {
+                            return (source[0].*field * (1-u) + source[1].*field * u) * (1-v)
+                                + (source[2].*field * (1-u) + source[3].*field * u) * v;
+                        };
+                        EXPECT_NEAR(actual.r, channel(&Color::r), 1.f);
+                        EXPECT_NEAR(actual.g, channel(&Color::g), 1.f);
+                        EXPECT_NEAR(actual.b, channel(&Color::b), 1.f);
+                        EXPECT_EQ(actual.a, 255);
+                    } else EXPECT_EQ(actual, expected) << "at " << x << ',' << y;
                 }
         }
     }

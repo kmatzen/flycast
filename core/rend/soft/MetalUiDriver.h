@@ -10,5 +10,6 @@ using MetalPresentationObserver = std::function<void(std::shared_ptr<const Prese
 // updates drawableSize. No other ImGui renderer backend may remain initialized.
 // Observer runs on the UI thread; time==0 reports a skipped drawable.
 std::unique_ptr<ImGuiDriver> createMetalUiDriver(void *metalLayer,
-    MetalFrameProvider provider, MetalPresentationObserver observer);
+    MetalFrameProvider provider, MetalPresentationObserver observer,
+    std::function<bool()> linearFiltering = {});
 }

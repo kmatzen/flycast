@@ -20,8 +20,8 @@ public:
     {
         if (!config::ThreadedRendering || !config::EmulateFramebuffer
                 || !std::getenv("FLYCAST_PVR_DECOUPLED_PRESENT")
-                || config::Rotate90 || config::LinearInterpolation)
-            throw FlycastException("Experimental Metal presentation requires threaded EFB, decoupled presentation, no rotation, and nearest filtering");
+                || config::Rotate90)
+            throw FlycastException("Experimental Metal presentation requires threaded EFB, decoupled presentation, and no rotation");
         try {
             if (!sdl_recreate_window(SDL_WINDOW_METAL))
                 throw FlycastException("Cannot create Metal window");
@@ -44,7 +44,7 @@ public:
                         std::fprintf(stderr, "PVR_METAL_PRESENT sequence=%llu id=%d time=%.9f\n",
                             (unsigned long long)frame->sequence, id, time);
                     }
-                });
+                }, [] { return bool(config::LinearInterpolation); });
             active = true;
             std::fprintf(stderr, "PVR_METAL_CONTEXT active=1\n");
         } catch (...) {

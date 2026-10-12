@@ -11,10 +11,12 @@ namespace rend::soft {
 id<MTLTexture> uploadMetalPresentationFrame(id<MTLDevice> device, const PresentationFrame& frame);
 id<MTLRenderPipelineState> createMetalPresentationPipeline(id<MTLDevice> device,
     MTLPixelFormat outputFormat, NSError **error);
-// Encodes a nearest-sampled, unrotated display image into an existing pass.
+// Encodes an unrotated display image into an existing pass. Filtering affects
+// only window scaling, never the uploaded framebuffer bytes.
 // The caller owns pass clearing, viewport/layout, overlays, submission, and
 // resource lifetime. This function neither ends the pass nor presents it.
 bool encodeMetalPresentation(id<MTLRenderCommandEncoder> encoder,
-    id<MTLRenderPipelineState> pipeline, id<MTLTexture> texture, MTLViewport viewport);
+    id<MTLRenderPipelineState> pipeline, id<MTLTexture> texture, MTLViewport viewport,
+    bool linearFiltering = false);
 }
 #endif
