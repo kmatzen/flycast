@@ -872,21 +872,10 @@ private:
 };
 
 // write to 64-bit vram area (render to texture)
-class TexPixelWriter
+class TexPixelWriter : public TexturePixelWriter
 {
 public:
-	TexPixelWriter(u16 *dest) : dest(dest) {}
-
-	void write(u16 pixel) {
-		*dest++ = pixel;
-	}
-
-	void advance(int bytes) {
-		(u8 *&)dest += bytes;
-	}
-
-private:
-	u16 *dest;
+	TexPixelWriter(u16 *dest) : TexturePixelWriter(dest, &vram[0], VRAM_SIZE) {}
 };
 
 // 0555 KRGB 16 bit  (default)	Bit 15 is the value of fb_kval[7].
@@ -1122,7 +1111,8 @@ static void writeTexture(u32 width, u32 height, const u8 *data, u16 *dst, FB_W_C
 			static_cast<int>(width), static_cast<int>(destinationPitch) });
 	if (xmin >= xmax || ymin >= static_cast<int>(height))
 		return;
-	TexPixelWriter pixWriter(dst + static_cast<size_t>(ymin) * destinationPitch + xmin);
+	TexPixelWriter pixWriter(dst);
+	pixWriter.advance(static_cast<u32>(ymin) * linestride + xmin * 2);
 	data += (static_cast<size_t>(ymin) * width + xmin) * 4;
 	const int destinationAdvance = linestride - (xmax - xmin) * 2;
 	const int sourceAdvance = (static_cast<int>(width) - xmax + xmin) * 4;

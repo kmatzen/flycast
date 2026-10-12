@@ -886,3 +886,15 @@ cases. The app builds and all 131 tests pass on ARM64 and x86_64 Rosetta.
 This establishes agreement between the production mapping and the modeled
 bank layout; it is not a physical-hardware observation and does not yet test
 write side effects, dirty tracking, RTT pointer wrapping, or Naomi geometry.
+
+The RTT writer audit found raw destination-pointer increments with no VRAM
+boundary handling. `TexPixelWriter` now uses the tested `TexturePixelWriter`:
+destinations within VRAM are represented as offsets masked to its power-of-two
+size, while external staging-buffer destinations retain linear addressing.
+The initial clipped-row displacement is applied after selecting the storage
+mode, so it cannot first construct a pointer beyond VRAM. Byte writes and row
+advances wrap without integer division. The regression checks end-of-VRAM
+pixel continuation, a row advance crossing the boundary, and linear staging.
+The app builds and all 132 tests pass on ARM64 and x86_64 Rosetta. This removes
+an unbounded host-pointer path and implements the modeled VRAM address wrap;
+real-hardware RTT boundary behavior and live RTT scenes remain unverified.

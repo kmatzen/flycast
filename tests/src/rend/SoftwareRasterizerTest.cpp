@@ -9,6 +9,28 @@
 
 using namespace rend::soft;
 
+TEST(SoftwareRasterizer, WrapsTextureWritesAndRowAdvancesWithinVram)
+{
+	alignas(u16) u8 memory[8] {};
+	TexturePixelWriter writer(reinterpret_cast<u16 *>(memory + 6), memory, sizeof(memory));
+	writer.write(0x1234);
+	writer.write(0x5678);
+	EXPECT_EQ(memory[6], 0x34);
+	EXPECT_EQ(memory[7], 0x12);
+	EXPECT_EQ(memory[0], 0x78);
+	EXPECT_EQ(memory[1], 0x56);
+	writer.advance(12);
+	writer.write(0xabcd);
+	EXPECT_EQ(memory[6], 0xcd);
+	EXPECT_EQ(memory[7], 0xab);
+	alignas(u16) u8 linear[8] {};
+	TexturePixelWriter staging(reinterpret_cast<u16 *>(linear), memory, sizeof(memory));
+	staging.advance(4);
+	staging.write(0x9abc);
+	EXPECT_EQ(linear[4], 0xbc);
+	EXPECT_EQ(linear[5], 0x9a);
+}
+
 TEST(SoftwareRasterizer, MapsEveryDreamcastVramByteAcrossBanksAndApertureWrap)
 {
 	// Independent quotient/remainder formulation: two 4 MiB banks supply

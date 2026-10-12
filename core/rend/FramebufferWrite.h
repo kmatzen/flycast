@@ -2,6 +2,52 @@
 
 #include "types.h"
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+
+// Linear destinations retain ordinary pointer addressing. Destinations inside
+// VRAM use byte offsets so both pixels and row advances wrap at its boundary.
+// memorySize must be a power of two, as on all supported VRAM configurations.
+class TexturePixelWriter
+{
+public:
+	TexturePixelWriter(u16 *destination, u8 *memory, u32 memorySize)
+		: destination(reinterpret_cast<u8 *>(destination)), memory(memory), memorySize(memorySize)
+	{
+		const auto address = reinterpret_cast<uintptr_t>(destination);
+		const auto base = reinterpret_cast<uintptr_t>(memory);
+		wrapped = address >= base && address - base < memorySize;
+		if (wrapped)
+			offset = static_cast<u32>(address - base);
+	}
+	void write(u16 value)
+	{
+		if (wrapped)
+		{
+			memory[offset & (memorySize - 1)] = static_cast<u8>(value);
+			memory[(offset + 1) & (memorySize - 1)] = static_cast<u8>(value >> 8);
+			offset = (offset + 2) & (memorySize - 1);
+		}
+		else
+		{
+			std::memcpy(destination, &value, sizeof(value));
+			destination += sizeof(value);
+		}
+	}
+	void advance(u32 bytes)
+	{
+		if (wrapped)
+			offset = (offset + bytes) & (memorySize - 1);
+		else
+			destination += bytes;
+	}
+private:
+	u8 *destination;
+	u8 *memory;
+	u32 memorySize;
+	u32 offset = 0;
+	bool wrapped = false;
+};
 
 // Byte address of a clipped starting row. Packed RGB888 rows can have
 // padding that is not a whole pixel; never divide that padding by bpp.
