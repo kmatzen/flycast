@@ -198,6 +198,16 @@ public:
 			read_wait.Set();
 			SDL_CloseAudioDevice(audiodev);
 			audiodev = SDL_AudioDeviceID();
+			// The callback has stopped. Report even if emulation stopped feeding
+			// samples: push-driven reports alone cannot expose that failure mode.
+			if (traceDelivery)
+			{
+				const std::lock_guard<std::mutex> lock(stream_mutex);
+				std::fprintf(stderr, "AUDIO_DELIVERY_FINAL backend=sdl2 callbacks=%llu underruns=%llu silence_output_frames=%llu dropped_input_frames=%llu submitted_input_frames=%llu queued_input_frames=%u\n",
+						(unsigned long long)deliveryCallbacks, (unsigned long long)deliveryUnderruns,
+						(unsigned long long)deliverySilenceFrames, (unsigned long long)deliveryDroppedFrames,
+						(unsigned long long)deliverySubmittedFrames, sample_count);
+			}
 		}
 		delete [] sample_buffer;
 		sample_buffer = nullptr;

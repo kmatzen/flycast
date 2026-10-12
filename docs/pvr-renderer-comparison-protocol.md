@@ -1366,3 +1366,35 @@ logged, but this run fails to establish sustained audio/pacing correctness;
 the earlier stable interval must not be generalized to the later phase.
 The emulator was stopped after capture. Audio/pacing across this transition
 requires investigation, separate from the passing renderer microbenchmarks.
+
+### Follow-up: audio delivery through the previously failing interval
+
+`FLYCAST_AUDIO_TRACE_DELIVERY` now also prints `AUDIO_DELIVERY_FINAL` after
+SDL closes its output device. This snapshots the cumulative counters and
+remaining queued input under the stream mutex, outside the callback. Unlike
+push-triggered periodic reports, it can reveal continued callbacks and silence
+even when sample submission has stopped. It changes no buffering, scheduling,
+or rendering policy. The ARM64 app builds successfully with this diagnostic.
+
+Two fresh, host-muted Seaman runs retained SDL2 output, renderer 7 with Metal,
+single-thread rendering, full framebuffer emulation, requested VSync, and the
+experimental late-swap interval. Neither reproduced the earlier cutoff:
+
+- `/tmp/pvr-audio-final-trace.log`, without per-frame hybrid logging: 26 speed
+  windows span 0.9784–1.0028x. Final submission is 4,610,560 input frames
+  (104.55 seconds at 44.1 kHz), with 4,515 callbacks, 13 underruns, 13,312
+  silent output frames, zero dropped input frames, and 512 queued frames.
+- `/tmp/pvr-audio-final-hybrid-trace.log`, with `FLYCAST_HYBRID_TRACE=1` as in
+  the original run: 29 speed windows span 0.9792–1.0030x. Final submission is
+  5,272,576 input frames (119.56 seconds), with 5,160 callbacks, 11 underruns,
+  11,264 silent output frames, zero dropped input frames, and no queued frames.
+  No hybrid rejection is logged. The final periodic report still had eight
+  underruns; three more appear in the shutdown summary.
+
+Both owned emulator processes were stopped with SIGINT and exited normally.
+These results contradict a deterministic cutoff at 60 seconds under the tested
+conditions, but do not identify the cause of the previous failure. The final
+summary includes the shutdown interval, so its underrun total should not be
+attributed wholly to gameplay. These are boot/idle sequences, not interactive
+playthroughs or proof of glitch-free audio. Late-swap tearing, broader scene
+coverage, hardware equivalence, and sustained gameplay remain unverified.
