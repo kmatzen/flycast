@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const uint32 = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+export const configFields = ('TextureFiltering EmulateFramebuffer PerStripSorting ModifierVolumes '
+  + 'Fog LinearInterpolation Rotate90 ExtraDepthScale_bits').split(' ').map(key => 'config_' + key);
 export const numericFields = ('frame isRTT clearFramebuffer globClipX globClipY fbClipX fbClipY '
   + 'fbClipWidth fbClipHeight framebufferWidth framebufferHeight fpu_cull_val_bits '
   + 'fb_W_SOF1 fb_W_CTRL fb_W_LINESTRIDE fb_R_CTRL fb_R_SIZE fb_R_SOF1 fb_R_SOF2 '
@@ -26,7 +28,8 @@ function capture(prefix) {
     ['processed.registers', read('.processed.registers', 0x8000)],
   ]);
   const context = JSON.parse(read('.processed.context.json'));
-  if (context.schema !== 1 || context.kind !== 'latched-pvr-state'
+  if (![1, 2].includes(context.schema) || context.kind !== 'latched-pvr-state'
+      || (context.schema === 2 && !configFields.every(key => Number.isSafeInteger(context[key])))
       || !numericFields.every(key => Number.isSafeInteger(context[key]))
       || !Array.isArray(context.fog_table) || context.fog_table.length !== 128
       || !context.fog_table.every(uint32)
@@ -65,6 +68,7 @@ export function compareInputs(leftPrefix, rightPrefix) {
   return {
     capturedInputsMatch: files.every(file => file.equal) && differingContextFields.length === 0,
     limitation: 'Captured subset only; does not establish complete input equivalence or hardware accuracy.',
+    configurationCaptured: left.context.schema >= 2 && right.context.schema >= 2,
     files, differingContextFields,
   };
 }

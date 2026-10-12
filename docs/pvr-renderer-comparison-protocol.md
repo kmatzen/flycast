@@ -574,3 +574,19 @@ The reports are `nearest-input-comparison.json` and
 texture sampling and is diagnostic only; it is not an accuracy fix. The input
 gate does not encode emulator configuration, so the matched override is
 recorded explicitly here and in the run commands.
+
+### Configuration-aware captures (schema 2)
+
+New context snapshots use schema 2 and include the software renderer's
+configuration inputs: texture filtering, full framebuffer emulation, per-strip
+sorting, modifier volumes, fog, linear interpolation, rotation, and extra depth
+scale. Depth scale is stored as float bits. The selected backend is deliberately
+not part of these equality fields because cross-backend comparisons require it
+to differ; use the runtime backend log to identify actual execution.
+
+The input comparator accepts legacy schema 1 but reports
+`configurationCaptured: false`. Schema 2 requires all eight named settings;
+different settings produce a failed captured-input match. Tests cover missing
+settings and a forced-filtering mismatch. This does not claim that every
+backend-specific setting or environment override is now captured; retain the
+full run command and backend log. The app build and comparator tests pass.

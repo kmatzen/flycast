@@ -240,11 +240,22 @@ private:
 						const auto& r = taContext->rend;
 						std::ostringstream context;
 						context.imbue(std::locale::classic());
-						context << "{\"schema\":1,\"kind\":\"latched-pvr-state\"";
+						context << "{\"schema\":2,\"kind\":\"latched-pvr-state\"";
 						auto field = [&](const char *name, auto value) {
 							context << ",\"" << name << "\":" << value;
 						};
 						field("frame", FrameCount);
+						field("config_TextureFiltering", static_cast<int>(config::TextureFiltering));
+						field("config_EmulateFramebuffer", static_cast<bool>(config::EmulateFramebuffer));
+						field("config_PerStripSorting", static_cast<bool>(config::PerStripSorting));
+						field("config_ModifierVolumes", static_cast<bool>(config::ModifierVolumes));
+						field("config_Fog", static_cast<bool>(config::Fog));
+						field("config_LinearInterpolation", static_cast<bool>(config::LinearInterpolation));
+						field("config_Rotate90", static_cast<bool>(config::Rotate90));
+						const float extraDepthScale = config::ExtraDepthScale;
+						u32 depthScaleBits;
+						std::memcpy(&depthScaleBits, &extraDepthScale, sizeof(depthScaleBits));
+						field("config_ExtraDepthScale_bits", depthScaleBits);
 						field("isRTT", r.isRTT);
 						field("clearFramebuffer", r.clearFramebuffer);
 						field("globClipX", r.globClip.x);
