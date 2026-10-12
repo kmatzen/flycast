@@ -15,6 +15,7 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
 #include "TexCache.h"
+#include "FramebufferWrite.h"
 #include "xbrz/xbrz.h"
 #include "hw/pvr/pvr_mem.h"
 #include "hw/mem/addrspace.h"
@@ -1189,7 +1190,7 @@ static void writeFramebufferLW(u32 width, u32 height, const u8 *data, u32 dstAdd
 		padding = 0;
 
 	const u8 *p = data + 4 * clip.origin.y * width;
-	dstAddr += bpp * clip.origin.y * (width + padding / bpp);
+	dstAddr = framebufferWriteRowAddress(dstAddr, width, bpp, linestride, clip.origin.y);
 
 	const u32 clipWidth = std::min<u32>(width, clip.origin.x + clip.size.x);
 	height = std::min<u32>(height, clip.origin.y + clip.size.y);

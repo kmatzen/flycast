@@ -1,11 +1,30 @@
 #include "rend/soft/SoftwareRasterizer.h"
 #include "hw/pvr/pvr_regs.h"
+#include "rend/FramebufferWrite.h"
 
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
 
 using namespace rend::soft;
+
+TEST(SoftwareRasterizer, PreservesBytePaddingAtClippedRgb888RowStart)
+{
+	// FB_W_LINESTRIDE is in eight-byte units, not whole RGB888 pixels.
+	// 640 * 3 = 1920; stride 1928 leaves eight bytes of padding.
+	// The old division by three discarded two bytes for each skipped row.
+	EXPECT_EQ(framebufferWriteRowAddress(0x200000, 640, 3, 1928, 32),
+			0x200000u + 32u * 1928u);
+	EXPECT_NE(framebufferWriteRowAddress(0x200000, 640, 3, 1928, 32),
+			0x200000u + 32u * 1926u);
+	for (u32 bpp : { 2u, 3u, 4u })
+		for (u32 stride = 2560; stride <= 2584; stride += 8)
+			for (u32 row : { 0u, 1u, 32u, 479u })
+				EXPECT_EQ(framebufferWriteRowAddress(0x200000, 640, bpp, stride, row),
+						0x200000u + row * stride);
+	// Preserve the existing tightly-packed fallback for zero/short stride.
+	EXPECT_EQ(framebufferWriteRowAddress(0, 640, 3, 0, 32), 32u * 1920u);
+}
 
 TEST(SoftwareRasterizer, TruncatesBackgroundDepthRegisterLowBits)
 {

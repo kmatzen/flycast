@@ -841,3 +841,19 @@ to expose bit 15, which normal 0555 scanout discards. All 127 renderer tests
 pass on ARM64 and under x86_64 Rosetta. This covers the software presentation
 conversion helper, not direct execution of the separate TexCache VRAM writer;
 it is a documented-rule regression check, not a hardware measurement.
+
+The framebuffer writer audit found and fixed a clipped-row address error for
+packed RGB888 with padding not divisible by three. The previous starting-row
+calculation divided padding by bytes per pixel, discarding the remainder;
+later row advances correctly retained the full byte padding. For a 640-pixel
+RGB888 row, stride 1928, and clipped starting row 32, the old code started 64
+bytes early. The production writer now uses a tested byte-based row-address
+helper. FB_W_LINESTRIDE is specified in 64-bit units (Sega architecture,
+printed page 343), so an eight-byte padding amount is valid.
+
+Regression coverage includes that counterexample, 16/24/32-bit rows, several
+eight-byte-aligned strides, and zero/nonzero clipped starting rows. The
+existing zero/short-stride fallback policy is preserved, not newly validated.
+The app builds and all 128 tests pass on ARM64 and x86_64 Rosetta. This checks
+the exact address helper used by the production writer; full VRAM-write
+integration cases with these padded RGB888 layouts remain to be added.
