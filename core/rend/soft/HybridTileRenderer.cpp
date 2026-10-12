@@ -11,6 +11,9 @@ bool render(const Frame &, std::vector<u32> &, std::vector<float> &, Timing *,
 
 bool renderAsync(const Frame &, PresentationSurface &) { return false; }
 bool takeLatestPresentation(PresentationSurface &) { return false; }
+bool copyLatestPresentation(std::vector<u32> &, PresentationSurface *) {
+  return false;
+}
 
 } // namespace rend::soft::hybrid
 

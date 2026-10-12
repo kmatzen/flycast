@@ -96,6 +96,14 @@ struct Triangle {
 
 static_assert(sizeof(Triangle) == 228, "Metal command layout changed");
 
+// A borrowed native surface containing the packed color output. On macOS the
+// handle is an IOSurfaceRef and can also seed a later GPU frame directly.
+struct PresentationSurface {
+  void *handle = nullptr;
+  u32 width = 0;
+  u32 height = 0;
+};
+
 struct Frame {
   u32 width = 0;
   u32 height = 0;
@@ -114,7 +122,11 @@ struct Frame {
   const std::vector<u8> *opaqueMask = nullptr;
   const std::vector<u8> *punchThroughMask = nullptr;
   const std::vector<u8> *translucentMask = nullptr;
+  // Pixels cleared here retain initialColors/initialPresentation in the
+  // externally visible frame while internal depth/secondary work may proceed.
+  const std::vector<u8> *commitMask = nullptr;
   const std::vector<u32> *initialSecondary = nullptr;
+  const PresentationSurface *initialPresentation = nullptr;
 };
 
 struct Timing {
@@ -137,15 +149,6 @@ struct Timing {
   u32 translucentTriangles = 0;
 };
 
-// A borrowed native surface containing the packed color output. The handle is
-// valid until the next render that changes its dimensions. On macOS it is an
-// IOSurfaceRef and can be attached directly to an OpenGL rectangle texture.
-struct PresentationSurface {
-  void *handle = nullptr;
-  u32 width = 0;
-  u32 height = 0;
-};
-
 // Renders the currently supported exact subset into packed RGBA8 and IEEE
 // depth buffers. False means that Metal is unavailable or the frame violates
 // a checked invariant; callers must use the CPU oracle without partial output.
@@ -160,5 +163,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
 // until then.
 bool renderAsync(const Frame &frame, PresentationSurface &presentation);
 bool takeLatestPresentation(PresentationSurface &presentation);
+bool copyLatestPresentation(std::vector<u32> &colors,
+                            PresentationSurface *presentation = nullptr);
 
 } // namespace rend::soft::hybrid

@@ -31,9 +31,10 @@ struct Constants {
   u32 deferOpaqueShading;
   u32 useHardwareVisibility;
   float visibilityBias;
+  u32 useCommitMask;
 };
 
-static_assert(sizeof(Constants) == 52);
+static_assert(sizeof(Constants) == 56);
 
 struct VisibilityVertex {
   s32 x;
@@ -98,6 +99,7 @@ struct Constants {
     uint deferOpaqueShading;
     uint useHardwareVisibility;
     float visibilityBias;
+    uint useCommitMask;
 };
 
 struct VisibilityVertex { int2 fixedPosition; float z; uint padding; };
@@ -354,6 +356,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uchar *translucentMask [[buffer(13)]],
         device uint *secondaryColors [[buffer(14)]],
         const device uchar *hardwareVisibilityTiles [[buffer(15)]],
+        const device uchar *commitMask [[buffer(16)]],
         texture2d<uint, access::read> visibility [[texture(0)]],
         uint2 pixel [[thread_position_in_grid]])
 {
@@ -768,7 +771,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         else
             color = result;
     }
-    colors[offset] = color;
+    if (constants.useCommitMask == 0 || commitMask[offset] != 0)
+        colors[offset] = color;
     secondaryColors[offset] = secondary;
     depths[offset] = depth;
 }
@@ -801,6 +805,7 @@ public:
     Secondary,
     VisibilityVertices,
     VisibilityPrimitives,
+    CommitMask,
     BufferSlotCount,
   };
 
@@ -818,6 +823,7 @@ private:
     std::atomic<bool> successful { false };
     u64 serial = 0;
     PresentationSurface presentation;
+    id<MTLCommandBuffer> command = nil;
   };
   struct PresentationAllocation {
     IOSurfaceRef surface = nullptr;
@@ -903,6 +909,7 @@ public:
     resources->successful.store(false, std::memory_order_relaxed);
     resources->serial = ++submissionSerial;
     resources->presentation = presentation;
+    resources->command = command;
     [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
       const bool success = completed.status == MTLCommandBufferStatusCompleted &&
           *static_cast<const u32 *>(overflow.contents) == 0;
@@ -926,6 +933,33 @@ public:
     output = *latest;
     consumedSerial = latestSerial;
     return output.handle != nullptr;
+  }
+
+  bool copyLatestPresentation(std::vector<u32> &colors,
+                              PresentationSurface *output) {
+    FrameResources *latest = nullptr;
+    for (FrameResources &resources : frameResources)
+      if (resources.serial != 0 &&
+          (latest == nullptr || resources.serial > latest->serial))
+        latest = &resources;
+    if (latest == nullptr || latest->command == nil)
+      return false;
+    [latest->command waitUntilCompleted];
+    if (!latest->available.load(std::memory_order_acquire) ||
+        !latest->successful.load(std::memory_order_relaxed) ||
+        latest->presentation.handle == nullptr)
+      return false;
+    const size_t pixelCount = static_cast<size_t>(latest->presentation.width) *
+                              latest->presentation.height;
+    colors.resize(pixelCount);
+    std::memcpy(colors.data(),
+                IOSurfaceGetBaseAddress(
+                    static_cast<IOSurfaceRef>(latest->presentation.handle)),
+                pixelCount * sizeof(u32));
+    if (output != nullptr)
+      *output = latest->presentation;
+    consumedSerial = std::max(consumedSerial, latest->serial);
+    return true;
   }
 
   ~MetalState() {
@@ -1035,6 +1069,18 @@ public:
     output->width = allocation->width;
     output->height = allocation->height;
     return allocation->buffer;
+  }
+
+  id<MTLBuffer> presentationBufferFor(const PresentationSurface *surface,
+                                      u32 width, u32 height) const {
+    if (surface == nullptr || surface->handle == nullptr ||
+        surface->width != width || surface->height != height)
+      return nil;
+    for (const PresentationAllocation &allocation : presentationAllocations)
+      if (allocation.surface == surface->handle && allocation.width == width &&
+          allocation.height == height)
+        return allocation.buffer;
+    return nil;
   }
 
   id<MTLDevice> device = nil;
@@ -1342,6 +1388,10 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
     for (u32 successor : globalSuccessors[selected])
       --globalIndegrees[successor];
   }
+  // Async submission returns before it can inspect the overflow flag. Use it
+  // only with the proven one-fragment ordered kernel, which cannot overflow.
+  if (asynchronous && !orderedAutosort)
+    return false;
   constexpr u32 SimpleTranslucentVariable = ClampU | ClampV | FlipU | FlipV |
       TexelSampleCenter | IgnoreTextureAlpha;
   constexpr u32 SimpleTranslucentFixed = 6 | Textured | Bilinear | UseAlpha |
@@ -1443,7 +1493,8 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       frame.initialSecondary->size() != pixelCount)
     return false;
   const std::vector<u8> *masks[] = {frame.depthClearMask, frame.opaqueMask,
-                                   frame.punchThroughMask, frame.translucentMask};
+                                   frame.punchThroughMask, frame.translucentMask,
+                                   frame.commitMask};
   for (const std::vector<u8> *mask : masks)
     if (mask != nullptr && mask->size() != pixelCount)
       return false;
@@ -1475,8 +1526,12 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   id<MTLBuffer> hardwareVisibilityTileBuffer =
       metal.upload(MetalState::HardwareVisibilityTiles,
                    hardwareVisibilityTiles);
+  id<MTLBuffer> commitMaskBuffer = metal.upload(MetalState::CommitMask,
+      frame.commitMask != nullptr ? *frame.commitMask : fullMask);
   id<MTLBuffer> colorBuffer =
       metal.presentationBuffer(frame.width, frame.height, presentation);
+  id<MTLBuffer> initialPresentationBuffer = metal.presentationBufferFor(
+      frame.initialPresentation, frame.width, frame.height);
   id<MTLBuffer> depthBuffer =
       metal.buffer(MetalState::Depth, pixelCount * sizeof(float));
   id<MTLBuffer> overflowBuffer =
@@ -1496,13 +1551,14 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
       overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
       depthClearBuffer == nil || opaqueMaskBuffer == nil ||
       punchMaskBuffer == nil || translucentMaskBuffer == nil ||
-      hardwareVisibilityTileBuffer == nil || secondaryBuffer == nil ||
+      hardwareVisibilityTileBuffer == nil || commitMaskBuffer == nil ||
+      secondaryBuffer == nil ||
       visibilityTexture == nil ||
       (useHardwareVisibility && (visibilityVertexBuffer == nil ||
           visibilityPrimitiveBuffer == nil)))
     return false;
   *static_cast<u32 *>(overflowBuffer.contents) = 0;
-  if (frame.initialColors != nullptr)
+  if (initialPresentationBuffer == nil && frame.initialColors != nullptr)
     std::memcpy(colorBuffer.contents, frame.initialColors->data(),
                 pixelCount * sizeof(u32));
   if (frame.initialDepths != nullptr)
@@ -1512,17 +1568,26 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
     std::memcpy(secondaryBuffer.contents, frame.initialSecondary->data(),
                 pixelCount * sizeof(u32));
   const Constants constants{frame.width, frame.height, tilesX,
-                            frame.initialColors != nullptr ? 1u : 0u,
+                            (frame.initialColors != nullptr ||
+                             initialPresentationBuffer != nil) ? 1u : 0u,
                             frame.fogColor, frame.fogVertexColor, frame.fogDensity,
                             frame.modifierMask != nullptr ? 1u : 0u,
                             frame.initialDepths != nullptr ? 1u : 0u,
                             frame.initialSecondary != nullptr ? 1u : 0u,
                             hasOpaque && deferOpaqueShading ? 1u : 0u,
                             useHardwareVisibility ? 1u : 0u,
-                            visibilitySampleOffset == 0 ? .5f : 0.f};
+                            visibilitySampleOffset == 0 ? .5f : 0.f,
+                            frame.commitMask != nullptr ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
+  if (initialPresentationBuffer != nil) {
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    [blit copyFromBuffer:initialPresentationBuffer sourceOffset:0
+                toBuffer:colorBuffer destinationOffset:0
+                    size:pixelCount * sizeof(u32)];
+    [blit endEncoding];
+  }
   if (useHardwareVisibility) {
     MTLRenderPassDescriptor *pass =
         [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1577,6 +1642,7 @@ static bool renderInternal(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:translucentMaskBuffer offset:0 atIndex:13];
   [encoder setBuffer:secondaryBuffer offset:0 atIndex:14];
   [encoder setBuffer:hardwareVisibilityTileBuffer offset:0 atIndex:15];
+  [encoder setBuffer:commitMaskBuffer offset:0 atIndex:16];
   [encoder setTexture:visibilityTexture atIndex:0];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -1659,6 +1725,11 @@ bool renderAsync(const Frame &frame, PresentationSurface &presentation) {
 
 bool takeLatestPresentation(PresentationSurface &presentation) {
   return sharedMetalState().latestPresentation(presentation);
+}
+
+bool copyLatestPresentation(std::vector<u32> &colors,
+                            PresentationSurface *presentation) {
+  return sharedMetalState().copyLatestPresentation(colors, presentation);
 }
 
 } // namespace rend::soft::hybrid

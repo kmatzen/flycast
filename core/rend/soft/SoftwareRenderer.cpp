@@ -138,6 +138,13 @@ public:
 
 	void Term() override
 	{
+		if (hybridAsyncActive)
+		{
+			std::vector<u32> ignored;
+			hybrid::copyLatestPresentation(ignored);
+		}
+		hybridAsyncActive = false;
+		hybridFrameQueued = false;
 #ifdef USE_OPENGL
 		quadDrawer.reset();
 		if (presentTexture != 0)
@@ -161,6 +168,7 @@ public:
 		rawFrameStore.clear();
 		presentationBuffer.clear();
 		hybridPresentation = {};
+		hybridQueuedPresentation = {};
 		presentationWidth = presentationHeight = 0;
 		activeCoverageMask = nullptr;
 		backgroundCoverageMask = nullptr;
@@ -189,7 +197,7 @@ public:
 		const auto renderWallStart = std::chrono::steady_clock::now();
 		if (rendContext == nullptr)
 			return false;
-		hybridPresentation = {};
+		hybridFrameQueued = false;
 		const u32 width = std::max(1u, rendContext->framebufferWidth);
 		const u32 height = std::max(1u, rendContext->framebufferHeight);
 		auto& targetRasterizer = rendContext->isRTT ? rttRasterizer : screenRasterizer;
@@ -247,6 +255,15 @@ public:
 				hybridVramInitial.assign(&vram[0], &vram[0] + VRAM_SIZE);
 		}
 		const bool hybridRendered = tryRenderHybrid(width, height, passRegions, frameStore);
+		if (!hybridRendered)
+		{
+			if (!drainHybridAsync(frameStore))
+			{
+				activeCoverageMask = nullptr;
+				return false;
+			}
+			hybridPresentation = {};
+		}
 		if (!hybridVramInitial.empty())
 		{
 			for (u32 offset = 0; offset < VRAM_SIZE; offset += PAGE_SIZE)
@@ -255,6 +272,16 @@ public:
 		}
 		if (hybridRendered && !verifyHybrid)
 		{
+			if (hybridFrameQueued)
+			{
+				presentationWidth = width;
+				presentationHeight = height;
+				activeCoverageMask = nullptr;
+				frameReady = true;
+				frameAspectRatio = getOutputFramebufferAspectRatio();
+				clearLastFrame = false;
+				return true;
+			}
 			if (rendContext->isRTT || config::EmulateFramebuffer)
 			{
 				if (rendContext->render_passes.size() == 1)
@@ -534,6 +561,9 @@ public:
 
 	bool Present() override
 	{
+		hybrid::PresentationSurface completed;
+		if (hybrid::takeLatestPresentation(completed))
+			hybridPresentation = completed;
 		if (!frameReady)
 			return false;
 		frameReady = false;
@@ -1268,6 +1298,7 @@ private:
 		std::vector<u8> punchMask;
 		std::vector<u8> translucentMask;
 		std::vector<u8> modifierCoverage;
+		std::vector<u8> commitMask;
 		if (!passRegions[0].empty())
 		{
 			const size_t pixelCount = static_cast<size_t>(width) * height;
@@ -1275,6 +1306,7 @@ private:
 			punchMask.resize(pixelCount);
 			translucentMask.resize(pixelCount);
 			modifierCoverage.resize(pixelCount);
+			commitMask.resize(pixelCount);
 			for (const RegionInfo& region : passRegions[0])
 			{
 				if (hasTranslucent && region.translucentPresent
@@ -1292,6 +1324,7 @@ private:
 					if (region.punchThroughPresent) std::fill(punchMask.begin() + first, punchMask.begin() + last, 1);
 					if (region.translucentPresent) std::fill(translucentMask.begin() + first, translucentMask.begin() + last, 1);
 					if (region.opaqueModifierPresent) std::fill(modifierCoverage.begin() + first, modifierCoverage.begin() + last, 1);
+					if (region.flushAccumulate) std::fill(commitMask.begin() + first, commitMask.begin() + last, 1);
 				}
 			}
 		}
@@ -1310,9 +1343,27 @@ private:
 						0, pass.tr_count, false, autosort, 2, commands, textureAtlas, textureOffsets))
 				|| commands.empty())
 			return reject("unsupported-polygon-state");
-		std::vector<u32> initial(rasterizer->colorBuffer().size());
-		std::memcpy(initial.data(), rasterizer->colorBuffer().data(),
-				rasterizer->colorBuffer().size() * sizeof(Color));
+		const bool usePresentationSurface = !rendContext->isRTT
+				&& std::getenv("FLYCAST_HYBRID_DISABLE_IOSURFACE") == nullptr;
+		const bool asyncEligible = std::getenv("FLYCAST_HYBRID_ASYNC") != nullptr
+				&& std::getenv("FLYCAST_HYBRID_VERIFY") == nullptr
+				&& !rendContext->isRTT && !config::EmulateFramebuffer
+				&& usePresentationSurface && hybridQueuedPresentation.handle != nullptr
+				&& !useOpaqueModifiers && !cpuTranslucent;
+		if (trace)
+		{
+			static u32 asyncEligibilityReports = 0;
+			if (asyncEligibilityReports++ < 20)
+				std::fprintf(stderr, "HYBRID async eligible=%u surface=%u rtt=%u efb=%u modifier=%u cpu_translucent=%u\n",
+						asyncEligible, hybridQueuedPresentation.handle != nullptr,
+						rendContext->isRTT, static_cast<bool>(config::EmulateFramebuffer),
+						useOpaqueModifiers, cpuTranslucent);
+		}
+		if (hybridAsyncActive && !asyncEligible && !drainHybridAsync(frameStore))
+			return reject("async-drain-failure");
+		std::vector<u32> initial(frameStore.size());
+		std::memcpy(initial.data(), frameStore.data(),
+				frameStore.size() * sizeof(Color));
 		std::vector<u32> output;
 		std::vector<float> depth;
 		std::vector<u32> secondary;
@@ -1320,6 +1371,7 @@ private:
 		if (!opaqueMask.empty()) frame.opaqueMask = &opaqueMask;
 		if (!punchMask.empty()) frame.punchThroughMask = &punchMask;
 		if (!translucentMask.empty()) frame.translucentMask = &translucentMask;
+		if (!commitMask.empty()) frame.commitMask = &commitMask;
 		frame.fogTable = rendContext->fog_table;
 		frame.fogColor = packedColor({
 			static_cast<u8>(rendContext->fog_col_ram.red() * 255.f),
@@ -1330,10 +1382,55 @@ private:
 			static_cast<u8>(rendContext->fog_col_vert.green() * 255.f),
 			static_cast<u8>(rendContext->fog_col_vert.blue() * 255.f), 255 });
 		frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
+		if (asyncEligible)
+		{
+			frame.initialPresentation = &hybridQueuedPresentation;
+			hybrid::PresentationSurface queued;
+			const auto asyncStart = std::chrono::steady_clock::now();
+			if (hybrid::renderAsync(frame, queued))
+			{
+				hybridAsyncActive = true;
+				hybridFrameQueued = true;
+				hybridQueuedPresentation = queued;
+				if (trace)
+				{
+					static auto reportStart = asyncStart;
+					static u32 reportFrames = 0;
+					static double totalSubmitMilliseconds = 0.;
+					static double maximumSubmitMilliseconds = 0.;
+					const double submitMilliseconds =
+							std::chrono::duration<double, std::milli>(
+									std::chrono::steady_clock::now() - asyncStart).count();
+					++reportFrames;
+					totalSubmitMilliseconds += submitMilliseconds;
+					maximumSubmitMilliseconds = std::max(maximumSubmitMilliseconds,
+							submitMilliseconds);
+					const double reportSeconds = std::chrono::duration<double>(
+							std::chrono::steady_clock::now() - reportStart).count();
+					if (reportSeconds >= 2.)
+					{
+						std::fprintf(stderr,
+								"HYBRID async frames=%u seconds=%.3f submit_avg=%.3f submit_max=%.3f\n",
+								reportFrames, reportSeconds,
+								totalSubmitMilliseconds / reportFrames,
+								maximumSubmitMilliseconds);
+						reportStart = std::chrono::steady_clock::now();
+						reportFrames = 0;
+						totalSubmitMilliseconds = 0.;
+						maximumSubmitMilliseconds = 0.;
+					}
+				}
+				return true;
+			}
+			if (trace)
+				std::fprintf(stderr, "HYBRID async backend-reject\n");
+			if (hybridAsyncActive && !drainHybridAsync(frameStore))
+				return reject("async-backpressure-drain-failure");
+			std::memcpy(initial.data(), frameStore.data(),
+					frameStore.size() * sizeof(Color));
+		}
 		hybrid::Timing timing;
 		hybrid::PresentationSurface presentation;
-		const bool usePresentationSurface = !rendContext->isRTT
-				&& std::getenv("FLYCAST_HYBRID_DISABLE_IOSURFACE") == nullptr;
 		if (!hybrid::render(frame, output, depth, &timing, &secondary,
 					usePresentationSurface ? &presentation : nullptr)
 				|| output.size() != frameStore.size())
@@ -1418,6 +1515,29 @@ private:
 					timing.orderedAutosortRejectReason, timing.opaqueTriangles,
 					timing.punchThroughTriangles, timing.translucentTriangles);
 		hybridPresentation = presentation;
+		hybridQueuedPresentation = presentation;
+		return true;
+	}
+
+	bool drainHybridAsync(std::vector<Color>& frameStore)
+	{
+		if (!hybridAsyncActive)
+			return true;
+		std::vector<u32> drained;
+		hybrid::PresentationSurface presentation;
+		if (!hybrid::copyLatestPresentation(drained, &presentation)
+				|| drained.size() != frameStore.size())
+			return false;
+		std::vector<Color> colors(drained.size());
+		std::memcpy(colors.data(), drained.data(), drained.size() * sizeof(u32));
+		frameStore = colors;
+		rawFrameStore = colors;
+		presentationBuffer = colors;
+		if (rasterizer != nullptr)
+			rasterizer->restoreColor(colors);
+		hybridPresentation = presentation;
+		hybridQueuedPresentation = presentation;
+		hybridAsyncActive = false;
 		return true;
 	}
 
@@ -2198,6 +2318,9 @@ private:
 	PixelBuffer<u32> framebufferPixels;
 	std::vector<Color> presentationBuffer;
 	hybrid::PresentationSurface hybridPresentation;
+	hybrid::PresentationSurface hybridQueuedPresentation;
+	bool hybridAsyncActive = false;
+	bool hybridFrameQueued = false;
 	u32 presentationWidth = 0;
 	u32 presentationHeight = 0;
 	const std::vector<u8> *activeCoverageMask = nullptr;
