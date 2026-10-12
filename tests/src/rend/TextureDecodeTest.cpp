@@ -204,10 +204,10 @@ TEST(TextureDecode, DetwiddlesSquareAndRectangularTexturesAgainstReference)
 	}
 }
 
-TEST(TextureDecode, DetwiddlesRectangularVqIndicesAgainstReference)
+TEST(TextureDecode, DetwiddlesSquareVqIndicesAgainstReference)
 {
 	constexpr u32 width = 16;
-	constexpr u32 height = 8;
+	constexpr u32 height = 16;
 	constexpr u32 blocksX = width / 2;
 	constexpr u32 blocksY = height / 2;
 	std::array<u16, VQ_CODEBOOK_SIZE / sizeof(u16)> codebook {};
@@ -231,4 +231,56 @@ TEST(TextureDecode, DetwiddlesRectangularVqIndicesAgainstReference)
 			EXPECT_EQ(*decoded.data(x, y),
 					(Unpacker565_32<RGBAPacker>::unpack(coordinate565(x, y))))
 					<< "at " << x << ',' << y;
+}
+
+TEST(TextureDecode, ConvertsDocumentedYuv422Coefficients)
+{
+	// Chroma deltas of 32 make every documented coefficient integral:
+	// R = Y + 11/8 V, G = Y - 11/32 U - 22/32 V,
+	// B = Y + 110/64 U.
+	const std::array<u8, 8> native { 160, 100, 128, 50,
+			128, 100, 160, 50 };
+	PixelBuffer<u32> decoded;
+	decoded.init(4, 1);
+	opengl::pvrTexInfo[3].PL32(&decoded, native.data(), 4, 1);
+
+	EXPECT_EQ(*decoded.data(0, 0), RGBAPacker::pack(100, 89, 155, 255));
+	EXPECT_EQ(*decoded.data(1, 0), RGBAPacker::pack(50, 39, 105, 255));
+	EXPECT_EQ(*decoded.data(2, 0), RGBAPacker::pack(144, 78, 100, 255));
+	EXPECT_EQ(*decoded.data(3, 0), RGBAPacker::pack(94, 28, 50, 255));
+}
+
+TEST(TextureDecode, DecodesTwiddledYuv422WordOrder)
+{
+	const std::array<u16, 4> native {
+		static_cast<u16>(10 << 8 | 128),
+		static_cast<u16>(30 << 8 | 128),
+		static_cast<u16>(20 << 8 | 128),
+		static_cast<u16>(40 << 8 | 128),
+	};
+	PixelBuffer<u32> decoded;
+	decoded.init(2, 2);
+	opengl::pvrTexInfo[3].TW32(&decoded,
+			reinterpret_cast<const u8 *>(native.data()), 2, 2);
+
+	EXPECT_EQ(*decoded.data(0, 0), 0xff0a0a0au);
+	EXPECT_EQ(*decoded.data(1, 0), 0xff141414u);
+	EXPECT_EQ(*decoded.data(0, 1), 0xff1e1e1eu);
+	EXPECT_EQ(*decoded.data(1, 1), 0xff282828u);
+}
+
+TEST(TextureDecode, DecodesPalettedBytesInTwiddledMicrotileOrder)
+{
+	palette_index = 256;
+	for (u32 i = 0; i < 8; ++i)
+		palette32_ram[palette_index + i] = 0xb0000000u | i;
+	const std::array<u8, 8> native { 0, 1, 2, 3, 4, 5, 6, 7 };
+	PixelBuffer<u32> decoded;
+	decoded.init(2, 4);
+	opengl::pvrTexInfo[6].TW32(&decoded, native.data(), 2, 4);
+
+	constexpr std::array<u8, 8> expected { 0, 2, 1, 3, 4, 6, 5, 7 };
+	for (u32 y = 0; y < 4; ++y)
+		for (u32 x = 0; x < 2; ++x)
+			EXPECT_EQ(*decoded.data(x, y), 0xb0000000u | expected[y * 2 + x]);
 }

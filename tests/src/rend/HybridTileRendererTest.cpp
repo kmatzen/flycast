@@ -826,6 +826,62 @@ TEST(HybridTileRenderer, MatchesOracleForBumpMapping)
 	expectEqual(cpu, colors, depths);
 }
 
+TEST(HybridTileRenderer, MatchesOracleAcrossBumpAngleAndLightMatrix)
+{
+	struct BumpCase { u8 s, r, k1, k2, k3, q; };
+	constexpr std::array<BumpCase, 8> cases {{
+		{ 0, 0, 0, 0, 0, 0 },
+		{ 128, 0, 0, 255, 0, 0 },
+		{ 64, 64, 0, 0, 255, 0 },
+		{ 64, 192, 0, 0, 255, 64 },
+		{ 255, 255, 32, 96, 160, 255 },
+		{ 1, 254, 200, 10, 240, 127 },
+		{ 192, 32, 64, 128, 192, 224 },
+		{ 32, 160, 255, 255, 255, 32 },
+	}};
+	const Color base { 255, 255, 255, 255 };
+	for (const BumpCase& value : cases)
+	{
+		const Color texel {
+			static_cast<u8>((value.s & 0xf) * 17),
+			static_cast<u8>((value.r >> 4) * 17),
+			static_cast<u8>((value.r & 0xf) * 17),
+			static_cast<u8>((value.s >> 4) * 17),
+		};
+		const Color parameters { value.k2, value.k3, value.q, value.k1 };
+		const Vertex a { 0, 0, 1, base, parameters, 0, 0 };
+		const Vertex b { 2, 0, 1, base, parameters, 1, 0 };
+		const Vertex c { 0, 2, 1, base, parameters, 0, 1 };
+		const Vertex d { 2, 2, 1, base, parameters, 1, 1 };
+		SoftwareRasterizer cpu(2, 2);
+		PipelineState state;
+		state.depthMode = DepthMode::Always;
+		state.texture = { &texel, 1, 1 };
+		state.bumpMap = true;
+		state.useOffsetColor = true;
+		cpu.drawTriangle(a, b, c, state);
+		cpu.drawTriangle(b, d, c, state);
+
+		const u32 gpuState = hybrid::makeState(7, true, true, false, true, 0, 1, 0);
+		std::vector<hybrid::Triangle> commands {
+			triangle(a, b, c, gpuState), triangle(b, d, c, gpuState)
+		};
+		for (hybrid::Triangle& command : commands)
+		{
+			command.textureWidth = command.textureHeight = 1;
+			command.mipOffsets[0] = 0;
+			command.mipLevelCount = 1;
+			command.effects |= hybrid::UseOffsetColor | hybrid::BumpMap;
+		}
+		const std::vector<u32> texture { pack(texel) };
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		std::vector<u32> colors;
+		std::vector<float> depths;
+		ASSERT_TRUE(hybrid::render(frame, colors, depths));
+		expectEqual(cpu, colors, depths);
+	}
+}
+
 TEST(HybridTileRenderer, MatchesOracleForLookupFogAlpha)
 {
 	std::array<u32, 128> fogTable;
