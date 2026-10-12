@@ -1821,3 +1821,23 @@ queue progress, not removing the completion wait. Any such change still
 needs immutable presentation ownership, ordered framebuffer reads/writes,
 shutdown and resize handling, and verification of tear-free output. No
 scheduling or default-VSync behavior was changed by this diagnostic.
+
+### Rejected early-GL-flush experiment
+
+The bundled SDL Cocoa backend (`Cocoa_GL_SwapWindow`) waits on its display
+link before calling `flushBuffer`. A temporary opt-in `glFlush()` immediately
+before `SDL_GL_SwapWindow`, restricted to the software renderer, tested whether
+submitting the presentation draw ahead of that wait would recover pacing.
+The app links the bundled SDL build. Positive swap interval 1, threaded
+rendering, full framebuffer emulation, and real SDL2 audio stayed enabled;
+late swap and differential verification stayed disabled, and the host stayed
+muted. No render-completion wait was removed.
+
+`/tmp/pvr-preswap-flush-vsync.log` reproduces the slowdown: later emulation
+windows include 0.6751, 0.6672, 0.6637, 0.6671, and 0.6676; corresponding
+120-call render-wait means remain 46.471–46.861 ms. Audio underruns grow
+from 95 to 440 across those reported windows. This does not support retaining
+the change. The process stopped normally, the temporary flag and `glFlush`
+were removed, and the normal app was rebuilt. No production code from this
+experiment remains. It rules out this particular early-submission approach,
+not all possible presentation scheduling improvements.
