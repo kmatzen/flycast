@@ -240,3 +240,26 @@ boundaries, render-to-texture, and framebuffer scaling/field selection.
 Performance results should use the same inputs and report CPU preparation,
 GPU execution, synchronization/readback, presentation, and total frame time.
 Capture/verification overhead must be identified separately from normal play.
+
+### Bilinear arithmetic portability
+
+The software NEON path explicitly uses fused multiply-add for its three
+bilinear interpolation steps. The scalar and Metal paths now request the same
+operations explicitly instead of depending on compiler contraction. This is
+reference consistency, not a determination of PVR filtering precision.
+
+A regression uses channel values 193, 166, 219, and 12, with interpolation
+fractions `0x1.8cfee4p-2` and `0x1.8244eep-1`. Fused interpolation rounds to
+149; separate multiply/add rounds to 150. The software test samples this
+boundary directly; the hybrid test renders it through Metal and checks color
+and depth buffers against software, including an explicit expected pixel.
+
+All 125 renderer tests passed both natively on ARM64 and using the universal
+binary's x86_64 slice under Rosetta. The latter exercises scalar software
+interpolation; it is not native Intel or non-Apple platform validation.
+Commands:
+
+```sh
+./build-renderer-tests/tests/flycast-renderer-tests
+arch -x86_64 ./build-renderer-tests/tests/flycast-renderer-tests
+```

@@ -351,6 +351,23 @@ TEST(SoftwareRasterizer, SamplesNearestAndBilinearTextures)
 			(Color { 0, 0, 1, 255 }));
 }
 
+TEST(SoftwareRasterizer, BilinearRoundingUsesConsistentFusedInterpolation)
+{
+	const Color texels[] {
+		{ 193, 193, 193, 193 }, { 166, 166, 166, 166 },
+		{ 219, 219, 219, 219 }, { 12, 12, 12, 12 },
+	};
+	PipelineState state;
+	state.texture = { texels, 2, 2 };
+	state.bilinearFilter = true;
+	state.texelSampleCenter = false;
+	// Separate multiply/add rounds to 150 at this boundary. This checks
+	// reference portability, not the hardware's filtering precision.
+	EXPECT_EQ(SoftwareRasterizer::sampleTexture(state.texture,
+			0x1.8cfee4p-3f, 0x1.8244eep-2f, state),
+			(Color { 149, 149, 149, 149 }));
+}
+
 TEST(SoftwareRasterizer, MirrorsBothTextureAxesAcrossFlipPeriods)
 {
 	const Color texels[] {

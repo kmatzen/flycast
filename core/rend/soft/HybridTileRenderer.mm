@@ -272,13 +272,14 @@ inline uint sampleTexture(const device uint *texture, const device Triangle& t, 
     float4 result;
     for (uint component = 0; component < 4; ++component) {
         const uint shift = component * 8;
-        const float top = float(channel(samples[0], shift))
-                + (float(channel(samples[1], shift)) - float(channel(samples[0], shift)))
-                        * fraction.x;
-        const float bottom = float(channel(samples[2], shift))
-                + (float(channel(samples[3], shift)) - float(channel(samples[2], shift)))
-                        * fraction.x;
-        result[component] = top + (bottom - top) * fraction.y;
+        // Keep the reference's fused interpolation explicit at rounding boundaries.
+        const float a = float(channel(samples[0], shift));
+        const float b = float(channel(samples[1], shift));
+        const float c = float(channel(samples[2], shift));
+        const float d = float(channel(samples[3], shift));
+        const float top = fma(b - a, fraction.x, a);
+        const float bottom = fma(d - c, fraction.x, c);
+        result[component] = fma(bottom - top, fraction.y, top);
     }
     return packColor(result);
 }

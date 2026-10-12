@@ -532,9 +532,11 @@ Color SoftwareRasterizer::sampleTexture(const TextureView& texture, float u, flo
 	return result;
 #else
 	auto bilinear = [&](auto member) {
-		const float top = c00.*member + (c10.*member - c00.*member) * tx;
-		const float bottom = c01.*member + (c11.*member - c01.*member) * tx;
-		return clampByte(top + (bottom - top) * ty);
+		// Match the explicit fused operations in the NEON path independently
+		// of the compiler's floating-point contraction setting.
+		const float top = std::fma(float(c10.*member - c00.*member), tx, float(c00.*member));
+		const float bottom = std::fma(float(c11.*member - c01.*member), tx, float(c01.*member));
+		return clampByte(std::fma(bottom - top, ty, top));
 	};
 	return { bilinear(&Color::r), bilinear(&Color::g), bilinear(&Color::b),
 		bilinear(&Color::a) };

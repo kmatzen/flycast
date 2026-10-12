@@ -476,6 +476,39 @@ TEST(HybridTileRenderer, MatchesOracleForBilinearPunchThroughCoverage)
 	}
 }
 
+TEST(HybridTileRenderer, MatchesFusedBilinearRoundingBoundary)
+{
+	const Color texels[] { {193,193,193,193}, {166,166,166,166},
+		{219,219,219,219}, {12,12,12,12} };
+	SoftwareRasterizer cpu(2, 2);
+	cpu.clear({});
+	PipelineState state;
+	state.depthMode = DepthMode::Always;
+	state.bilinearFilter = true;
+	state.texelSampleCenter = false;
+	state.shadingInstruction = 0;
+	state.texture = { texels, 2, 2 };
+	const Color white {255,255,255,255};
+	const float u = 0x1.8cfee4p-3f, v = 0x1.8244eep-2f;
+	const Vertex a {0,0,1,white,{},u,v}, b {2,0,1,white,{},u,v}, c {0,2,1,white,{},u,v};
+	cpu.drawTriangle(a,b,c,state);
+	auto command = triangle(a,b,c,
+			hybrid::makeState(7,true,true,true,true,0,1,0) & ~hybrid::TexelSampleCenter);
+	command.textureWidth = command.textureHeight = 2;
+	command.mipLevelCount = 1;
+	std::vector<hybrid::Triangle> commands {command};
+	std::vector<u32> texture;
+	for (Color texel : texels)
+		texture.push_back(pack(texel));
+	const std::vector<u32> initialColors(4, 0);
+	hybrid::Frame frame {2,2,&commands,&texture,&initialColors};
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame,colors,depths));
+	EXPECT_EQ(cpu.pixel(0,0), (Color {149,149,149,149}));
+	expectEqual(cpu,colors,depths);
+}
+
 TEST(HybridTileRenderer, PunchThroughHoleExposesFartherAcceptedFragment)
 {
 	const Color frontTexels[] {
