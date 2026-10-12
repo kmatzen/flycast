@@ -1,6 +1,7 @@
 #include "rend/soft/SoftwareRasterizer.h"
 #include "hw/pvr/pvr_regs.h"
 #include "rend/FramebufferWrite.h"
+#include "rend/FramebufferPack.h"
 #include "hw/pvr/vram_map.h"
 
 #include <cmath>
@@ -8,6 +9,52 @@
 #include <limits>
 
 using namespace rend::soft;
+
+namespace {
+struct FramebufferPackSink
+{
+	std::vector<u8> bytes;
+	template<typename T> void write(T value)
+	{
+		for (size_t i = 0; i < sizeof(T); ++i)
+			bytes.push_back(static_cast<u8>(value >> (i * 8)));
+	}
+};
+template<typename Line> std::vector<u8> packTestPixel(FB_W_CTRL_type control)
+{
+	FramebufferPackSink sink;
+	Line writer(control, sink);
+	const u8 input[] { 0xab, 0xcd, 0xef, 0x42 };
+	const u8 *cursor = input;
+	writer.write(0, 1, cursor, 0);
+	EXPECT_EQ(cursor, input + 4);
+	return sink.bytes;
+}
+}
+
+TEST(SoftwareRasterizer, ProductionFramebufferPackersEmitExactStoredBytes)
+{
+	FB_W_CTRL_type control {};
+	control.fb_kval = 0x9a;
+	control.fb_alpha_threshold = 0x42;
+	EXPECT_EQ((packTestPixel<FBLineWriter0555<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0x3d, 0xd7 }));
+	EXPECT_EQ((packTestPixel<FBLineWriter565<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0x7d, 0xae }));
+	EXPECT_EQ((packTestPixel<FBLineWriter4444<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0xce, 0x4a }));
+	EXPECT_EQ((packTestPixel<FBLineWriter1555<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0x3d, 0xd7 }));
+	control.fb_alpha_threshold = 0x43;
+	EXPECT_EQ((packTestPixel<FBLineWriter1555<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0x3d, 0x57 }));
+	EXPECT_EQ((packTestPixel<FBLineWriter888<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0xef, 0xcd, 0xab }));
+	EXPECT_EQ((packTestPixel<FBLineWriter0888<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0xef, 0xcd, 0xab, 0x9a }));
+	EXPECT_EQ((packTestPixel<FBLineWriter8888<0, 1, 2, 3, FramebufferPackSink>>(control)),
+			(std::vector<u8> { 0xef, 0xcd, 0xab, 0x42 }));
+}
 
 TEST(SoftwareRasterizer, WrapsTextureWritesAndRowAdvancesWithinVram)
 {

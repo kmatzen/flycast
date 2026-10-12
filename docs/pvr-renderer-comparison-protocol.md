@@ -909,3 +909,12 @@ VRAM images, with zero logged hybrid rejections. The run reached the
 All verified frames were screen writes (`rtt=0`), so this is a live regression
 check for the common framebuffer path, not live coverage of the RTT wrap fix.
 No performance conclusion is drawn from a verifier-enabled run.
+
+Production `FBLineWriter` color packers and their existing rounding helper
+were extracted unchanged into `FramebufferPack.h`, shared by `TexCache.cpp`
+and the standalone tests. A byte-exact regression now invokes those actual
+packers for all seven supported write formats with explicit expected bytes,
+including alpha equal to/below threshold and K substitution. It also verifies
+source cursor advancement. All 133 tests pass on ARM64 and x86_64 Rosetta,
+and the app builds. The storage sink is test-owned, so these checks cover
+production packing but not mapped VRAM side effects or hardware output.
