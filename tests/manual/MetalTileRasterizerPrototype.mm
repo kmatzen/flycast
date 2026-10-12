@@ -267,6 +267,23 @@ int main() {
           actualColors[0] != blend(source, destination, sf, df))
         return 1;
     }
+  {
+    Triangle store = testTriangle(
+        destination, .5f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    store.effects = rend::soft::hybrid::DestinationSelect;
+    Triangle load = testTriangle(
+        source, .75f,
+        rend::soft::hybrid::makeState(7, false, false, false, true, 0, 1, 0));
+    load.effects = rend::soft::hybrid::SourceSelect;
+    std::vector<Triangle> commands{store, load};
+    std::vector<u32> secondary;
+    const rend::soft::hybrid::Frame test{1, 1, &commands, &texture};
+    if (!rend::soft::hybrid::render(test, actualColors, actualDepths, nullptr,
+                                    &secondary) ||
+        actualColors[0] != destination || secondary[0] != destination)
+      return 1;
+  }
   for (u32 mode = 0; mode < 8; ++mode)
     for (float z : {.25f, .5f, .75f}) {
       std::vector<Triangle> commands{

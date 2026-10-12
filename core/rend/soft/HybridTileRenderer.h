@@ -36,6 +36,8 @@ enum EffectBits : u32 {
   UseOffsetColor = 1 << 0,
   BumpMap = 1 << 1,
   VertexFog = 1 << 2,
+  SourceSelect = 1 << 3,
+  DestinationSelect = 1 << 4,
 };
 
 constexpr u32 makeState(u32 depthMode, bool depthWrite, bool textured,
@@ -98,6 +100,7 @@ struct Frame {
   const std::vector<u8> *opaqueMask = nullptr;
   const std::vector<u8> *punchThroughMask = nullptr;
   const std::vector<u8> *translucentMask = nullptr;
+  const std::vector<u32> *initialSecondary = nullptr;
 };
 
 struct Timing {
@@ -110,6 +113,7 @@ struct Timing {
 // depth buffers. False means that Metal is unavailable or the frame violates
 // a checked invariant; callers must use the CPU oracle without partial output.
 bool render(const Frame &frame, std::vector<u32> &colors,
-            std::vector<float> &depths, Timing *timing = nullptr);
+            std::vector<float> &depths, Timing *timing = nullptr,
+            std::vector<u32> *secondaryOutput = nullptr);
 
 } // namespace rend::soft::hybrid

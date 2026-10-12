@@ -247,6 +247,12 @@ void SoftwareRasterizer::restoreColor(const std::vector<Color>& color)
 		colorBuffer_ = color;
 }
 
+void SoftwareRasterizer::restoreSecondary(const std::vector<Color>& secondary)
+{
+	if (secondary.size() == secondaryBuffer_.size())
+		secondaryBuffer_ = secondary;
+}
+
 void SoftwareRasterizer::clearModifierResults()
 {
 	for (u8& stencil : stencilBuffer_)

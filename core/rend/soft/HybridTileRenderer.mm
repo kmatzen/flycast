@@ -24,9 +24,10 @@ struct Constants {
   float fogDensity;
   u32 useModifierMask;
   u32 useInitialDepth;
+  u32 useInitialSecondary;
 };
 
-static_assert(sizeof(Constants) == 36);
+static_assert(sizeof(Constants) == 40);
 
 const char *KernelSource = R"METAL(
 #include <metal_stdlib>
@@ -69,6 +70,7 @@ struct Constants {
     float fogDensity;
     uint useModifierMask;
     uint useInitialDepth;
+    uint useInitialSecondary;
 };
 
 inline long edge(int ax, int ay, int bx, int by, int x, int y)
@@ -299,6 +301,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uchar *opaqueMask [[buffer(11)]],
         const device uchar *punchThroughMask [[buffer(12)]],
         const device uchar *translucentMask [[buffer(13)]],
+        device uint *secondaryColors [[buffer(14)]],
         uint2 pixel [[thread_position_in_grid]])
 {
     if (pixel.x >= constants.width || pixel.y >= constants.height)
@@ -306,6 +309,8 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     const uint offset = pixel.y * constants.width + pixel.x;
     const uint tile = (pixel.y / 32) * constants.tilesX + pixel.x / 32;
     uint color = constants.useInitialColor != 0 ? colors[offset] : 0xff000000u;
+    uint secondary = constants.useInitialSecondary != 0
+            ? secondaryColors[offset] : 0u;
     float depth = depthClearMask[offset] != 0 ? 0.0f
             : (constants.useInitialDepth != 0 ? depths[offset] : 0.0f);
     const int sx = int(pixel.x) * 16 + 8;
@@ -314,6 +319,7 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
     uint sortedColors[MaxSortedFragments];
     float sortedDepths[MaxSortedFragments];
     uint sortedStates[MaxSortedFragments];
+    uint sortedEffects[MaxSortedFragments];
     uint sortedSequences[MaxSortedFragments];
     uint sortedCount = 0;
     for (uint i = tileOffsets[tile]; i < tileOffsets[tile + 1]; ++i) {
@@ -487,12 +493,14 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
                 sortedColors[position] = sortedColors[position - 1];
                 sortedDepths[position] = sortedDepths[position - 1];
                 sortedStates[position] = sortedStates[position - 1];
+                sortedEffects[position] = sortedEffects[position - 1];
                 sortedSequences[position] = sortedSequences[position - 1];
                 --position;
             }
             sortedColors[position] = source;
             sortedDepths[position] = z;
             sortedStates[position] = t.state;
+            sortedEffects[position] = t.effects;
             sortedSequences[position] = triangleIndex;
             continue;
         }
@@ -500,24 +508,41 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
             depth = z;
         const uint sourceFactor = (t.state >> 16) & 7;
         const uint destinationFactor = (t.state >> 19) & 7;
+        const uint blendSource = (t.effects & 8u) != 0 ? secondary : source;
+        const uint blendDestination = (t.effects & 16u) != 0 ? secondary : color;
+        uint result;
         if (sourceFactor == 1 && destinationFactor == 0)
-            color = source;
+            result = blendSource;
         else if (sourceFactor == 4 && destinationFactor == 5)
-            color = sourceAlphaBlend(source, color);
+            result = sourceAlphaBlend(blendSource, blendDestination);
         else
-            color = blend(source, color, sourceFactor, destinationFactor);
+            result = blend(blendSource, blendDestination, sourceFactor, destinationFactor);
+        if ((t.effects & 16u) != 0)
+            secondary = result;
+        else
+            color = result;
     }
     for (uint i = 0; i < sortedCount; ++i) {
         const uint sourceFactor = (sortedStates[i] >> 16) & 7;
         const uint destinationFactor = (sortedStates[i] >> 19) & 7;
+        const uint blendSource = (sortedEffects[i] & 8u) != 0
+                ? secondary : sortedColors[i];
+        const uint blendDestination = (sortedEffects[i] & 16u) != 0
+                ? secondary : color;
+        uint result;
         if (sourceFactor == 1 && destinationFactor == 0)
-            color = sortedColors[i];
+            result = blendSource;
         else if (sourceFactor == 4 && destinationFactor == 5)
-            color = sourceAlphaBlend(sortedColors[i], color);
+            result = sourceAlphaBlend(blendSource, blendDestination);
         else
-            color = blend(sortedColors[i], color, sourceFactor, destinationFactor);
+            result = blend(blendSource, blendDestination, sourceFactor, destinationFactor);
+        if ((sortedEffects[i] & 16u) != 0)
+            secondary = result;
+        else
+            color = result;
     }
     colors[offset] = color;
+    secondaryColors[offset] = secondary;
     depths[offset] = depth;
 }
 )METAL";
@@ -570,7 +595,8 @@ id<MTLBuffer> makeBuffer(id<MTLDevice> device, const std::vector<T> &data) {
 } // namespace
 
 bool render(const Frame &frame, std::vector<u32> &colors,
-            std::vector<float> &depths, Timing *timing) {
+            std::vector<float> &depths, Timing *timing,
+            std::vector<u32> *secondaryOutput) {
   static MetalState metal;
   if (!metal.valid() || frame.width == 0 || frame.height == 0 ||
       frame.triangles == nullptr || frame.triangles->empty() ||
@@ -645,6 +671,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     return false;
   if (frame.initialDepths != nullptr && frame.initialDepths->size() != pixelCount)
     return false;
+  if (frame.initialSecondary != nullptr &&
+      frame.initialSecondary->size() != pixelCount)
+    return false;
   const std::vector<u8> *masks[] = {frame.depthClearMask, frame.opaqueMask,
                                    frame.punchThroughMask, frame.translucentMask};
   for (const std::vector<u8> *mask : masks)
@@ -681,11 +710,15 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   id<MTLBuffer> overflowBuffer =
       [metal.device newBufferWithLength:sizeof(u32)
                                 options:MTLResourceStorageModeShared];
+  id<MTLBuffer> secondaryBuffer =
+      [metal.device newBufferWithLength:pixelCount * sizeof(u32)
+                                options:MTLResourceStorageModeShared];
   if (triangleBuffer == nil || offsetBuffer == nil || referenceBuffer == nil ||
       textureBuffer == nil || colorBuffer == nil || depthBuffer == nil ||
       overflowBuffer == nil || fogBuffer == nil || modifierBuffer == nil ||
       depthClearBuffer == nil || opaqueMaskBuffer == nil ||
-      punchMaskBuffer == nil || translucentMaskBuffer == nil)
+      punchMaskBuffer == nil || translucentMaskBuffer == nil ||
+      secondaryBuffer == nil)
     return false;
   *static_cast<u32 *>(overflowBuffer.contents) = 0;
   if (frame.initialColors != nullptr)
@@ -694,11 +727,15 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   if (frame.initialDepths != nullptr)
     std::memcpy(depthBuffer.contents, frame.initialDepths->data(),
                 pixelCount * sizeof(float));
+  if (frame.initialSecondary != nullptr)
+    std::memcpy(secondaryBuffer.contents, frame.initialSecondary->data(),
+                pixelCount * sizeof(u32));
   const Constants constants{frame.width, frame.height, tilesX,
                             frame.initialColors != nullptr ? 1u : 0u,
                             frame.fogColor, frame.fogVertexColor, frame.fogDensity,
                             frame.modifierMask != nullptr ? 1u : 0u,
-                            frame.initialDepths != nullptr ? 1u : 0u};
+                            frame.initialDepths != nullptr ? 1u : 0u,
+                            frame.initialSecondary != nullptr ? 1u : 0u};
   const auto encodeEnd = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> command = [metal.queue commandBuffer];
@@ -718,6 +755,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   [encoder setBuffer:opaqueMaskBuffer offset:0 atIndex:11];
   [encoder setBuffer:punchMaskBuffer offset:0 atIndex:12];
   [encoder setBuffer:translucentMaskBuffer offset:0 atIndex:13];
+  [encoder setBuffer:secondaryBuffer offset:0 atIndex:14];
   [encoder dispatchThreads:MTLSizeMake(frame.width, frame.height, 1)
       threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
   [encoder endEncoding];
@@ -735,6 +773,11 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   depths.resize(pixelCount);
   std::memcpy(colors.data(), colorBuffer.contents, pixelCount * sizeof(u32));
   std::memcpy(depths.data(), depthBuffer.contents, pixelCount * sizeof(float));
+  if (secondaryOutput != nullptr) {
+    secondaryOutput->resize(pixelCount);
+    std::memcpy(secondaryOutput->data(), secondaryBuffer.contents,
+                pixelCount * sizeof(u32));
+  }
   const auto readbackEnd = std::chrono::steady_clock::now();
   if (timing != nullptr) {
     timing->encodeMilliseconds =

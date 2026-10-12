@@ -174,6 +174,7 @@ public:
 	void clearVisibility();
 	void restoreDepth(const std::vector<float>& depth);
 	void restoreColor(const std::vector<Color>& color);
+	void restoreSecondary(const std::vector<Color>& secondary);
 	void clearModifierResults();
 	void clearDeferredFragments();
 	void resolveDeferredFragments();

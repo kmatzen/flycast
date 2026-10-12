@@ -706,6 +706,8 @@ private:
 		if (state.bumpMap) command.effects |= hybrid::BumpMap;
 		if (state.fogMode == 1 && state.useOffsetColor && !state.bumpMap)
 			command.effects |= hybrid::VertexFog;
+		if (state.srcSelect) command.effects |= hybrid::SourceSelect;
+		if (state.dstSelect) command.effects |= hybrid::DestinationSelect;
 		if (command.mipLevelCount > 1)
 		{
 			auto vertexU = [&](u32 i) { return area1Data ? vertices[i].u1 : vertices[i].u; };
@@ -796,7 +798,7 @@ private:
 						|| candidate.excludeClip
 						|| (candidate.fogMode != 0 && candidate.fogMode != 1
 								&& candidate.fogMode != 2)
-						|| candidate.colorClamp || candidate.srcSelect || candidate.dstSelect
+						|| candidate.colorClamp
 						|| candidate.dither;
 			};
 			const bool hasArea1 = state.shadow && !state.intensityShadow
@@ -864,6 +866,7 @@ private:
 		std::memcpy(accumulation.data(), frameStore.data(), frameStore.size() * sizeof(Color));
 		std::vector<u32> committed = accumulation;
 		std::vector<float> preservedDepth;
+		std::vector<u32> preservedSecondary;
 		RenderPass previous {};
 		size_t totalTriangles = 0;
 		size_t totalTextures = 0;
@@ -916,7 +919,10 @@ private:
 				return false;
 			hybrid::Frame frame { width, height, &commands, &textureAtlas, &accumulation };
 			if (passIndex != 0)
+			{
 				frame.initialDepths = &preservedDepth;
+				frame.initialSecondary = &preservedSecondary;
+			}
 			frame.depthClearMask = &depthClearMask;
 			frame.opaqueMask = &opaqueMask;
 			frame.punchThroughMask = &punchMask;
@@ -933,7 +939,7 @@ private:
 			frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 			std::vector<u32> output;
 			hybrid::Timing timing;
-			if (!hybrid::render(frame, output, preservedDepth, &timing)
+			if (!hybrid::render(frame, output, preservedDepth, &timing, &preservedSecondary)
 					|| output.size() != accumulation.size())
 				return false;
 			accumulation = std::move(output);
@@ -1049,6 +1055,7 @@ private:
 				rasterizer->colorBuffer().size() * sizeof(Color));
 		std::vector<u32> output;
 		std::vector<float> depth;
+		std::vector<u32> secondary;
 		hybrid::Frame frame { width, height, &commands, &textureAtlas, &initial };
 		if (!opaqueMask.empty()) frame.opaqueMask = &opaqueMask;
 		if (!punchMask.empty()) frame.punchThroughMask = &punchMask;
@@ -1064,7 +1071,8 @@ private:
 			static_cast<u8>(rendContext->fog_col_vert.blue() * 255.f), 255 });
 		frame.fogDensity = rendContext->fog_density.get() * config::ExtraDepthScale;
 		hybrid::Timing timing;
-		if (!hybrid::render(frame, output, depth, &timing) || output.size() != frameStore.size())
+		if (!hybrid::render(frame, output, depth, &timing, &secondary)
+				|| output.size() != frameStore.size())
 			return reject("backend-failure");
 		std::vector<u8> modifierMask;
 		if (useOpaqueModifiers)
@@ -1081,7 +1089,7 @@ private:
 				modifierMask[i] = stencil[i] & 1;
 			frame.modifierMask = &modifierMask;
 			hybrid::Timing modifierTiming;
-			if (!hybrid::render(frame, output, depth, &modifierTiming)
+			if (!hybrid::render(frame, output, depth, &modifierTiming, &secondary)
 					|| output.size() != frameStore.size())
 				return reject("modifier-backend-failure");
 			timing.encodeMilliseconds += modifierTiming.encodeMilliseconds;
@@ -1093,11 +1101,13 @@ private:
 		{
 			const auto cpuStart = std::chrono::steady_clock::now();
 			std::vector<Color> opaqueColors(output.size());
+			std::vector<Color> opaqueSecondary(secondary.size());
 			std::memcpy(opaqueColors.data(), output.data(), output.size() * sizeof(u32));
+			std::memcpy(opaqueSecondary.data(), secondary.data(), secondary.size() * sizeof(u32));
 			SoftwareRasterizer translucentRasterizer(width, height);
 			translucentRasterizer.restoreColor(opaqueColors);
 			translucentRasterizer.restoreDepth(depth);
-			translucentRasterizer.clearSecondary();
+			translucentRasterizer.restoreSecondary(opaqueSecondary);
 			SoftwareRasterizer *savedRasterizer = rasterizer;
 			rasterizer = &translucentRasterizer;
 			drawTranslucentPass(0, RenderPass {}, pass, passRegions[0]);
