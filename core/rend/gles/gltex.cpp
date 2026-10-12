@@ -7,6 +7,8 @@
 #include <cstdlib>
 
 GlTextureCache TexCache;
+// Diagnostic override only; restore the prior host state after RTT readback.
+static bool restoreRttHostDither = false;
 void (TextureCacheData::*TextureCacheData::uploadToGpu)(int, int, const u8 *, bool, bool) = &TextureCacheData::UploadToGPUGl2;
 
 static void getOpenGLTexParams(TextureType texType, u32& bytesPerPixel, GLuint& gltype, GLuint& comps, GLuint& internalFormat)
@@ -201,6 +203,12 @@ GLuint BindRTT(bool withDepthBuffer)
 	gl.rtt.framebuffer = std::make_unique<GlFramebuffer>((int)fbw, (int)fbh, withDepthBuffer, texture);
 
 	glViewport(0, 0, fbw, fbh);
+	restoreRttHostDither = false;
+	if (std::getenv("FLYCAST_PVR_DISABLE_RTT_HOST_DITHER") != nullptr)
+	{
+		restoreRttHostDither = glIsEnabled(GL_DITHER) == GL_TRUE;
+		glDisable(GL_DITHER);
+	}
 
 	return gl.rtt.framebuffer->getFramebuffer();
 }
@@ -300,6 +308,11 @@ void ReadRTTBuffer()
 		}
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, gl.ofbo.origFbo);
+	if (restoreRttHostDither)
+	{
+		glEnable(GL_DITHER);
+		restoreRttHostDither = false;
+	}
 }
 
 BaseTextureCacheData *OpenGLRenderer::GetTexture(TSP tsp, TCW tcw, int area)

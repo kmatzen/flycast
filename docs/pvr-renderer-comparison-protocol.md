@@ -1168,3 +1168,16 @@ is therefore enabled independently of the requested PVR bit in this run.
 This is consistent with the spatial color pattern; a controlled host-dither
 toggle is still needed to isolate its causal contribution. The diagnostic
 only queries state, and the normal renderer remains unchanged.
+
+Controlled follow-up adds an opt-in diagnostic override,
+`FLYCAST_PVR_DISABLE_RTT_HOST_DITHER=1`, which disables host dithering only
+for RTT and restores its prior enabled state after readback. It is not a
+default policy change. In `/tmp/pvr-rtt-inputs.jQMwSg/gl-no-host-dither.log`,
+the trace confirms host_dither=0 and the same 5/6/5/0 attachment and
+`adceefff` center readback. All 576 quad pixels become `0xb69e`; the 448
+background pixels remain black, with unchanged guards/padding. Allocation
+SHA-256 is `639d4c0938ea21922828ad16531697df9f04f8fc491b1e6f75968105f26a692c`.
+Captured inputs match the baseline OpenGL run byte-for-byte and in all
+recorded context fields. This isolates host dithering as the source of
+the spatial variation, while the rounded repacking discrepancy remains.
+It still does not establish the original PVR's quantization behavior.
