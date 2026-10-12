@@ -1065,7 +1065,9 @@ private:
 			totalTiming.hardwareVisibilityTiles += timing.hardwareVisibilityTiles;
 			totalTiming.totalTiles += timing.totalTiles;
 			totalTiming.orderedAutosortFrames += timing.orderedAutosortFrames;
-			totalTiming.orderedAutosortRejectReason |= timing.orderedAutosortRejectReason;
+			totalTiming.orderedAutosortTiles += timing.orderedAutosortTiles;
+			totalTiming.orderedAutosortRejectReason |=
+				timing.orderedAutosortRejectReason;
 			totalTiming.opaqueTriangles += timing.opaqueTriangles;
 			totalTiming.punchThroughTriangles += timing.punchThroughTriangles;
 			totalTiming.translucentTriangles += timing.translucentTriangles;
@@ -1073,12 +1075,13 @@ private:
 		}
 			frameStore = std::move(committed);
 			if (trace)
-				std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u/%zu reject=%u lists=%u/%u/%u\n",
+				std::fprintf(stderr, "HYBRID multipass passes=%zu triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u/%zu tiles=%u/%u reject=%u lists=%u/%u/%u\n",
 						rendContext->render_passes.size(), totalTriangles, totalTextures,
 						totalTiming.encodeMilliseconds, totalTiming.gpuMilliseconds,
 						totalTiming.readbackMilliseconds, totalCpuTranslucentMilliseconds,
 						totalTiming.hardwareVisibilityTiles, totalTiming.totalTiles,
 						totalTiming.orderedAutosortFrames, rendContext->render_passes.size(),
+						totalTiming.orderedAutosortTiles, totalTiming.totalTiles,
 						totalTiming.orderedAutosortRejectReason,
 					totalTiming.opaqueTriangles, totalTiming.punchThroughTriangles,
 					totalTiming.translucentTriangles);
@@ -1246,11 +1249,12 @@ private:
 					}
 				}
 		if (trace)
-			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u reject=%u lists=%u/%u/%u\n",
+			std::fprintf(stderr, "HYBRID frame triangles=%zu textures=%zu encode=%.3f gpu=%.3f readback=%.3f cpu_translucent=%.3f visibility_tiles=%u/%u ordered_autosort=%u tiles=%u/%u reject=%u lists=%u/%u/%u\n",
 					commands.size(), textureOffsets.size(), timing.encodeMilliseconds,
 					timing.gpuMilliseconds, timing.readbackMilliseconds,
 					cpuTranslucentMilliseconds, timing.hardwareVisibilityTiles,
 					timing.totalTiles, timing.orderedAutosortFrames,
+					timing.orderedAutosortTiles, timing.totalTiles,
 					timing.orderedAutosortRejectReason, timing.opaqueTriangles,
 					timing.punchThroughTriangles, timing.translucentTriangles);
 		return true;

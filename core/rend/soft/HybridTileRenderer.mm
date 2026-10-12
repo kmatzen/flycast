@@ -888,11 +888,18 @@ bool render(const Frame &frame, std::vector<u32> &colors,
   // Autosort depth is affine over a covered triangle. Its extrema over a tile's
   // sample rectangle are therefore at the rectangle corners; an outward error
   // margin makes these conservative bounds for the float shader arithmetic.
-  // Strictly disjoint bounds prove one exact far-to-near order for the tile.
-  bool orderedAutosort = frame.modifierMask == nullptr;
-  u32 orderedAutosortRejectReason = orderedAutosort ? 0 : 1;
+  // Only triangles with positive-area overlap constrain each other's order:
+  // disjoint triangles (including the shared-edge pair making up a quad) can be
+  // interleaved arbitrarily. Strictly disjoint depth bounds on overlapping
+  // pairs form a partial order that can be resolved once per tile on the CPU.
+  bool orderedAutosort = true;
+  u32 orderedAutosortTiles = 0;
+  u32 orderedAutosortRejectReason = 0;
   std::vector<std::vector<u32>> orderedBins(bins.size());
-  for (size_t tile = 0; tile < bins.size() && orderedAutosort; ++tile) {
+  for (size_t tile = 0; tile < bins.size(); ++tile) {
+    bool tileOrdered = frame.modifierMask == nullptr;
+    if (!tileOrdered)
+      orderedAutosortRejectReason |= 1;
     struct DeferredRange {
       u32 index;
       double minimum;
@@ -909,8 +916,8 @@ bool render(const Frame &frame, std::vector<u32> &colors,
       const Triangle &triangle = (*frame.triangles)[index];
       if ((triangle.state & Autosort) != 0) {
         if (triangle.area1Index != std::numeric_limits<u32>::max()) {
-          orderedAutosort = false;
-          orderedAutosortRejectReason = 2;
+          tileOrdered = false;
+          orderedAutosortRejectReason |= 2;
           break;
         }
         const double area = static_cast<double>(
@@ -950,21 +957,91 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         orderedBins[tile].push_back(index);
       }
     }
-    std::sort(deferred.begin(), deferred.end(), [](const DeferredRange &left,
-                                                   const DeferredRange &right) {
-      return left.minimum < right.minimum;
-    });
-    double previousMaximum = -std::numeric_limits<double>::infinity();
-    for (const DeferredRange &range : deferred) {
-      if (range.minimum <= previousMaximum) {
-        orderedAutosort = false;
-        orderedAutosortRejectReason = 3;
-        break;
+    if (tileOrdered) {
+      auto hasPositiveAreaOverlap = [&](u32 leftIndex, u32 rightIndex) {
+        const Triangle &left = (*frame.triangles)[leftIndex];
+        const Triangle &right = (*frame.triangles)[rightIndex];
+        auto separatedByEdge = [](const Triangle &edgeTriangle,
+                                  const Triangle &other) {
+          for (u32 edge = 0; edge < 3; ++edge) {
+            const u32 next = (edge + 1) % 3;
+            bool allOutsideOrOn = true;
+            for (u32 vertex = 0; vertex < 3; ++vertex) {
+              const s64 value =
+                  (static_cast<s64>(edgeTriangle.x[next]) -
+                   edgeTriangle.x[edge]) *
+                      (static_cast<s64>(other.y[vertex]) -
+                       edgeTriangle.y[edge]) -
+                  (static_cast<s64>(edgeTriangle.y[next]) -
+                   edgeTriangle.y[edge]) *
+                      (static_cast<s64>(other.x[vertex]) -
+                       edgeTriangle.x[edge]);
+              if (value > 0) {
+                allOutsideOrOn = false;
+                break;
+              }
+            }
+            if (allOutsideOrOn)
+              return true;
+          }
+          return false;
+        };
+        return !separatedByEdge(left, right) &&
+               !separatedByEdge(right, left);
+      };
+      std::vector<std::vector<u32>> successors(deferred.size());
+      std::vector<u32> indegrees(deferred.size());
+      for (u32 left = 0; left < deferred.size() && tileOrdered; ++left) {
+        for (u32 right = left + 1; right < deferred.size(); ++right) {
+          if (!hasPositiveAreaOverlap(deferred[left].index,
+                                      deferred[right].index))
+            continue;
+          u32 before;
+          u32 after;
+          if (deferred[left].maximum < deferred[right].minimum) {
+            before = left;
+            after = right;
+          } else if (deferred[right].maximum < deferred[left].minimum) {
+            before = right;
+            after = left;
+          } else {
+            tileOrdered = false;
+            orderedAutosortRejectReason |= 4;
+            break;
+          }
+          successors[before].push_back(after);
+          ++indegrees[after];
+        }
       }
-      previousMaximum = range.maximum;
+      std::vector<u32> resolved;
+      resolved.reserve(deferred.size());
+      while (tileOrdered && resolved.size() != deferred.size()) {
+        u32 selected = static_cast<u32>(deferred.size());
+        for (u32 candidate = 0; candidate < deferred.size(); ++candidate)
+          if (indegrees[candidate] == 0 &&
+              std::find(resolved.begin(), resolved.end(), candidate) ==
+                  resolved.end() &&
+              (selected == deferred.size() ||
+               deferred[candidate].index < deferred[selected].index))
+            selected = candidate;
+        if (selected == deferred.size()) {
+          tileOrdered = false;
+          orderedAutosortRejectReason |= 4;
+          break;
+        }
+        resolved.push_back(selected);
+        for (u32 successor : successors[selected])
+          --indegrees[successor];
+      }
+      if (tileOrdered)
+        for (u32 resolvedIndex : resolved)
+          orderedBins[tile].push_back(deferred[resolvedIndex].index);
     }
-    for (const DeferredRange &range : deferred)
-      orderedBins[tile].push_back(range.index);
+    if (!tileOrdered)
+      for (const DeferredRange &range : deferred)
+        orderedBins[tile].push_back(range.index);
+    orderedAutosortTiles += tileOrdered;
+    orderedAutosort &= tileOrdered;
   }
   const auto &referenceBins = orderedAutosort ? orderedBins : bins;
   for (const auto &bin : referenceBins) {
@@ -1231,6 +1308,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
         hardwareVisibilityTiles.begin(), hardwareVisibilityTiles.end(), u8{1}));
     timing->totalTiles = static_cast<u32>(hardwareVisibilityTiles.size());
     timing->orderedAutosortFrames = orderedAutosort ? 1 : 0;
+    timing->orderedAutosortTiles = orderedAutosortTiles;
     timing->orderedAutosortRejectReason = orderedAutosortRejectReason;
     for (const Triangle &triangle : *frame.triangles) {
       const u32 listType = (triangle.state >> ListTypeShift) & 3;

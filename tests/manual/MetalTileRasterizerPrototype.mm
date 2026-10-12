@@ -413,6 +413,47 @@ int main() {
   }
 
   {
+    const u32 farColor = 0x804080c0u;
+    const u32 nearColor = 0x80c04020u;
+    const u32 state = rend::soft::hybrid::makeState(
+                          6, false, false, false, true, 0, 4, 5) |
+                      rend::soft::hybrid::Autosort;
+    Triangle nearLeft = testTriangle(nearColor, .8f, state);
+    Triangle farLeft = testTriangle(farColor, .2f, state);
+    Triangle nearRight = nearLeft;
+    Triangle farRight = farLeft;
+    for (Triangle *triangle : {&nearLeft, &farLeft, &nearRight, &farRight}) {
+      triangle->maxX = 1;
+      triangle->maxY = 1;
+    }
+    for (Triangle *triangle : {&nearRight, &farRight}) {
+      triangle->x[0] = 32;
+      triangle->y[0] = 32;
+      triangle->x[1] = 0;
+      triangle->y[1] = 32;
+      triangle->x[2] = 32;
+      triangle->y[2] = 0;
+    }
+    // Each same-depth pair shares only an edge. A total depth-range order
+    // cannot classify it, but the exact overlap-aware partial order can.
+    std::vector<Triangle> commands{nearLeft, farLeft, nearRight, farRight};
+    const rend::soft::hybrid::Frame test{2, 2, &commands, &texture};
+    rend::soft::hybrid::Timing partialOrderTiming;
+    std::vector<u32> partialOrderColors;
+    std::vector<float> partialOrderDepths;
+    u32 expected = blend(farColor, 0xff000000u, 4, 5);
+    expected = blend(nearColor, expected, 4, 5);
+    if (!rend::soft::hybrid::render(test, partialOrderColors,
+                                    partialOrderDepths,
+                                    &partialOrderTiming) ||
+        partialOrderTiming.orderedAutosortFrames != 1 ||
+        partialOrderTiming.orderedAutosortTiles != 1 ||
+        !std::all_of(partialOrderColors.begin(), partialOrderColors.end(),
+                     [&](u32 color) { return color == expected; }))
+      return 1;
+  }
+
+  {
     std::array<u32, 128> fogTable{};
     reinterpret_cast<u8 *>(fogTable.data())[0] = 10;
     reinterpret_cast<u8 *>(fogTable.data())[1] = 20;
