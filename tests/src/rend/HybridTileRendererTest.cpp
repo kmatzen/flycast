@@ -1593,4 +1593,65 @@ TEST(HybridTileRenderer, SimpleTranslucentFastPathMatchesOracle)
 	EXPECT_EQ(timing.globalAutosortFrames, 1u);
 	EXPECT_EQ(timing.simpleTranslucentFrames, 1u);
 }
+
+TEST(HybridTileRenderer, AsyncPresentationChainsFramesWithoutCpuUpload)
+{
+	const Color clear { 3, 5, 7, 255 };
+	const Color red { 229, 31, 47, 255 };
+	const Color blue { 23, 71, 233, 255 };
+	const Vertex redA { 0, 0, 1.f, red };
+	const Vertex redB { 16, 0, 1.f, red };
+	const Vertex redC { 0, 16, 1.f, red };
+	const Vertex blueA { 16, 0, 2.f, blue };
+	const Vertex blueB { 16, 16, 2.f, blue };
+	const Vertex blueC { 0, 16, 2.f, blue };
+	const u32 state = hybrid::makeState(6, true, false, false, true, 0, 1, 0);
+	auto redCommand = triangle(redA, redB, redC, state);
+	redCommand.minX = redCommand.minY = 0;
+	redCommand.maxX = redCommand.maxY = 15;
+	auto blueCommand = triangle(blueA, blueB, blueC, state);
+	blueCommand.minX = blueCommand.minY = 0;
+	blueCommand.maxX = blueCommand.maxY = 15;
+	const std::vector<u32> texture { 0xffffffffu };
+	const std::vector<u32> initialColors(256, pack(clear));
+
+	std::vector<hybrid::Triangle> firstCommands { redCommand };
+	hybrid::Frame first { 16, 16, &firstCommands, &texture, &initialColors };
+	hybrid::PresentationSurface firstSurface;
+	ASSERT_TRUE(hybrid::renderAsync(first, firstSurface));
+	ASSERT_NE(firstSurface.handle, nullptr);
+	EXPECT_EQ(firstSurface.width, 16u);
+	EXPECT_EQ(firstSurface.height, 16u);
+	std::vector<u32> firstColors;
+	hybrid::PresentationSurface completedFirst;
+	ASSERT_TRUE(hybrid::copyLatestPresentation(firstColors, &completedFirst));
+	EXPECT_EQ(completedFirst.handle, firstSurface.handle);
+
+	SoftwareRasterizer cpu(16, 16);
+	cpu.clear(clear);
+	PipelineState cpuState;
+	cpuState.depthMode = DepthMode::GreaterOrEqual;
+	cpu.drawTriangle(redA, redB, redC, cpuState);
+	ASSERT_EQ(firstColors.size(), cpu.colorBuffer().size());
+	for (size_t pixel = 0; pixel < firstColors.size(); ++pixel)
+		EXPECT_EQ(firstColors[pixel], pack(cpu.colorBuffer()[pixel]))
+				<< "first frame pixel=" << pixel;
+
+	std::vector<hybrid::Triangle> secondCommands { blueCommand };
+	hybrid::Frame second { 16, 16, &secondCommands, &texture };
+	second.initialPresentation = &completedFirst;
+	hybrid::PresentationSurface secondSurface;
+	ASSERT_TRUE(hybrid::renderAsync(second, secondSurface));
+	ASSERT_NE(secondSurface.handle, nullptr);
+	EXPECT_NE(secondSurface.handle, completedFirst.handle);
+	std::vector<u32> secondColors;
+	ASSERT_TRUE(hybrid::copyLatestPresentation(secondColors));
+
+	cpu.clearDepth();
+	cpu.drawTriangle(blueA, blueB, blueC, cpuState);
+	ASSERT_EQ(secondColors.size(), cpu.colorBuffer().size());
+	for (size_t pixel = 0; pixel < secondColors.size(); ++pixel)
+		EXPECT_EQ(secondColors[pixel], pack(cpu.colorBuffer()[pixel]))
+				<< "second frame pixel=" << pixel;
+}
 #endif
