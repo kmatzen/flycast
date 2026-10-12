@@ -1420,8 +1420,8 @@ private:
 		// already the final display image. Framebuffer emulation must pass through
 		// VRAM write/read conversion, and CPU-completed translucency changes the
 		// readback after Metal produced its surface.
-		const bool usePresentationSurface = !rendContext->isRTT
-				&& !config::EmulateFramebuffer && !cpuTranslucent
+		const bool usePresentationSurface = hybrid::canUseDirectPresentation(
+				rendContext->isRTT, config::EmulateFramebuffer, cpuTranslucent)
 				&& std::getenv("FLYCAST_HYBRID_DISABLE_IOSURFACE") == nullptr;
 		const bool asyncEligible = std::getenv("FLYCAST_HYBRID_ASYNC") != nullptr
 				&& std::getenv("FLYCAST_HYBRID_VERIFY") == nullptr

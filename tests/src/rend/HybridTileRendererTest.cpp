@@ -115,6 +115,19 @@ void expectEqual(const SoftwareRasterizer& cpu, const std::vector<u32>& gpuColor
 
 } // namespace
 
+TEST(HybridTileRenderer, DirectPresentationRequiresFinalDisplayPixels)
+{
+	for (u32 bits = 0; bits < 8; ++bits)
+	{
+		const bool renderToTexture = (bits & 1) != 0;
+		const bool emulateFramebuffer = (bits & 2) != 0;
+		const bool cpuCompletionRequired = (bits & 4) != 0;
+		EXPECT_EQ(hybrid::canUseDirectPresentation(renderToTexture,
+				emulateFramebuffer, cpuCompletionRequired), bits == 0)
+				<< "state=" << bits;
+	}
+}
+
 TEST(HybridTileRenderer, MatchesOracleForOpaqueDepthWinner)
 {
 	SoftwareRasterizer cpu(2, 2);

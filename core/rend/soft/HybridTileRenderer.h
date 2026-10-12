@@ -111,6 +111,15 @@ struct PresentationSurface {
   u32 height = 0;
 };
 
+// A raw accumulation surface is display-ready only when no later PVR or CPU
+// stage can change its pixels. Keep this policy shared and exhaustively tested:
+// direct presentation is an optimization, never a substitute for correctness.
+constexpr bool canUseDirectPresentation(bool renderToTexture,
+                                        bool emulateFramebuffer,
+                                        bool cpuCompletionRequired) {
+  return !renderToTexture && !emulateFramebuffer && !cpuCompletionRequired;
+}
+
 struct Frame {
   u32 width = 0;
   u32 height = 0;
