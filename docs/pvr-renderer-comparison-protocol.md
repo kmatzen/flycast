@@ -334,8 +334,8 @@ Before adopting a hardware scene replay workflow:
    framebuffer format, and addresses are controlled. Capture both inputs and
    output bytes, with console identity and tool/source revisions.
 3. Confirm that the hardware's input is equivalent to the emulator's input.
-   Flycast's current `.processed.vram` dump alone is insufficient: registers
-   are only hashed, palette/context provenance must be retained, and the TA
+   Flycast's `.processed.vram` dump alone is insufficient: the accompanying
+   live register bank is not the latched render context, and the TA
    representation must be checked before attempting a low-level replay.
 4. Compare native packed framebuffer data first. Filtering precision, dither
    phase/order, and blend rounding are the initial probes because current
@@ -345,3 +345,22 @@ Do not import lxdream's scene loader unchanged as a general file loader: the
 inspected implementation trusts section addresses and lengths, and does not
 propagate all load failures before its render call. Any adaptation needs
 bounds/truncation validation and a reviewed register-write allowlist.
+
+### Live register capture
+
+The selected-frame snapshot now writes `<prefix>.<stage>.registers` alongside
+each `.vram` file. This is the complete 32768-byte `pvr_regs` byte array,
+including fog and palette storage, with register offsets matching the emulated
+bank. It is diagnostic data, not a list of registers safe to write to hardware.
+The same single-threaded requirement applies. Both files are created exclusively
+and their independent success flags are logged; an existing file is not
+overwritten. A failed write may leave a partial file and must not be accepted
+as a complete snapshot.
+
+A muted Seaman frame-4 run verified both files at each stage. The log reports
+`registers_saved=1`, `registers_bytes=32768`, and register XXH64
+`f084342605d4c551`, matching the input fingerprint. Both stage register files
+have SHA256 `b0b22b67a8bccb306e034225c02e1ff47de25c8665d965f41bb35f5bef905892`.
+Artifacts: `/tmp/pvr-register-capture.FtdBJw/`. The owned emulator session was
+stopped after capture. Latched context and raw TA capture remain separate work;
+these files do not yet constitute a standalone scene replay.

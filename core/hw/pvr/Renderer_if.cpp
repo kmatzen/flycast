@@ -221,16 +221,22 @@ private:
 					const unsigned long requested = std::strtoul(frame, &end, 10);
 					if (end != frame && *end == '\0' && requested == FrameCount)
 					{
-						const std::string path = std::string(prefix) + "." + stage + ".vram";
-						FILE *file = std::fopen(path.c_str(), "wbx");
-						bool saved = false;
-						if (file != nullptr)
-						{
-							saved = std::fwrite(&vram[0], 1, VRAM_SIZE, file) == VRAM_SIZE;
-							saved = std::fclose(file) == 0 && saved;
-						}
-						std::fprintf(stderr, "PVR_SNAPSHOT stage=%s saved=%u pack=%u dither=%u scaler=%08x stride=%u\n",
-								stage, saved ? 1u : 0u, taContext->rend.fb_W_CTRL.fb_packmode,
+						auto save = [&](const char *extension, const void *data, size_t size) {
+							const std::string path = std::string(prefix) + "." + stage + extension;
+							FILE *file = std::fopen(path.c_str(), "wbx");
+							if (file == nullptr)
+								return false;
+							const bool written = std::fwrite(data, 1, size, file) == size;
+							return std::fclose(file) == 0 && written;
+						};
+						const bool saved = save(".vram", &vram[0], VRAM_SIZE);
+						// Raw byte-addressed live register bank, including fog and palette.
+						// This is not the render context's latched register snapshot.
+						const bool registersSaved = save(".registers", pvr_regs, sizeof(pvr_regs));
+						std::fprintf(stderr, "PVR_SNAPSHOT stage=%s saved=%u registers_saved=%u registers_bytes=%zu registers_hash=%016llx pack=%u dither=%u scaler=%08x stride=%u\n",
+								stage, saved ? 1u : 0u, registersSaved ? 1u : 0u,
+								sizeof(pvr_regs), static_cast<unsigned long long>(XXH64(pvr_regs, sizeof(pvr_regs), 0)),
+								taContext->rend.fb_W_CTRL.fb_packmode,
 								taContext->rend.fb_W_CTRL.fb_dither, taContext->rend.scaler_ctl.full,
 								taContext->rend.fb_W_LINESTRIDE * 8);
 					}
