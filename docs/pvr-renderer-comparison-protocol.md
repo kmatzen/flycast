@@ -2565,3 +2565,14 @@ The live driver's 660-packet fixed-size probe now uploads a nearest-sampled UI
 texture and passes lifecycle checks with two skipped presentations
 (`/tmp/pvr-metal-sampling-driver.log`). This does not yet validate the actual
 VMU overlay in the emulator frontend or establish lossless frame delivery.
+
+The full ARM64 application subsequently built with the sampling extension
+compiled in. Its existing OpenGL injected-error regression passes:
+`/tmp/pvr-metal-sampling-app-regression-20261012/report.json`, with 63 matching
+full-VRAM comparisons before the fault, zero afterward, and zero publications
+or swaps from the paused replacement renderer. Application SHA-256:
+`3695ae4bc10aef3c6be1cb68ae9333f87e2850d631fa443a8f0bc3686236a301`.
+This confirms application linkage and existing-path recovery, not native Metal
+frontend activation. The build still warns that local libpng/libomp binaries
+target newer macOS versions than the application's deployment target; it is
+not evidence of compatibility with older macOS releases.
