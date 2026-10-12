@@ -304,3 +304,44 @@ FLYCAST_HYBRID_ENFORCE_60HZ=1 \
   --gtest_filter=HybridTileRenderer.BenchmarksDreamcastFillRateAnd72LayerStress \
   --gtest_output=xml:/tmp/pvr-render-boundary-benchmark.xml
 ```
+
+### Independent hardware evidence: source audit
+
+Inspected lxdream at commit `b3575f0af9f8251ab37d08c4206d97187c8a0fcd`:
+
+- [test/rendload.c](https://github.com/lxdream/lxdream/blob/b3575f0af9f8251ab37d08c4206d97187c8a0fcd/test/rendload.c)
+  implements a Dreamcast-side scene loader. Its input includes PVR registers,
+  palette words, and VRAM sections. It restores selected registers, starts
+  rendering, waits for completion, and points display scanout at the result.
+- [test/testrend.c](https://github.com/lxdream/lxdream/blob/b3575f0af9f8251ab37d08c4206d97187c8a0fcd/test/testrend.c)
+  submits TA test data and checks events/render completion. Its success result
+  does not compare rendered pixel values. It is a useful starting point for
+  hardware probes, not an existing pixel-conformance oracle.
+- [test/README](https://github.com/lxdream/lxdream/blob/b3575f0af9f8251ab37d08c4206d97187c8a0fcd/test/README)
+  requires an SH4 toolchain; the support library uses dc-load. Neither
+  `sh-elf-gcc` nor `sh4-elf-gcc` was on this workstation's PATH at inspection.
+
+The [ElectronAsh DC_MiSTer project](https://github.com/ElectronAsh/DC_MiSTer)
+explicitly describes its input VRAM dumps as coming from reicast. Those inputs
+may help exercise a renderer, but are not independent Dreamcast pixel outputs.
+No hardware golden framebuffer corpus was established by this audit.
+
+Before adopting a hardware scene replay workflow:
+
+1. Establish a console execution and raw-data retrieval route. A screenshot
+   through analog capture is not a substitute for exact framebuffer bytes.
+2. Start with small synthetic scenes whose registers, texture data, geometry,
+   framebuffer format, and addresses are controlled. Capture both inputs and
+   output bytes, with console identity and tool/source revisions.
+3. Confirm that the hardware's input is equivalent to the emulator's input.
+   Flycast's current `.processed.vram` dump alone is insufficient: registers
+   are only hashed, palette/context provenance must be retained, and the TA
+   representation must be checked before attempting a low-level replay.
+4. Compare native packed framebuffer data first. Filtering precision, dither
+   phase/order, and blend rounding are the initial probes because current
+   OpenGL/software experiments already isolate differences in those areas.
+
+Do not import lxdream's scene loader unchanged as a general file loader: the
+inspected implementation trusts section addresses and lengths, and does not
+propagate all load failures before its render call. Any adaptation needs
+bounds/truncation validation and a reviewed register-write allowlist.
