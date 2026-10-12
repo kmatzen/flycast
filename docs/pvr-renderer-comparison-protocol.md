@@ -2313,3 +2313,28 @@ a fix. Binary SHA-256:
 All runs enabled Metal API validation and included startup; no warmup frames
 were silently removed. This evidence motivates explicit drawable-readiness
 and skipped-presentation handling before native emulator integration.
+
+The probe's `--acknowledged` mode waits for each drawable's presentation
+callback, retrying the same image ID after a zero-time callback. It bounds
+retries to eight across the run and callback waits to two seconds per attempt,
+while pumping window events. It still uses minimum-duration presentation.
+This is a diagnostic serialization experiment, not the intended emulator
+producer policy: blocking the emulation thread on every display callback
+would compromise audio and emulated timing.
+
+The comparison runner also accepts `--acknowledged` as its last argument to
+alternate immediate and acknowledged runs. It distinguishes skipped attempts
+from image IDs that never reached a nonzero presentation time, so a retry
+cannot silently erase the underlying failed attempt.
+
+In `/tmp/pvr-metal-ack-comparison-20261012/report.json`, both acknowledged
+runs retried ID 0 once and delivered all 120 IDs. Their median delivered
+intervals were approximately 33.332 ms, with p95 values of 33.332 and 49.998 ms.
+The immediate runs each lost ID 0 and had approximately 16.666 ms medians.
+Thus serialization fixes the observed loss but fails the 60 Hz objective;
+it must not be promoted as the performance solution. Binary SHA-256:
+`8355beaa83dd3ab64cdd2cec7ab25add441467b823bbba890fc2f5a018255e0f`.
+The first exploratory acknowledged run was slower still (roughly 50 ms
+intervals), reinforcing that this approach lacks adequate cadence.
+The next experiment should distinguish startup readiness from steady-state
+submission instead of waiting on every displayed image.
