@@ -122,6 +122,26 @@ With fingerprinting enabled, `PVR_STAGE` records the whole-VRAM hash after
 flags, and framebuffer write address. It has the same single-threaded
 restriction as the input fingerprints.
 
+### Raw framebuffer comparison
+
+Set `FLYCAST_PVR_SNAPSHOT_PREFIX` alongside the fingerprint option and selected
+page frame to save `<prefix>.processed.vram` and `<prefix>.rendered.vram`.
+These contain the full physical VRAM bytes after each stage. The parent
+directory must exist; files are created exclusively and existing files are
+never overwritten. Check `PVR_SNAPSHOT saved=1` for each completed write.
+The diagnostic also reports packing mode, dithering, scaler register, and stride.
+Snapshots are local investigation artifacts and may contain game data.
+
+Seaman frame 4 captures in `/tmp/pvr-frame4.NgB49X/` confirmed byte-for-byte
+equality of the two `processed.vram` inputs. Both backends reported packing
+mode 1 (RGB565), dithering enabled, scaler `00000401`, and stride 1280 bytes.
+The rendered VRAM files differ in 1,732 aligned 16-bit words. The first is at
+physical offset `00444f02`, the last at `004f0e6a`. Interpreting these words
+as RGB565, maximum absolute error is one native code value in each channel.
+The signed software-minus-OpenGL channel sums are R=410, G=603, B=548.
+This makes dithering and rounding useful next candidates to isolate, without
+establishing either implementation as the hardware-correct result.
+
 The existing screenshot interface is useful for presentation evidence. A shared
 render-context replay/capture boundary is still required for controlled raw
 comparisons across the established backends. First preserve and identify one

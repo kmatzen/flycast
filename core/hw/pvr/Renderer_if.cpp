@@ -207,11 +207,35 @@ private:
 		auto fingerprintStage = [&](const char *stage) {
 			if (std::getenv("FLYCAST_PVR_INPUT_FINGERPRINT") != nullptr
 					&& !config::ThreadedRendering)
+			{
 				std::fprintf(stderr,
 						"PVR_STAGE frame=%u backend=%s stage=%s rtt=%u efb=%u write=%08x vram=%016llx\n",
 						FrameCount, rendererBackend, stage, taContext->rend.isRTT ? 1u : 0u,
 						config::EmulateFramebuffer ? 1u : 0u, taContext->rend.fb_W_SOF1,
 						static_cast<unsigned long long>(XXH64(&vram[0], VRAM_SIZE, 0)));
+				const char *prefix = std::getenv("FLYCAST_PVR_SNAPSHOT_PREFIX");
+				const char *frame = std::getenv("FLYCAST_PVR_INPUT_PAGE_FRAME");
+				if (prefix != nullptr && frame != nullptr)
+				{
+					char *end;
+					const unsigned long requested = std::strtoul(frame, &end, 10);
+					if (end != frame && *end == '\0' && requested == FrameCount)
+					{
+						const std::string path = std::string(prefix) + "." + stage + ".vram";
+						FILE *file = std::fopen(path.c_str(), "wbx");
+						bool saved = false;
+						if (file != nullptr)
+						{
+							saved = std::fwrite(&vram[0], 1, VRAM_SIZE, file) == VRAM_SIZE;
+							saved = std::fclose(file) == 0 && saved;
+						}
+						std::fprintf(stderr, "PVR_SNAPSHOT stage=%s saved=%u pack=%u dither=%u scaler=%08x stride=%u\n",
+								stage, saved ? 1u : 0u, taContext->rend.fb_W_CTRL.fb_packmode,
+								taContext->rend.fb_W_CTRL.fb_dither, taContext->rend.scaler_ctl.full,
+								taContext->rend.fb_W_LINESTRIDE * 8);
+					}
+				}
+			}
 		};
 
 		// Diagnostic only: hash raw inputs before backend-specific processing.
