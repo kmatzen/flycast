@@ -2085,3 +2085,44 @@ VRAM snapshots before recreation and 40 after each. The first paused case
 still records one skipped image state during the verifier-heavy transition;
 these results do not remove that presentation limitation. The app build,
 runner syntax check, and diff whitespace check pass.
+
+### Every-frame changing-content cadence probe
+
+`tests/manual/pvr-cadence-probe` submits 660 simple full-screen opaque quads,
+each with a different color surviving RGB565 packing. The first 60 submissions
+are warmup; the next 600 report progress against KOS VBlank counts. Unlike
+Seaman's repeated image snapshots, this workload can expose omitted visual
+updates even when emulation and audio keep pace. It is a minimal scheduling
+workload, not peak-throughput or original-hardware conformance evidence.
+
+Built with the pinned KallistiOS SDK, its ELF SHA-256 is
+`a41e891d119ab04be49d395fed72448500d18890db377f1f76010bab43ce44ec`.
+Both real-SDL2-audio runs used the decoupled Metal/software path and full
+framebuffer emulation, with differential verification disabled and host sound
+muted. Both reported submitted/VBlank pairs 120/119, 240/239, 360/359,
+480/479, and 600/599, then reached the 660-submission end marker. The one-count
+offset follows from sampling immediately after the last submission. Emulated
+VBlank cadence is separate from wall-clock speed and host swap delivery.
+
+| Run | Image states published | Image states swapped | Image states skipped |
+| --- | ---: | ---: | ---: |
+| Ordinary VSync | 662 | 650 | 12 |
+| VSync disabled | 662 | 662 | 0 |
+
+Logs are `/tmp/pvr-cadence-vsync.log` and `/tmp/pvr-cadence-nosync.log`.
+These content counts include startup and all 660 submissions, not just the
+600-frame measured interval. Current tracing does not identify precisely
+which submission was omitted or whether it was in warmup. The ordinary-VSync
+run therefore does not establish lossless changing-frame delivery. VSync-off
+is a diagnostic comparison, not a tear-free solution. Both apps remained at
+the final static image before normal shutdown, for different durations, so
+raw total snapshot and audio counts are not matched-duration rate comparisons.
+Final audio underruns were three and zero respectively, with zero dropped
+input frames in both runs.
+
+A separate null-audio verifier run (`/tmp/pvr-cadence-verify.log`) completed
+all 660 submissions and compared 660 color frames and 660 full-VRAM snapshots
+with zero mismatches. That run verifies software/Metal agreement, not pacing.
+All three processes stopped normally. This probe makes the remaining
+presentation limitation reproducible without relying on a complex game scene;
+the opt-in scheduling path remains experimental.
