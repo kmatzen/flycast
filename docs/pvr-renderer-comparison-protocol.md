@@ -590,3 +590,14 @@ different settings produce a failed captured-input match. Tests cover missing
 settings and a forced-filtering mismatch. This does not claim that every
 backend-specific setting or environment override is now captured; retain the
 full run command and backend log. The app build and comparator tests pass.
+
+Live schema-2 verification used two muted Seaman frame-4 runs in
+`/tmp/pvr-schema2.wMxwxk/`: prefix `sw` with forced nearest (1), and `default`
+with game-selected filtering (0). Both wrote valid 18468-byte context files.
+The nearest capture reports framebuffer emulation=1, per-strip sorting=0,
+modifiers=1, fog=1, linear interpolation=1, rotation=0, and extra-depth-scale
+bits `1065353216` (1.0f). Its identity comparison passes with configuration
+present. Comparing the two runs exits 1 and identifies exactly
+`config_TextureFiltering` as the differing context field. Both owned emulator
+sessions were stopped after capture. Reports are `identity.json` and
+`filter-mismatch.json` in that directory.
