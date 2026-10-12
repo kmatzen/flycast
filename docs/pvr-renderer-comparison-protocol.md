@@ -2745,3 +2745,29 @@ Both paths again sampled approximately 1x emulated speed. The reversal of the
 apparent audio advantage means these samples do not establish a native Metal
 performance win. No buffer-size increase or audio-backend implementation
 change was made to improve the reported numbers.
+
+### Native paused recreation and injected-error recovery
+
+The lifecycle runner accepts `--native` alongside `--paused` or `--error`.
+Native cases enable Metal validation, require native context activation, and
+require positive-time callbacks after normal recreation. They deliberately
+do not use the GL-only UI readback hook; reports explicitly set
+`uiCompositionChecked: false`. Existing GL mode retains its composition checks.
+
+With unchanged application hash
+`113acb340f95030889307210ac2d4a5c55bff56aee3b9d539b7daf0144c46e4c`,
+Seaman native paused recreation passes at UI frames 480 and 720. Both retain
+the CPU screenshot exactly, report successful retained-frame drawing, create a
+second native context, and resume positive-time presentation callbacks.
+Full-VRAM CPU/Metal comparison counts were 74/41 and 193/40 before/after
+recreation, with no mismatches. Evidence:
+`/tmp/pvr-native-paused-seaman-20261012/report.json`.
+
+The native injected-error case also passes: 63 matching comparisons before
+the frame-64 fault, zero afterward, and a paused replacement renderer with
+zero publications. Evidence: `/tmp/pvr-native-fault-20261012/report.json`.
+The updated runner's existing GL injected-error control passes in
+`/tmp/pvr-native-lifecycle-gl-control-20261012/report.json`.
+These are lifecycle checks, not visual UI-composition, interactive-playthrough,
+audio, or cadence validation. GL delivery counters remain zero in native mode
+and must not be interpreted as native display accounting.

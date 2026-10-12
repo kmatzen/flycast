@@ -4,16 +4,20 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Integration regression, not a performance test or hardware reference.
-const [appArg, gameArg, outputArg, modeArg] = process.argv.slice(2);
-if (process.argv.length < 5 || process.argv.length > 6 || (modeArg && !['--paused', '--error'].includes(modeArg)))
-  throw Error('Usage: node tools/run-pvr-lifecycle.mjs /path/to/Flycast /path/to/game.cue /new/output/directory [--paused|--error]');
-const paused = modeArg === '--paused';
-const injectError = modeArg === '--error';
+const [appArg, gameArg, outputArg, ...options] = process.argv.slice(2);
+if (!appArg || !gameArg || !outputArg || new Set(options).size !== options.length
+    || options.some(x => !['--paused', '--error', '--native'].includes(x))
+    || (options.includes('--paused') && options.includes('--error')))
+  throw Error('Usage: node tools/run-pvr-lifecycle.mjs APP GAME NEW_OUTPUT_DIRECTORY [--paused|--error] [--native]');
+const paused = options.includes('--paused');
+const injectError = options.includes('--error');
+const native = options.includes('--native');
 const app = resolve(appArg), game = resolve(gameArg), output = resolve(outputArg);
 mkdirSync(output);
 const hash = () => createHash('sha256').update(readFileSync(app)).digest('hex');
 const executableHash = hash();
-const report = { schema: 1, app, game, executableHash, paused, injectError, hardwareValidated: false, cases: [] };
+const report = { schema: 1, app, game, executableHash, paused, injectError, native,
+  uiCompositionChecked: !native && (paused || injectError), hardwareValidated: false, cases: [] };
 const successMarker = injectError ? 'PVR_LIFECYCLE renderer_error_recovered running=0 decoupled=1'
   : 'PVR_LIFECYCLE reinit_complete running=1 decoupled=1';
 
@@ -27,18 +31,20 @@ for (const frame of (injectError ? [64] : [480, 720])) {
     FLYCAST_PVR_DECOUPLED_PRESENT: '1', FLYCAST_PVR_TRACE_DELIVERY: '1',
     FLYCAST_PVR_TEST_REINIT_FRAME: String(frame),
   });
+  if (native) Object.assign(env, { FLYCAST_PVR_NATIVE_METAL: '1', MTL_DEBUG_LAYER: '1' });
   if (paused) {
     env.FLYCAST_PVR_TEST_PAUSED_REINIT = '1';
-    env.FLYCAST_PVR_TEST_UI_COMPOSITION = '1';
+    if (!native) env.FLYCAST_PVR_TEST_UI_COMPOSITION = '1';
   }
   if (injectError) {
     delete env.FLYCAST_PVR_TEST_REINIT_FRAME;
     env.FLYCAST_PVR_TEST_RENDER_ERROR = '1';
-    env.FLYCAST_PVR_TEST_UI_COMPOSITION = '1';
+    if (!native) env.FLYCAST_PVR_TEST_UI_COMPOSITION = '1';
   }
   const log = await new Promise((accept, reject) => {
     const child = spawn(app, ['-config', 'audio:backend=null', '-config', 'config:pvr.rend=7',
       '-config', 'config:rend.ThreadedRendering=yes', '-config', 'config:rend.EmulateFramebuffer=yes',
+      ...(native ? ['-config', 'config:rend.LinearInterpolation=no', '-config', 'config:rend.Rotate90=no'] : []),
       '-config', 'config:rend.vsync=yes', game], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let text = '', stopping = false, timedOut = false, forced = false, grace, faultStop;
     const stop = () => {
@@ -79,8 +85,10 @@ for (const frame of (injectError ? [64] : [480, 720])) {
       : count(after) >= 40 && log.includes(`PVR_LIFECYCLE reinit_begin frame=${frame} running=1`))
     && finalReports.length === 2
     && (!injectError || /^PVR_DELIVERY_FINAL published=0 swapped_unique=0 /.test(finalReports[1]))
-    && (!injectError || /PVR_UI_COMPOSITION match=1 bytes=[1-9]/.test(after))
-    && (!paused || /PVR_UI_COMPOSITION match=1 bytes=[1-9]/.test(log))
+    && (!injectError || native || /PVR_UI_COMPOSITION match=1 bytes=[1-9]/.test(after))
+    && (!paused || native || /PVR_UI_COMPOSITION match=1 bytes=[1-9]/.test(log))
+    && (!native || [...log.matchAll(/PVR_METAL_CONTEXT active=1/g)].length === (injectError ? 1 : 2))
+    && (!native || injectError || /PVR_METAL_PRESENT[^\n]*time=[1-9]/.test(after))
     && !log.includes('PVR_UI_COMPOSITION match=0')
     && (!paused || log.includes('PVR_LIFECYCLE paused_reinit running=0 retained=1 drawn=1'))
     && !/HYBRID verify(?:_vram)?[^\n]*mismatches=[1-9]/.test(log)
