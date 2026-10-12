@@ -281,6 +281,58 @@ int main() {
   if (!rend::soft::hybrid::render(orderedOpaqueFrame, orderedColors,
                                   orderedDepths, &orderedOpaqueTiming))
     return 2;
+  std::vector<Triangle> simpleTranslucentTriangles(triangles.begin() + 26,
+                                                    triangles.end());
+  const u32 simpleTranslucentState =
+      rend::soft::hybrid::makeState(6, false, true, true, true, 3, 4, 5) |
+      rend::soft::hybrid::FlipU | rend::soft::hybrid::FlipV |
+      rend::soft::hybrid::TexelSampleCenter |
+      rend::soft::hybrid::Autosort | rend::soft::hybrid::LookupFog |
+      (2u << rend::soft::hybrid::ListTypeShift);
+  for (u32 index = 0; index < simpleTranslucentTriangles.size(); ++index) {
+    Triangle &triangle = simpleTranslucentTriangles[index];
+    triangle.state = simpleTranslucentState;
+    triangle.effects = 0;
+    for (float &z : triangle.z)
+      z = .01f + float(index) * .01f;
+  }
+  const rend::soft::hybrid::Frame simpleTranslucentFrame{
+      Width, Height, &simpleTranslucentTriangles, &texture};
+  std::vector<u32> genericTranslucentColors;
+  std::vector<float> genericTranslucentDepths;
+  std::vector<u32> simpleTranslucentColors;
+  std::vector<float> simpleTranslucentDepths;
+  double genericTranslucentGpu = 0.;
+  double simpleTranslucentGpu = 0.;
+  for (u32 iteration = 0; iteration < 6; ++iteration) {
+    setenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT", "1", 1);
+    rend::soft::hybrid::Timing genericTiming;
+    if (!rend::soft::hybrid::render(simpleTranslucentFrame,
+                                    genericTranslucentColors,
+                                    genericTranslucentDepths,
+                                    &genericTiming))
+      return 2;
+    unsetenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT");
+    rend::soft::hybrid::Timing simpleTiming;
+    if (!rend::soft::hybrid::render(simpleTranslucentFrame,
+                                    simpleTranslucentColors,
+                                    simpleTranslucentDepths,
+                                    &simpleTiming))
+      return 2;
+    if (iteration != 0) {
+      genericTranslucentGpu += genericTiming.gpuExecutionMilliseconds;
+      simpleTranslucentGpu += simpleTiming.gpuExecutionMilliseconds;
+    }
+  }
+  unsetenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT");
+  genericTranslucentGpu /= 5.;
+  simpleTranslucentGpu /= 5.;
+  size_t simpleTranslucentMismatches = 0;
+  for (size_t pixel = 0; pixel < simpleTranslucentColors.size(); ++pixel)
+    simpleTranslucentMismatches +=
+        simpleTranslucentColors[pixel] != genericTranslucentColors[pixel] ||
+        std::memcmp(&simpleTranslucentDepths[pixel],
+                    &genericTranslucentDepths[pixel], sizeof(float)) != 0;
   std::vector<u32> orderedExpectedColors(Width * Height);
   std::vector<float> orderedExpectedDepths(Width * Height);
   rasterizeReference(orderedOpaqueTriangles, texture, orderedExpectedColors,
@@ -715,14 +767,17 @@ int main() {
       "triangles=%zu cpu_ms=%.3f encode_ms=%.3f wait_ms=%.3f gpu_ms=%.3f "
       "opaque_triangles=%zu opaque_gpu_ms=%.3f serial_opaque_gpu_ms=%.3f "
       "ordered_opaque_gpu_ms=%.3f ordered_mismatches=%zu readback_ms=%.3f "
+      "generic_translucent_gpu_ms=%.3f simple_translucent_gpu_ms=%.3f "
+      "simple_translucent_mismatches=%zu "
       "color_mismatches=%zu depth_bit_mismatches=%zu\n",
       triangles.size(), cpuMs, timing.encodeMilliseconds,
       timing.gpuMilliseconds, timing.gpuExecutionMilliseconds,
       opaqueTriangles.size(),
       opaqueTiming.gpuMilliseconds, serialOpaqueTiming.gpuMilliseconds,
       orderedOpaqueTiming.gpuMilliseconds, orderedMismatches,
-      timing.readbackMilliseconds,
+      timing.readbackMilliseconds, genericTranslucentGpu,
+      simpleTranslucentGpu, simpleTranslucentMismatches,
       colorMismatches, depthMismatches);
   return colorMismatches == 0 && depthMismatches == 0 &&
-      orderedMismatches == 0 ? 0 : 1;
+      orderedMismatches == 0 && simpleTranslucentMismatches == 0 ? 0 : 1;
 }

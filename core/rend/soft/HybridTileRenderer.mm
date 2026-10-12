@@ -335,7 +335,8 @@ inline float2 projectedUV(const device Triangle& t, int sx, int sy)
             + t.v[2] * t.z[2] * s2) * inverseQ);
 }
 
-template <uint MaxSortedFragments, bool OrderedAutosort>
+template <uint MaxSortedFragments, bool OrderedAutosort,
+        bool SimpleTranslucent = false>
 kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const device uint *tileOffsets [[buffer(1)]],
         const device uint *tileReferences [[buffer(2)]],
@@ -485,6 +486,56 @@ kernel void rasterTiles(const device Triangle *triangles [[buffer(0)]],
         const float depthZ = t.z[0] * s0 + t.z[1] * s1 + t.z[2] * s2;
         if (!deferredOpaque && !depthTest(t.state, depthZ, depth))
             continue;
+        if (SimpleTranslucent && listType == 2) {
+            const int shadeX = int(pixel.x) * 16 + t.tspSampleOffset;
+            const int shadeY = int(pixel.y) * 16 + t.tspSampleOffset;
+            const float shadeS0 = float(edge(t.x[1], t.y[1], t.x[2], t.y[2],
+                    shadeX, shadeY)) / float(area);
+            const float shadeS1 = float(edge(t.x[2], t.y[2], t.x[0], t.y[0],
+                    shadeX, shadeY)) / float(area);
+            const float shadeS2 = float(edge(t.x[0], t.y[0], t.x[1], t.y[1],
+                    shadeX, shadeY)) / float(area);
+            const float shadeZ = t.z[0] * shadeS0 + t.z[1] * shadeS1
+                    + t.z[2] * shadeS2;
+            const float inverseZ = shadeZ == 0.0f ? 0.0f : 1.0f / shadeZ;
+            float4 interpolated;
+            for (uint component = 0; component < 4; ++component) {
+                const uint shift = component * 8;
+                interpolated[component] =
+                        (float(channel(t.color[0], shift)) * t.z[0] * shadeS0
+                        + float(channel(t.color[1], shift)) * t.z[1] * shadeS1
+                        + float(channel(t.color[2], shift)) * t.z[2] * shadeS2)
+                        * inverseZ;
+            }
+            uint source = packColor(interpolated);
+            const float u = (t.u[0] * t.z[0] * shadeS0
+                    + t.u[1] * t.z[1] * shadeS1
+                    + t.u[2] * t.z[2] * shadeS2) * inverseZ;
+            const float v = (t.v[0] * t.z[0] * shadeS0
+                    + t.v[1] * t.z[1] * shadeS1
+                    + t.v[2] * t.z[2] * shadeS2) * inverseZ;
+            const float pvrD = t.mipLevelCount > 1
+                    ? max(0.0f, shadeZ == 0.0f ? 0.0f
+                            : t.mipNumerator / (shadeZ * shadeZ)) : 1.0f;
+            uint texel = sampleTexture(texture, t, float2(u, v), pvrD);
+            if ((t.state & (1u << 12)) != 0)
+                texel |= 0xff000000u;
+            source = applyTexture(source, texel, 3);
+            const float fog = fogCoefficient(shadeZ, constants.fogDensity,
+                    fogTable);
+            float4 fogged;
+            for (uint component = 0; component < 3; ++component) {
+                const uint shift = component * 8;
+                const float value = float(channel(source, shift));
+                fogged[component] = value
+                        + (float(channel(constants.fogColor, shift)) - value)
+                                * fog;
+            }
+            fogged.w = float(channel(source, 24));
+            source = packColor(fogged);
+            color = sourceAlphaBlend(source, color);
+            continue;
+        }
         const int shadeX = int(pixel.x) * 16 + t.tspSampleOffset;
         const int shadeY = int(pixel.y) * 16 + t.tspSampleOffset;
         const float shadeS0 = float(edge(t.x[1], t.y[1], t.x[2], t.y[2],
@@ -724,6 +775,8 @@ template [[host_name("rasterTiles")]] kernel
     decltype(rasterTiles<64, false>) rasterTiles<64, false>;
 template [[host_name("rasterTilesOrderedAutosort")]] kernel
     decltype(rasterTiles<1, true>) rasterTiles<1, true>;
+template [[host_name("rasterTilesSimpleTranslucent")]] kernel
+    decltype(rasterTiles<1, true, true>) rasterTiles<1, true, true>;
 )METAL";
 
 class MetalState {
@@ -779,7 +832,13 @@ public:
         [library newFunctionWithName:@"rasterTilesOrderedAutosort"];
     orderedAutosortPipeline = [device
         newComputePipelineStateWithFunction:orderedAutosortFunction error:&error];
-    if (pipeline == nil || orderedAutosortPipeline == nil)
+    id<MTLFunction> simpleTranslucentFunction =
+        [library newFunctionWithName:@"rasterTilesSimpleTranslucent"];
+    simpleTranslucentPipeline = [device
+        newComputePipelineStateWithFunction:simpleTranslucentFunction
+                                      error:&error];
+    if (pipeline == nil || orderedAutosortPipeline == nil ||
+        simpleTranslucentPipeline == nil)
       std::fprintf(stderr, "Hybrid Metal compute pipeline: %s\n",
                    error.localizedDescription.UTF8String);
     MTLRenderPipelineDescriptor *visibilityDescriptor =
@@ -792,6 +851,7 @@ public:
     visibilityPipeline = [device
         newRenderPipelineStateWithDescriptor:visibilityDescriptor error:&error];
     if (pipeline != nil && orderedAutosortPipeline != nil &&
+        simpleTranslucentPipeline != nil &&
         visibilityPipeline != nil)
       queue = [device newCommandQueue];
   }
@@ -848,6 +908,7 @@ public:
   id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> pipeline = nil;
   id<MTLComputePipelineState> orderedAutosortPipeline = nil;
+  id<MTLComputePipelineState> simpleTranslucentPipeline = nil;
   id<MTLRenderPipelineState> visibilityPipeline = nil;
 
 private:
@@ -1141,6 +1202,20 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     for (u32 successor : globalSuccessors[selected])
       --globalIndegrees[successor];
   }
+  constexpr u32 SimpleTranslucentVariable = ClampU | ClampV | FlipU | FlipV |
+      TexelSampleCenter | IgnoreTextureAlpha;
+  constexpr u32 SimpleTranslucentFixed = 6 | Textured | Bilinear | UseAlpha |
+      (3u << ShadingInstructionShift) | (4u << SourceBlendShift) |
+      (5u << DestinationBlendShift) | Autosort | LookupFog |
+      (2u << ListTypeShift);
+  bool simpleTranslucent = globalAutosort && globalActiveCount != 0 &&
+      std::getenv("FLYCAST_HYBRID_DISABLE_SIMPLE_TRANSLUCENT") == nullptr;
+  for (const Triangle &triangle : *frame.triangles)
+    if (((triangle.state >> ListTypeShift) & 3) == 2 &&
+        ((triangle.state & ~SimpleTranslucentVariable) !=
+             SimpleTranslucentFixed ||
+         triangle.effects != 0))
+      simpleTranslucent = false;
   const auto &referenceBins = orderedAutosort ? orderedBins : bins;
   for (const auto &bin : referenceBins) {
     tileReferences.insert(tileReferences.end(), bin.begin(), bin.end());
@@ -1343,8 +1418,9 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     [visibilityEncoder endEncoding];
   }
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  [encoder setComputePipelineState:orderedAutosort
-      ? metal.orderedAutosortPipeline : metal.pipeline];
+  [encoder setComputePipelineState:simpleTranslucent
+      ? metal.simpleTranslucentPipeline
+      : (orderedAutosort ? metal.orderedAutosortPipeline : metal.pipeline)];
   [encoder setBuffer:triangleBuffer offset:0 atIndex:0];
   [encoder setBuffer:offsetBuffer offset:0 atIndex:1];
   [encoder setBuffer:referenceBuffer offset:0 atIndex:2];
@@ -1402,6 +1478,7 @@ bool render(const Frame &frame, std::vector<u32> &colors,
     timing->orderedAutosortFrames = orderedAutosort ? 1 : 0;
     timing->orderedAutosortTiles = orderedAutosortTiles;
     timing->globalAutosortFrames = globalAutosort ? 1 : 0;
+    timing->simpleTranslucentFrames = simpleTranslucent ? 1 : 0;
     timing->orderedAutosortRejectReason = orderedAutosortRejectReason;
     for (const Triangle &triangle : *frame.triangles) {
       const u32 listType = (triangle.state >> ListTypeShift) & 3;
