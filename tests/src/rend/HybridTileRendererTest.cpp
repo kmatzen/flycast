@@ -136,6 +136,54 @@ TEST(HybridTileRenderer, MatchesOracleForOpaqueDepthWinner)
 	expectEqual(cpu, colors, depths);
 }
 
+TEST(HybridTileRenderer, RejectsMalformedCommandsWithoutPoisoningBackend)
+{
+	const Color white { 255, 255, 255, 255 };
+	const Vertex a { 0, 0, 1.f, white, {}, 0, 0 };
+	const Vertex b { 2, 0, 1.f, white, {}, 1, 0 };
+	const Vertex c { 0, 2, 1.f, white, {}, 0, 1 };
+	const u32 state = hybrid::makeState(7, true, true, false, true, 0, 1, 0);
+	const hybrid::Triangle valid = triangle(a, b, c, state);
+	const std::vector<u32> texture { pack(white) };
+	auto rejected = [&](hybrid::Triangle command) {
+		command.textureWidth = command.textureHeight = 1;
+		command.mipLevelCount = 1;
+		std::vector<hybrid::Triangle> commands { command };
+		hybrid::Frame frame { 2, 2, &commands, &texture };
+		std::vector<u32> colors { 0x12345678u };
+		std::vector<float> depths { 123.f };
+		EXPECT_FALSE(hybrid::render(frame, colors, depths));
+		EXPECT_EQ(colors, std::vector<u32>({ 0x12345678u }));
+		EXPECT_EQ(depths, std::vector<float>({ 123.f }));
+	};
+	auto malformed = valid;
+	malformed.z[0] = std::numeric_limits<float>::infinity();
+	rejected(malformed);
+	malformed = valid;
+	malformed.u[1] = std::numeric_limits<float>::quiet_NaN();
+	rejected(malformed);
+	malformed = valid;
+	malformed.minX = -1;
+	rejected(malformed);
+	malformed = valid;
+	malformed.shadeScale = 257;
+	rejected(malformed);
+	malformed = valid;
+	malformed.area1Index = 99;
+	rejected(malformed);
+
+	// Validation failures must not consume or corrupt a reusable Metal frame
+	// slot. A valid command immediately following them still has to execute.
+	malformed = valid;
+	malformed.textureWidth = malformed.textureHeight = 1;
+	malformed.mipLevelCount = 1;
+	std::vector<hybrid::Triangle> commands { malformed };
+	hybrid::Frame frame { 2, 2, &commands, &texture };
+	std::vector<u32> colors;
+	std::vector<float> depths;
+	ASSERT_TRUE(hybrid::render(frame, colors, depths));
+}
+
 TEST(HybridTileRenderer, MatchesOracleForAutosortedAlphaBlend)
 {
 	SoftwareRasterizer cpu(2, 2);

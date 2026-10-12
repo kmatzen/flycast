@@ -840,6 +840,14 @@ private:
 				{ sourceB.x, sourceB.y, sourceB.z }, { sourceC.x, sourceC.y, sourceC.z }))
 			return true;
 		Vertex vertices[3] { convertVertex(sourceA), convertVertex(sourceB), convertVertex(sourceC) };
+		// CullMode::None deliberately bypasses determinant validation, but the
+		// software oracle still discards non-finite positions before fixed-point
+		// conversion. Mirror that behavior here instead of converting NaN/Inf to
+		// an implementation-defined integer while encoding the Metal command.
+		for (const Vertex& vertex : vertices)
+			if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y)
+					|| !std::isfinite(vertex.z))
+				return true;
 		const Vertex flatVertex = vertices[2];
 		s32 x[3] { hybridFixed(vertices[0].x), hybridFixed(vertices[1].x), hybridFixed(vertices[2].x) };
 		s32 y[3] { hybridFixed(vertices[0].y), hybridFixed(vertices[1].y), hybridFixed(vertices[2].y) };
